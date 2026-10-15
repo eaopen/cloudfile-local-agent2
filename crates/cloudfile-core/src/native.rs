@@ -669,24 +669,39 @@ mod tests {
         let (_dir, base) = crate::storage::test_root();
         let root = base.as_path();
         let file = root.join("document.cloudfile");
-        std::fs::write(&file, serde_json::to_vec(&json!({
-            "protocol":"cloudfile-local/v2","server":"https://example.com",
-            "ticket":"one-time-ticket","expires_at":crate::now()+60
-        })).unwrap()).unwrap();
+        std::fs::write(
+            &file,
+            serde_json::to_vec(&json!({
+                "protocol":"cloudfile-local/v2","server":"https://example.com",
+                "ticket":"one-time-ticket","expires_at":crate::now()+60
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         match parse_handoff(&file.to_string_lossy()).unwrap() {
-            wire::Request::Open { protocol, ticket, .. } => {
+            wire::Request::Open {
+                protocol, ticket, ..
+            } => {
                 assert_eq!(protocol, "cloudfile-local/v2");
                 assert_eq!(ticket, "one-time-ticket");
             }
             _ => panic!("not an inline session"),
         }
-        assert_eq!(open_session_file(root, &file.to_string_lossy())["ok"], false);
+        assert_eq!(
+            open_session_file(root, &file.to_string_lossy())["ok"],
+            false
+        );
         std::fs::write(&file, b"not-json").unwrap();
         assert!(parse_handoff(&file.to_string_lossy()).is_err());
-        std::fs::write(&file, serde_json::to_vec(&json!({
-            "protocol":"cloudfile-local/v2","server":"https://example.com",
-            "ticket":"one-time-ticket","expires_at":crate::now()-1
-        })).unwrap()).unwrap();
+        std::fs::write(
+            &file,
+            serde_json::to_vec(&json!({
+                "protocol":"cloudfile-local/v2","server":"https://example.com",
+                "ticket":"one-time-ticket","expires_at":crate::now()-1
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         assert!(parse_handoff(&file.to_string_lossy()).is_err());
     }
 

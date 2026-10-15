@@ -440,12 +440,27 @@ fn query_only_does_not_publish_a_prepared_intent_until_explicit_retry() {
     let lease = journal::lease(&root, &task.task_id).unwrap().unwrap();
     exclusive::prepare(&client, &lease, &intent).unwrap();
     std::fs::write(&path, b"later working copy").unwrap();
-    assert_eq!(exclusive::recover_with(&root, &task.task_id, &client).unwrap()["state"], "pending");
+    assert_eq!(
+        exclusive::recover_with(&root, &task.task_id, &client).unwrap()["state"],
+        "pending"
+    );
     assert!(server.state.lock().unwrap().uploads.is_empty());
-    assert_eq!(journal::pending(&root, &task.task_id).unwrap().unwrap().intent_id, intent.intent_id);
+    assert_eq!(
+        journal::pending(&root, &task.task_id)
+            .unwrap()
+            .unwrap()
+            .intent_id,
+        intent.intent_id
+    );
     // A distinct explicit action retries only the previous frozen snapshot.
-    assert_eq!(exclusive::retry_with(&root, &task.task_id, &client).unwrap()["state"], "published");
-    assert_eq!(server.state.lock().unwrap().uploads, vec![b"original frozen bytes".to_vec()]);
+    assert_eq!(
+        exclusive::retry_with(&root, &task.task_id, &client).unwrap()["state"],
+        "published"
+    );
+    assert_eq!(
+        server.state.lock().unwrap().uploads,
+        vec![b"original frozen bytes".to_vec()]
+    );
     assert_eq!(std::fs::read(&path).unwrap(), b"later working copy");
     assert!(journal::pending(&root, &task.task_id).unwrap().is_none());
 }
