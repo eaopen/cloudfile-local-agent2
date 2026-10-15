@@ -92,8 +92,11 @@ pub fn service_path(root: &Path, server: &str) -> Result<String> {
     }
     Ok(prefix)
 }
-pub fn trust(root: &Path, raw: String) -> Result<()> {
-    let parsed = Url::parse(&raw)?;
+/// Split a canonical service address into its trust origin and deployment
+/// path. The origin is the only thing ever trusted; the path only locates the
+/// CloudFile API inside an already canonical origin.
+pub fn address(raw: &str) -> Result<(String, String)> {
+    let parsed = Url::parse(raw)?;
     let server = parsed.origin().ascii_serialization();
     origin(&server)?;
     let prefix = parsed.path().trim_end_matches('/');
@@ -104,6 +107,10 @@ pub fn trust(root: &Path, raw: String) -> Result<()> {
     {
         bail!("canonical service address required");
     }
+    Ok((server, prefix.to_string()))
+}
+pub fn trust(root: &Path, raw: String) -> Result<()> {
+    let (server, prefix) = address(&raw)?;
     let _lock = storage::lock(&root.join("config.lock"))?;
     let mut cfg = config(root)?;
     if !cfg.allowed_origins.contains(&server) {
@@ -112,7 +119,7 @@ pub fn trust(root: &Path, raw: String) -> Result<()> {
     // Re-adding the origin must not erase a known deployment path. A paired
     // device is origin-bound; an EAP portal root is not the CloudFile API root.
     if !prefix.is_empty() || !cfg.service_paths.contains_key(&server) {
-        cfg.service_paths.insert(server, prefix.into());
+        cfg.service_paths.insert(server, prefix);
     }
     storage::write(&root.join("config.json"), &cfg)
 }

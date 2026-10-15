@@ -10,6 +10,14 @@ pub enum Request {
     OpenUri { uri: String },
     #[serde(rename = "pair_enrollment")]
     PairEnrollment { server: String },
+    /// First local-edit action from a trusted page: verify the instance, then
+    /// start the short-lived enrollment the page signs with pair_sign.
+    #[serde(rename = "pair_prepare")]
+    PairPrepare {
+        server: String,
+        #[serde(default)]
+        service_path: String,
+    },
     #[serde(rename = "pair_sign")]
     PairSign { server: String, response: Value },
     #[serde(rename = "pair_confirm")]
@@ -116,6 +124,23 @@ mod tests {
         assert!(read(&mut &bytes[..bytes.len() - 1]).is_err());
         assert!(read(&mut &u32::MAX.to_ne_bytes()[..]).is_err());
         assert!(read(&mut &[][..]).unwrap().is_none());
+    }
+    #[test]
+    fn pair_prepare_accepts_an_optional_deployment_path() {
+        assert!(matches!(
+            serde_json::from_value::<Request>(
+                json!({"type":"pair_prepare","server":"https://example.com"})
+            )
+            .unwrap(),
+            Request::PairPrepare { service_path, .. } if service_path.is_empty()
+        ));
+        assert!(matches!(
+            serde_json::from_value::<Request>(
+                json!({"type":"pair_prepare","server":"https://example.com","service_path":"/seafile"})
+            )
+            .unwrap(),
+            Request::PairPrepare { service_path, .. } if service_path == "/seafile"
+        ));
     }
     #[test]
     fn reject_browser_paths() {

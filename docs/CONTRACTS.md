@@ -18,6 +18,8 @@ Go Agent2 没有正式发行，因此不要求 Go 数据升级、Go Journal 读�
 
 当前扩展使用 `status`、`open_uri`、`open_session`、`task_summary`、`focus_task`、`query_local_file`、`query_local_folder`、`open_workspace`、`check_update`、`update`、`update_extension`，以及与设备配对有关的受信流程。Rust 可按实际产品契约逐一实现或明确拒绝不支持的操作；正式替代门禁必须检查现有 Chrome 页面及 popup 的真实调用，不可只通过 Native Host 的 `status` 证明兼容。
 
+设备配对沿用 `pair_enrollment`/`pair_sign`/`pair_confirm`，另加受控的 `pair_prepare`：由已登录页面的首次本地编辑触发，先由 Agent 探测该地址确为启用 `local.open-edit` 的 CloudFile 实例，再复用 `device::begin()` 建立短时待配对密钥。配对仍由页面的 `pair-start`/`pair-confirm` 完成，Agent 不单独完成注册；Cookie/token/sessionid 不进入 Native Host。
+
 不需要为未发布 Go 的私有 CLI/Journal 或从未启用的实验消息制作兼容适配。正式已用旧版页面操作不应因 Rust 替代而消失。
 
 ## Server 与编辑

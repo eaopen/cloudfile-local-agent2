@@ -358,6 +358,16 @@ fn forward(root: &Path, request: wire::Request) -> Value {
                         "service_path":session::service_path(root,&server).unwrap_or_default()}),
                     Err(error) => wire::error(&error.to_string()),
                 },
+                wire::Request::PairPrepare {
+                    server,
+                    service_path,
+                } => match device::prepare(root, &server, &service_path) {
+                    Ok(mut value) => {
+                        value["ok"] = json!(true);
+                        value
+                    }
+                    Err(error) => wire::error(&error.to_string()),
+                },
                 wire::Request::PairSign { server, response } => {
                     match device::pair_sign(root, &server, response) {
                         Ok(value) => json!({"ok":true,"proof":value}),

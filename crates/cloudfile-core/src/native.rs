@@ -25,6 +25,12 @@ const CAP_OPEN_WORKSPACE: &str = "open_workspace";
 const CAP_QUERY_LOCAL_FILE: &str = "query_local_file";
 const CAP_QUERY_LOCAL_FOLDER: &str = "query_local_folder";
 const CAP_UPDATE: &str = "update";
+/// First-use pairing from an already authenticated page. These are advertised
+/// even before any origin is trusted: establishing that trust is their job,
+/// and the page still finishes the handshake with pair-start/pair-confirm.
+const CAP_PAIR_PREPARE: &str = "pair_prepare";
+const CAP_PAIR_SIGN: &str = "pair_sign";
+const CAP_PAIR_CONFIRM: &str = "pair_confirm";
 
 fn configured(root: &Path) -> bool {
     session::config(root)
@@ -43,7 +49,13 @@ fn update_configured(root: &Path) -> bool {
 /// Only capabilities the agent can really serve right now are advertised: the
 /// browser gates each operation on this list.
 pub fn capabilities(root: &Path) -> Vec<String> {
-    let mut list = vec![CAP_OPEN_URI.to_string(), CAP_TASK_SUMMARY.to_string()];
+    let mut list = vec![
+        CAP_OPEN_URI.to_string(),
+        CAP_TASK_SUMMARY.to_string(),
+        CAP_PAIR_PREPARE.to_string(),
+        CAP_PAIR_SIGN.to_string(),
+        CAP_PAIR_CONFIRM.to_string(),
+    ];
     list.push(CAP_FOCUS_TASK.to_string());
     list.push(CAP_CHECK_UPDATE.to_string());
     if update_configured(root) {
@@ -455,6 +467,10 @@ mod tests {
         assert!(bare.contains(&"check_update".to_string()));
         assert!(!bare.contains(&"query_local_file".to_string()));
         assert!(!bare.contains(&"open_session".to_string()));
+        // First-use pairing must be available before any origin is trusted.
+        for expected in ["pair_prepare", "pair_sign", "pair_confirm"] {
+            assert!(bare.contains(&expected.to_string()), "{expected} missing");
+        }
         // No pinned source means no browser-triggered upgrade.
         assert!(!bare.contains(&"update".to_string()));
         session::trust(root, "https://example.com".into()).unwrap();

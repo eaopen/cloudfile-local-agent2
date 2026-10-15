@@ -418,10 +418,11 @@ mod tests {
     }
 }
 
-/// Read-only readiness probe before creating a local pairing credential.
-pub fn preflight(root: &Path, server: &str) -> Result<()> {
-    trusted(root, server)?;
-    let prefix = session::service_path(root, server)?;
+/// Read-only server identity probe. It proves the address serves a CloudFile
+/// deployment that enabled Agent device editing and exposes the device
+/// management route; it creates no credential and trusts nothing by itself.
+fn probe(address: &str) -> Result<()> {
+    let (server, prefix) = session::address(address)?;
     let http = reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(10))
@@ -446,4 +447,49 @@ pub fn preflight(root: &Path, server: &str) -> Result<()> {
         bail!("服务尚未开放设备配对接口；未创建配对密钥");
     }
     Ok(())
+}
+
+/// Read-only readiness probe before creating a local pairing credential.
+pub fn preflight(root: &Path, server: &str) -> Result<()> {
+    trusted(root, server)?;
+    let prefix = session::service_path(root, server)?;
+    probe(&format!("{server}{prefix}"))
+}
+
+/// Browser first-local-edit trust decision. The page is already the
+/// authenticated user; this only earns the Agent's origin trust by proving the
+/// address is a real CloudFile instance, then remembers the deployment path.
+/// Pairing itself still finishes through pair-start/pair-confirm, never here.
+pub fn verify_and_trust(root: &Path, server: &str, service_path: &str) -> Result<()> {
+    session::origin(server)?;
+    if !session::valid_service_path(service_path) {
+        bail!("invalid service path");
+    }
+    let path = service_path.trim_end_matches('/');
+    if trusted(root, server).is_ok() {
+        // An established deployment path is authoritative: a page must not
+        // silently move an already trusted instance to another prefix.
+        if !path.is_empty() && session::service_path(root, server)? != path {
+            bail!("此服务已按其他部署路径受信任，请从正确入口重新打开");
+        }
+        return Ok(());
+    }
+    probe(&format!("{server}{path}"))?;
+    session::trust(root, format!("{server}{path}"))
+}
+
+/// First local-edit preparation: verify and remember the instance, then create
+/// the short-lived local enrollment key the trusted page signs with. A device
+/// that is already paired is reused; nothing is re-registered.
+pub fn prepare(root: &Path, server: &str, service_path: &str) -> Result<Value> {
+    verify_and_trust(root, server, service_path)?;
+    if let Ok(pairing) = paired(root, server) {
+        return Ok(json!({"state":"paired","device_id":pairing.device_id,
+            "service_path":session::service_path(root,server)?}));
+    }
+    begin(root, server)?;
+    Ok(
+        json!({"state":"pending","enrollment":enrollment(root, server)?,
+        "service_path":session::service_path(root,server)?}),
+    )
 }
