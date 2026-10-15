@@ -228,6 +228,10 @@ fn setup(
 ) {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().canonicalize().unwrap();
+    cloudfile_core::settings::update(&root, |s| {
+        s.workspace_root = Some(root.join("working-copies").to_string_lossy().into_owned());
+    })
+    .unwrap();
     let key = SigningKey::from_slice(&[1u8; 32]).unwrap();
     let server = Server::start(&key, scenario);
     let client = Client::with_key(&server.origin, DID, SID, key)
@@ -244,6 +248,13 @@ fn setup(
         &client,
     )
     .unwrap();
+    assert!(session::local_path(&root, &task)
+        .unwrap()
+        .starts_with(root.join("working-copies")));
+    assert!(session::task_dir(&root, &task.task_id)
+        .unwrap()
+        .join("task.json")
+        .is_file());
     (tmp, root, server, client, task)
 }
 #[test]
@@ -483,7 +494,7 @@ fn uncertain_automatic_upload_pauses_across_restart_and_never_resends() {
         );
         assert_eq!(
             std::fs::read(
-                path.parent()
+                session::task_dir(&root, &task.task_id)
                     .unwrap()
                     .join(format!("{}.snapshot", intent.intent_id))
             )
@@ -656,7 +667,13 @@ fn legacy_and_read_only_tasks_are_never_automatically_uploaded() {
     for mode in ["local-edit", "local-view"] {
         task.mode = mode.into();
         task.device_id = None;
-        cloudfile_core::storage::write(&path.parent().unwrap().join("task.json"), &task).unwrap();
+        cloudfile_core::storage::write(
+            &session::task_dir(&root, &task.task_id)
+                .unwrap()
+                .join("task.json"),
+            &task,
+        )
+        .unwrap();
         let mut observer = cloudfile_core::auto_upload::Observer::default();
         for time in [0, 10_000] {
             observer

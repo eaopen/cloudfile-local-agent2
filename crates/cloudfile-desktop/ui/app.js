@@ -18,6 +18,121 @@ const hostState = document.querySelector('#host-state');
 let busy = new Set();
 let refreshing = false;
 let lastAssessment = null;
+let lastSummary = null;
+let services = null;
+let component = null;
+let welcomeKey = null;
+
+const VIEWS = {
+  tasks: ['本地任务', '查看编辑进度，处理需要确认的任务。'],
+  services: ['服务连接', '管理 CloudFile 服务，查看设备连接状态。'],
+  settings: ['设置', '按你的习惯安排本地工作。'],
+};
+
+function setView(name) {
+  if (!VIEWS[name]) return;
+  message.textContent = '';
+  for (const key of Object.keys(VIEWS)) {
+    document.querySelector(`#view-${key}`).hidden = key !== name;
+  }
+  for (const item of document.querySelectorAll('[data-view]')) {
+    const selected = item.dataset.view === name;
+    item.classList.toggle('selected', selected);
+    if (selected) item.setAttribute('aria-current', 'page');
+    else item.removeAttribute('aria-current');
+  }
+  document.querySelector('#page-title').textContent = VIEWS[name][0];
+  document.querySelector('#page-description').textContent = VIEWS[name][1];
+  document.querySelector('.header-actions').hidden = name !== 'tasks';
+  document.querySelector('main').scrollTop = 0;
+}
+
+async function openWorkspace() {
+  try {
+    await invoke('open_workspace');
+    say('已打开工作目录。');
+  } catch (error) { say(String(error)); }
+}
+
+// First-use guidance reflects the desktop's service/registration records only.
+// It never invents a paired device or starts pairing merely by opening a view.
+function renderWelcome() {
+  if (!lastSummary || lastSummary.tasks.length) return;
+  const key = JSON.stringify([services, component?.registered_host]);
+  // Keep keyboard focus on onboarding actions during periodic status refreshes.
+  if (tasks.firstElementChild?.classList.contains('welcome') && welcomeKey === key) return;
+  welcomeKey = key;
+  tasks.replaceChildren();
+  if (services === null || component === null) {
+    const loading = document.createElement('p');
+    loading.className = 'empty';
+    loading.textContent = '正在读取服务与任务状态…';
+    tasks.append(loading);
+    return;
+  }
+  const paired = services.some((service) => service.state === 'paired');
+  const registered = Boolean(component.registered_host?.registered && !component.registered_host.foreign);
+  const ready = paired && registered;
+  const card = document.createElement('section');
+  card.className = 'welcome';
+  const icon = document.createElement('div');
+  icon.className = 'welcome-icon';
+  icon.setAttribute('aria-hidden', 'true');
+  icon.textContent = ready ? '✓' : '↗';
+  const heading = document.createElement('h2');
+  heading.textContent = ready ? '已准备好，开始本地编辑' : '让云端文件，在本机应用中打开';
+  const description = document.createElement('p');
+  description.textContent = ready
+    ? '从 CloudFile 网页选择文件，点击“本地编辑”。文件会在本机打开，编辑进度与需要处理的事项将在这里显示。'
+    : '完成服务与浏览器连接后，就能使用熟悉的 Office、CAD 等本机应用处理文件。';
+  const actions = document.createElement('div');
+  actions.className = 'welcome-actions';
+  if (ready) {
+    actions.append(button('打开工作目录', openWorkspace));
+    actions.append(button('查看服务连接', () => setView('services'), { secondary: true }));
+  } else if (!services.length) {
+    actions.append(button('添加 CloudFile 服务', () => {
+      setView('services'); document.querySelector('#origin').focus();
+    }));
+  } else if (!registered) {
+    actions.append(button('检查浏览器连接', () => {
+      setView('settings'); document.querySelector('.advanced').open = true;
+      document.querySelector('#extension-id').focus();
+    }));
+  } else {
+    actions.append(button('查看连接步骤', () => {
+      document.querySelector('#task-help').open = true;
+      document.querySelector('#task-help').scrollIntoView({ block: 'nearest' });
+    }));
+    actions.append(button('管理服务', () => setView('services'), { secondary: true }));
+  }
+  card.append(icon, heading, description, actions);
+  if (ready) {
+    const note = document.createElement('p');
+    note.className = 'ready-note';
+    note.textContent = '暂时没有编辑任务。普通编辑在本机保存后自动上传，独占编辑由你手动提交。';
+    card.append(note);
+  } else {
+    const steps = document.createElement('div');
+    steps.className = 'setup-steps';
+    for (const [index, title, description, complete] of [
+      [1, '添加服务', services.length ? '已保存组织网盘地址' : '填写组织提供的网盘地址', services.length > 0],
+      [2, '检查浏览器连接', registered ? '本机连接组件已注册' : '安装扩展并连接本机 Agent', registered],
+      [3, '从网页开始编辑', paired ? '设备已配对' : '登录网盘，首次编辑时完成配对', paired],
+    ]) {
+      const step = document.createElement('div');
+      step.className = complete ? 'step complete' : 'step';
+      const number = document.createElement('span');
+      number.className = 'step-number'; number.textContent = complete ? '✓' : String(index);
+      const body = document.createElement('div');
+      const label = document.createElement('strong'); label.textContent = title;
+      const note = document.createElement('p'); note.textContent = description;
+      body.append(label, note); step.append(number, body); steps.append(step);
+    }
+    card.append(steps);
+  }
+  tasks.append(card);
+}
 
 function say(text) {
   message.textContent = text;
@@ -112,7 +227,7 @@ function openButton(task) {
         say(String(error));
       }
     },
-    { disabled: task.needs_review },
+    { secondary: true, disabled: task.needs_review },
   );
 }
 
@@ -120,6 +235,7 @@ function renderOptimistic(buttons, task, automatic, working) {
   buttons.append(openButton(task));
   buttons.append(
     button(task.pending_upload ? '重试原上传' : '保存云端', () => action(task, 'save_cloud'), {
+      secondary: Boolean(task.pending_upload),
       disabled: working || task.needs_review || (!task.local_changed && !task.pending_upload),
     }),
   );
@@ -236,6 +352,11 @@ const GROUPS = [
 ];
 
 function renderSummary(result) {
+  lastSummary = result;
+  counts.hidden = !result.tasks.length;
+  const attention = result.counts['needs-attention'] || 0;
+  document.querySelector('#attention-count').hidden = !attention;
+  document.querySelector('#attention-count').textContent = String(attention);
   counts.replaceChildren();
   for (const [key, label] of GROUPS) {
     const cell = document.createElement('div');
@@ -248,24 +369,14 @@ function renderSummary(result) {
     counts.append(cell);
   }
 
-  tasks.replaceChildren();
-  const notice = document.querySelector('.notice');
-  if (result.cdc_enabled && !document.querySelector('#cdc-hint')) {
-    const hint = document.createElement('p');
-    hint.id = 'cdc-hint';
-    hint.textContent =
-      '大文件分块上传已启用：不小于 16 MiB 的保存会优先复用云端已有分块，仅在确实节省空间时使用，否则仍为全量传输。';
-    notice.append(hint);
-  }
+  document.querySelector('#cdc-hint').hidden = !result.cdc_enabled;
 
   if (!result.tasks.length) {
-    const empty = document.createElement('div');
-    empty.className = 'empty';
-    empty.textContent = '还没有本地任务。添加服务并连接设备后，从 CloudFile 网页选择本地编辑。';
-    tasks.append(empty);
+    renderWelcome();
     return;
   }
 
+  tasks.replaceChildren();
   for (const [key, label, hint] of GROUPS) {
     const members = result.tasks.filter((task) => task.group === key);
     if (!members.length) continue;
@@ -303,8 +414,8 @@ async function renderExitState() {
     lastAssessment = assessment;
     const target = document.querySelector('#exit-state');
     target.textContent = assessment.safe_to_exit
-      ? '退出状态：可以安全退出'
-      : `退出状态：${assessment.active_checkouts} 个独占任务 · ${assessment.uncertain} 项待确认`;
+      ? '没有待确认的提交'
+      : `${assessment.active_checkouts} 个独占任务 · ${assessment.uncertain} 项待确认`;
   } catch {
     /* The banner already covers the actionable case. */
   }
@@ -330,6 +441,7 @@ function showExitBanner(assessment) {
 
 async function loadSettings() {
   const current = await invoke('settings_get');
+  component = current;
   document.querySelector('#notify_on_saved').checked = current.settings.notify_on_saved;
   document.querySelector('#notify_on_review').checked = current.settings.notify_on_review;
   document.querySelector('#float_enabled').checked = current.settings.float_enabled;
@@ -337,7 +449,9 @@ async function loadSettings() {
     current.settings.float_hidden_when_empty;
   document.querySelector('#autostart').checked = current.autostart_enabled;
   document.querySelector('#workspace_root').value = current.settings.workspace_root || '';
-  document.querySelector('#version').textContent = `版本 ${current.version} · 安装目录 ${current.install_root}`;
+  document.querySelector('#version').textContent = `CloudFile Agent · ${current.version}`;
+  document.querySelector('#sidebar-version').textContent = `v${current.version}`;
+  document.querySelector('#install-path').textContent = `安装目录：${current.install_root}`;
 
   const registration = current.registered_host;
   if (!registration) {
@@ -349,32 +463,43 @@ async function loadSettings() {
   } else {
     hostState.textContent = `Host ${registration.host} 尚未注册；注册由 Agent 完成，不需要 Python。`;
   }
+  renderWelcome();
   return current;
 }
 
 async function renderOrigins() {
   const values = await invoke('service_status');
+  services = values;
+  const paired = values.some((service) => service.state === 'paired');
+  const connection = document.querySelector('#connection-state');
+  connection.textContent = paired ? '● 设备已连接' : values.length ? '○ 设备尚未连接' : '○ 尚未添加服务';
+  connection.classList.toggle('connected', paired);
+  document.querySelector('#service-dot').hidden = !paired;
   const list = document.querySelector('#origins');
   list.replaceChildren();
   for (const service of values) {
     const item = document.createElement('li');
-    const label = document.createElement('span');
+    const label = document.createElement('div');
+    label.className = 'service-info';
     const stateTextMap = {
       paired: '已连接设备',
       pending: '等待 Chrome 完成配对',
       unpaired: '尚未连接设备',
     };
-    label.textContent = `${service.service_url} · ${stateTextMap[service.state] || service.state}`;
+    const address = document.createElement('strong'); address.textContent = service.service_url;
+    const state = document.createElement('span'); state.className = `service-status ${service.state}`;
+    state.textContent = stateTextMap[service.state] || service.state;
+    label.append(address, state);
     item.append(label);
     if (service.state !== 'paired') {
       const element = document.createElement('button');
-      element.textContent = service.state === 'pending' ? '重新检查' : '连接设备';
+      element.textContent = '连接说明';
       element.className = 'secondary';
       element.onclick = async () => {
         try {
-          await invoke('begin_pairing', { origin: service.origin });
-          say('请在 Chrome 打开并登录此 CloudFile 服务，再点击扩展中的“连接 Agent 2.2”。有效期 10 分钟。');
-          await renderOrigins();
+          setView('tasks');
+          document.querySelector('#task-help').open = true;
+          say('在 Chrome 登录此 CloudFile 服务，选择文件并点击“本地编辑”，按网页提示完成设备连接。');
         } catch (error) {
           say(String(error));
         }
@@ -383,23 +508,24 @@ async function renderOrigins() {
     }
     list.append(item);
   }
+  if (!values.length) {
+    const empty = document.createElement('li'); empty.className = 'hint';
+    empty.textContent = '尚未添加服务。在下方填写组织提供的网盘地址即可开始。'; list.append(empty);
+  }
+  renderWelcome();
 }
 
 function wire() {
+  for (const item of document.querySelectorAll('[data-view]')) {
+    item.onclick = () => setView(item.dataset.view);
+  }
   document.querySelector('#refresh').onclick = () => {
     refresh();
     renderOrigins().catch((error) => say(String(error)));
     renderExitState();
   };
 
-  document.querySelector('#open-workspace').onclick = async () => {
-    try {
-      await invoke('open_workspace');
-      say('已打开工作目录。');
-    } catch (error) {
-      say(String(error));
-    }
-  };
+  document.querySelector('#open-workspace').onclick = openWorkspace;
 
   document.querySelector('#settings').onsubmit = async (event) => {
     event.preventDefault();
@@ -416,6 +542,7 @@ function wire() {
       });
       document.querySelector('#autostart').checked = autostart.autostart_enabled;
       say('本机设置已保存。');
+      await loadSettings();
       invoke('float_sync').catch(() => {});
     } catch (error) {
       say(String(error));
@@ -550,6 +677,7 @@ function wire() {
 
   listen('tasks-changed', () => refresh());
   listen('focus-task', async ({ payload }) => {
+    setView('tasks');
     await refresh();
     const target = document.getElementById(payload);
     if (target) {

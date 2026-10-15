@@ -41,8 +41,8 @@ jobs:
         # Keep going after a failing crate: without this, one Windows failure
         # hides every other target and the platform gaps need repeated pushes.
         run: cargo test --workspace --locked --no-fail-fast
-      - name: Test Chrome pairing adapter
-        run: node --test scripts/dev-pairing.test.cjs
+      - name: Test development extension packaging
+        run: node --test scripts/prepare-extension.test.cjs
       - name: Package development build
         run: python scripts/package.py
       - uses: actions/upload-artifact@v4

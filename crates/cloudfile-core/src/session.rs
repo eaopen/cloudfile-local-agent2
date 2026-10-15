@@ -186,9 +186,54 @@ pub fn load(root: &Path, id: &str) -> Result<Task> {
     filename(&task.file_name)?;
     Ok(task)
 }
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkingCopy {
+    directory: PathBuf,
+}
+
+/// A private per-task pointer pins the working copy across preference changes.
+/// Old tasks have no pointer and continue using their original private folder.
+pub fn working_dir(root: &Path, id: &str) -> Result<PathBuf> {
+    let private = task_dir(root, id)?;
+    let pointer = private.join("working-copy.json");
+    if !pointer.exists() {
+        return Ok(private);
+    }
+    let copy: WorkingCopy = storage::read(&pointer)?;
+    if !copy.directory.is_absolute()
+        || copy.directory.file_name().and_then(|s| s.to_str()) != Some(id)
+    {
+        bail!("invalid working copy directory");
+    }
+    for part in copy.directory.ancestors() {
+        if fs::symlink_metadata(part)?.file_type().is_symlink() {
+            bail!("symlink in working copy directory");
+        }
+    }
+    Ok(copy.directory)
+}
+
+/// Called under the task operation lock, before downloading a new task.
+pub fn prepare_working_dir(root: &Path, id: &str) -> Result<PathBuf> {
+    let private = task_dir(root, id)?;
+    if private.join("working-copy.json").exists() || private.join("task.json").exists() {
+        return working_dir(root, id);
+    }
+    let directory = crate::settings::ensure_workspace(root)?.join(id);
+    storage::private_dir(&directory)?;
+    storage::write(
+        &private.join("working-copy.json"),
+        &WorkingCopy {
+            directory: directory.clone(),
+        },
+    )?;
+    Ok(directory)
+}
 pub fn local_path(root: &Path, task: &Task) -> Result<PathBuf> {
     filename(&task.file_name)?;
-    let p = task_dir(root, &task.task_id)?.join(&task.file_name);
+    let p = working_dir(root, &task.task_id)?.join(&task.file_name);
     if !fs::symlink_metadata(&p)?.is_file() {
         bail!("working copy is not a regular file");
     }
@@ -328,7 +373,8 @@ pub fn open_session(root: &Path, request: Request) -> Result<Task> {
         local_path(root, &task)?;
         return Ok(task);
     }
-    let target = dir.join(&c.file.name);
+    let working = prepare_working_dir(root, &id)?;
+    let target = working.join(&c.file.name);
     if target.exists() {
         bail!("untracked working copy retained; review the task directory");
     }
@@ -336,7 +382,7 @@ pub fn open_session(root: &Path, request: Request) -> Result<Task> {
     if response.status() != 200 {
         bail!("download rejected");
     }
-    let mut tmp = tempfile::NamedTempFile::new_in(&dir)?;
+    let mut tmp = tempfile::NamedTempFile::new_in(&working)?;
     let written = std::io::copy(&mut (&mut response).take(c.size + 1), &mut tmp)?;
     if written != c.size {
         bail!("download size mismatch");
@@ -377,6 +423,60 @@ pub fn launch(root: &Path, id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn workspace_changes_pin_existing_copies_and_keep_journals_private() {
+        let (_dir, root) = storage::test_root();
+        let first = root.join("first-workspace");
+        crate::settings::update(&root, |s| {
+            s.workspace_root = Some(first.to_string_lossy().into_owned())
+        })
+        .unwrap();
+        let id = "a".repeat(64);
+        let private = task_dir(&root, &id).unwrap();
+        storage::private_dir(&private).unwrap();
+        let working = prepare_working_dir(&root, &id).unwrap();
+        assert_eq!(working, first.join(&id));
+        fs::write(working.join("user.docx"), b"user changes").unwrap();
+        assert!(private.join("working-copy.json").is_file());
+        assert!(!working.join("task.json").exists());
+        let second = root.join("second-workspace");
+        crate::settings::update(&root, |s| {
+            s.workspace_root = Some(second.to_string_lossy().into_owned())
+        })
+        .unwrap();
+        assert_eq!(prepare_working_dir(&root, &id).unwrap(), working);
+        assert_eq!(
+            fs::read(working.join("user.docx")).unwrap(),
+            b"user changes"
+        );
+        let next = "b".repeat(64);
+        assert_eq!(
+            prepare_working_dir(&root, &next).unwrap(),
+            second.join(&next)
+        );
+        let legacy = "c".repeat(64);
+        assert_eq!(
+            working_dir(&root, &legacy).unwrap(),
+            task_dir(&root, &legacy).unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn working_copy_pointer_never_follows_a_symlink_or_silently_falls_back() {
+        let (_dir, root) = storage::test_root();
+        crate::settings::update(&root, |s| {
+            s.workspace_root = Some(root.join("workspace").to_string_lossy().into_owned());
+        })
+        .unwrap();
+        let id = "a".repeat(64);
+        let working = prepare_working_dir(&root, &id).unwrap();
+        fs::remove_dir(&working).unwrap();
+        let other = root.join("other");
+        fs::create_dir(&other).unwrap();
+        std::os::unix::fs::symlink(&other, &working).unwrap();
+        assert!(working_dir(&root, &id).is_err());
+    }
     #[test]
     fn reject_paths_and_origins() {
         for x in ["../a", "CON.docx", "a:b", "a\\b", ".", "x."] {

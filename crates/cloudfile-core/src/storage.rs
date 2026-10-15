@@ -11,6 +11,10 @@ pub fn root() -> Result<PathBuf> {
         .context("user data directory unavailable")?
         .join("CloudFileAgent22");
     private_dir(&path)?;
+    crate::settings::initialize_workspace(
+        &path,
+        &dirs::home_dir().context("home directory unavailable")?,
+    )?;
     Ok(path)
 }
 pub fn private_dir(path: &Path) -> Result<()> {

@@ -51,7 +51,23 @@ fn root() -> anyhow::Result<PathBuf> {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.is_empty() {
+    // Chrome supplies the calling extension origin (and on Windows may also
+    // supply a parent window). These are host launch metadata, not CLI commands.
+    // Chrome's manifest allowlist remains responsible for caller authorization.
+    let browser_launch = args.first().is_some_and(|origin| {
+        origin
+            .strip_prefix("chrome-extension://")
+            .and_then(|value| value.strip_suffix('/'))
+            .is_some_and(|id| hostreg::validate_extension_id(id).is_ok())
+            && args.iter().skip(1).all(|argument| {
+                argument
+                    .strip_prefix("--parent-window=")
+                    .is_some_and(|value| {
+                        !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit())
+                    })
+            })
+    });
+    if args.is_empty() || browser_launch {
         if run_stdio().is_err() {
             eprintln!("CloudFile native messaging failed");
             std::process::exit(1);

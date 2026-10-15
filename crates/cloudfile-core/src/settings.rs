@@ -50,7 +50,7 @@ pub struct Settings {
     pub float_hidden_when_empty: bool,
     /// Advisory mirror of the login-item state; the OS remains authoritative.
     pub autostart: bool,
-    /// Directory that holds working copies. `None` means the private agent root.
+    /// Directory for new working copies, initialized on first app startup.
     pub workspace_root: Option<String>,
     /// Explicit local openers, evaluated before detection and the OS default.
     pub open_rules: Vec<crate::apps::OpenRule>,
@@ -98,6 +98,41 @@ impl Settings {
 
 pub fn path(root: &Path) -> PathBuf {
     root.join("settings.json")
+}
+
+/// Persist the development workspace separately from credentials and journals.
+/// Existing task locations are recorded per task and never moved here.
+pub fn initialize_workspace(root: &Path, home: &Path) -> Result<()> {
+    if load(root)?.workspace_root.is_none() {
+        let directory = home.join("CloudFile-Dev").join("Workspace");
+        update(root, |settings| {
+            if settings.workspace_root.is_none() {
+                settings.workspace_root = Some(directory.to_string_lossy().into_owned());
+            }
+        })?;
+    }
+    Ok(())
+}
+
+pub fn default_workspace() -> Result<PathBuf> {
+    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("home directory unavailable"))?;
+    Ok(home.join("CloudFile-Dev").join("Workspace"))
+}
+
+/// Only create the user-visible directory when it is needed. Do not chmod an
+/// existing user-selected folder or follow a symlink into another workspace.
+pub fn ensure_workspace(root: &Path) -> Result<PathBuf> {
+    load(root)?;
+    let directory = workspace_root(root);
+    for part in directory.ancestors() {
+        if let Ok(metadata) = std::fs::symlink_metadata(part) {
+            if metadata.file_type().is_symlink() {
+                bail!("symlink in workspace path");
+            }
+        }
+    }
+    std::fs::create_dir_all(&directory)?;
+    Ok(directory)
 }
 
 /// Missing means "never configured", which is the documented default set.
@@ -183,6 +218,25 @@ mod tests {
         assert!(settings.float_enabled && settings.float_hidden_when_empty);
         assert!(!settings.autostart);
         assert!(settings.workspace_root.is_none());
+    }
+
+    #[test]
+    fn initial_workspace_is_visible_created_on_demand_and_preserves_custom_choice() {
+        let (_dir, root) = tmp();
+        let home = root.join("home");
+        initialize_workspace(&root, &home).unwrap();
+        let expected = home.join("CloudFile-Dev/Workspace");
+        assert_eq!(workspace_root(&root), expected);
+        assert!(!expected.exists());
+        assert_eq!(ensure_workspace(&root).unwrap(), expected);
+        assert!(expected.is_dir());
+        let custom = root.join("custom");
+        update(&root, |s| {
+            s.workspace_root = Some(custom.to_string_lossy().into_owned())
+        })
+        .unwrap();
+        initialize_workspace(&root, &home).unwrap();
+        assert_eq!(ensure_workspace(&root).unwrap(), custom);
     }
 
     #[test]

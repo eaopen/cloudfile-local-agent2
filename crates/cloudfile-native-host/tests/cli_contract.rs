@@ -14,6 +14,51 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const EXTENSION_ID: &str = "abcdefghijklmnopabcdefghijklmnop";
 const DEV_HOST: &str = "com.cloudfile.agent22.dev";
 
+#[test]
+fn chrome_launch_arguments_use_framed_native_messaging() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let sandbox = Sandbox::new();
+    let origin = format!("chrome-extension://{EXTENSION_ID}/");
+    for arguments in [
+        vec![],
+        vec![origin.as_str()],
+        vec![origin.as_str(), "--parent-window=0"],
+    ] {
+        let mut child = sandbox
+            .command()
+            .args(arguments)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let request = br#"{"type":"status"}"#;
+        let mut input = child.stdin.take().unwrap();
+        input
+            .write_all(&(request.len() as u32).to_le_bytes())
+            .unwrap();
+        input.write_all(request).unwrap();
+        drop(input);
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let length = u32::from_le_bytes(output.stdout[..4].try_into().unwrap()) as usize;
+        assert_eq!(output.stdout.len(), length + 4);
+        let status: Value = serde_json::from_slice(&output.stdout[4..]).unwrap();
+        assert_eq!(status["ok"], true);
+        assert_eq!(status["agent_family"], "agent2");
+        assert_eq!(status["build_version"], VERSION);
+    }
+    assert!(sandbox
+        .refuses(&[&origin, "--update"])
+        .contains("unknown command"));
+}
+
 /// A sandboxed user profile. `canonicalize` matters: the private store refuses
 /// symlinked ancestors, and the platform temporary directory is reached through
 /// one on macOS.

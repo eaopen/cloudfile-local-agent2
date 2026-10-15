@@ -78,12 +78,7 @@ def main():
     p = target / 'manifest.json'
     m = json.loads(p.read_text())
     m['name'] = 'CloudFile Agent 2.2 Dev'
-    m['permissions'] = list(dict.fromkeys(m['permissions'] + ['scripting']))
     p.write_text(json.dumps(m, ensure_ascii=False, indent=2))
-
-    shutil.copy2(root / 'scripts' / 'dev-pairing.js', target / 'dev-pairing.js')
-    p = target / 'popup.html'
-    p.write_text(p.read_text().replace('</body>', '<script src="dev-pairing.js"></script></body>'))
 
     print(f'{target}\n  source: {source} ({origin})\n  dev host: {DEV_HOST}')
 

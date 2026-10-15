@@ -14,6 +14,8 @@
 
 - Tauri 任务中心、托盘、可拖动悬浮入口、非抢焦点轻提示、服务配置、设备连接、本地打开与修改状态。
 - **任务中心三态展示**：待处理 / 进行中 / 已完成。分组与计数由桌面进程派生，界面只渲染，不自行判断任务是否结清。任务详情按编辑模式给对应操作，普通编辑与独占编辑共用一套界面。
+- **任务 / 服务 / 设置分区**：首次使用按服务与本机组件状态展示连接引导；已连接且无任务时提示从网页开始编辑，有任务时聚焦进度与操作。偏好、更新和浏览器诊断集中在设置，安装目录与 Host 信息默认折叠。
+- **统一菱形云文件图标**：状态栏、任务中心与悬浮入口共用同一透明标识。macOS 状态栏使用系统模板适配深浅色；其它平台保留 Agent 蓝色。图标来自 GPT Image 方案 B，原始设计和提示词保存在 `assets/branding/concepts/`。
 - **可拖动悬浮入口**：拖动交给系统原生手势（跨显示器与缩放比例都不会偏移），位置按显示器分别保存；无任务时按用户设置隐藏；有任务待处理时显示计数徽标。拖动落点由桌面进程在窗口停止移动后写入设置。
 - **退出保护**：托盘“退出”与窗口关闭都不会在存在未确认 Intent 或有效独占 Checkout 时静默结束进程。先给出具体风险清单，用户确认后才退出；退出只停止后台续租，不释放 Checkout、不删除本地工作副本与待确认 Intent。
 - Chrome `open_uri` 设备签名会话：认领、下载普通编辑工作副本。
@@ -24,6 +26,7 @@
 - **本机安装、升级与回退均由自带程序完成**：`cloudfile-native-host` 同时是 CLI，注册 Host、登录项、下载校验、版本目录切换、回退与清理都不需要目标机器安装 Python 或 Rust 工具链。
 - 密钥存储在 macOS Keychain / Windows Credential Manager；采用 Rust P-256 签名，不依赖旧 Agent。当前是系统保护的可读密钥，不宣称 CNG/硬件不可导出密钥。
 - 独立用户目录 `CloudFileAgent22`、开发 Host `com.cloudfile.agent22.dev`。
+- 开发版新工作副本默认放在用户主目录 `CloudFile-Dev/Workspace/<任务 ID>/`，可在任务中心更改；首次打开目录时自动创建。修改目录只影响新任务，已有任务仍使用原位置。密钥、任务记录、Intent 与上传快照继续保存在私有 `CloudFileAgent22` 目录。
 
 本地应用 Ctrl/Cmd+S 保存到磁盘后，普通编辑由 Agent 自动观察工作副本并上传；独占编辑不会自动上传，必须由用户在任务中心显式提交。发生网络中断、冲突或未确认回执时暂停或保持待确认状态，保留工作副本与原上传快照；不会盲目自动重发。
 当前单文件上限与现有服务端一致，为 128 MiB。
@@ -108,8 +111,8 @@ cargo build -p cloudfile-native-host --locked
 
 开发扩展是共享扩展的隔离副本；连接步骤：
 
-1. 在任务中心添加服务并点击“连接设备”。
-2. 在开发 Chrome 配置文件登录同一 CloudFile 服务，点击扩展中的“连接 Agent 2.2”。配对窗口有效期 10 分钟，浏览器登录 Cookie 不会交给 Agent。
+1. 在开发 Chrome 配置文件登录 CloudFile 服务。
+2. 支持首次配对的网页在第一次本地编辑时通过 `pair_prepare`、`pair_sign`、`pair_confirm` 完成设备配对；扩展弹窗不再添加临时“连接 Agent 2.2”按钮。浏览器登录 Cookie 不会交给 Agent。此流程需要网页和 Hub 同步支持并启用相关接口，Agent 就绪不代表设备已配对。
 3. 从网页发起“普通本地编辑”（设备会话 `cloudfile-open://v1/open`），在本地应用保存修改。
 4. Agent 在文件内容稳定后自动上传，也可在任务中心点击“保存云端”。确认发布后可继续编辑。
 5. 独占编辑：从网页发起独占会话（服务端需开启 Agent2 独占能力），Agent 领取并确认 Checkout 租约后在任务中心显示“独占编辑”任务；点击“提交”保留 Checkout，点击“签入并释放”结束本次独占。提交结果未确认时先点“查询提交结果”，不会自动重发。
@@ -126,7 +129,7 @@ python3 scripts/package.py
 目标机器不需要 Python 或 Rust 工具链。
 打包脚本本身仍需 Python 3.11 或更高版本（仅构建期）。macOS 包含可双击的开发 `.app`。
 GitHub Actions 对 macOS / Windows 分别执行 `cargo fmt --all --check`、`cargo clippy`（`-D warnings`）、
-Rust 测试与配对脚本测试，并生成开发 ZIP 上传 Artifact；
+Rust 测试与开发扩展打包测试，并生成开发 ZIP 上传 Artifact；
 构建通过不代替 Windows 实机和真实服务端验收。
 
 ## 代码边界
@@ -144,7 +147,7 @@ Rust 测试与配对脚本测试，并生成开发 ZIP 上传 Artifact；
 
 ## 验证状态
 
-已覆盖：`cargo test --workspace --locked`（macOS 实测 95 项：94 通过、1 项需要外部条件的 `#[ignore]`）、`cargo clippy --workspace --all-targets --locked -- -D warnings`（0 警告）、`cargo fmt --all --check`、`node --test scripts/dev-pairing.test.cjs`。前三项同时是 CI 门禁。
+验证命令：`cargo test --workspace --locked --no-fail-fast`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo fmt --all --check`、`node --test scripts/prepare-extension.test.cjs`。前三项同时是 CI 门禁；系统凭据往返测试需要外部条件，默认忽略。
 其中 `cloudfile-native-host/tests/cli_contract.rs` 与 `cloudfile-desktop/tests/cli_contract.rs` 直接运行真实二进制，并把 `HOME`（Windows 另加 `LOCALAPPDATA`）重定向到临时目录，因此注册、接管、回退、卸载、健康检查与协议自检都不触碰开发机上的真实 Chrome 注册。
 
 尚未验收：

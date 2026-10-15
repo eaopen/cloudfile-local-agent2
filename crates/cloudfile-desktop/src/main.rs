@@ -163,6 +163,15 @@ fn settings_set(
     float_hidden_when_empty: Option<bool>,
     workspace_root: Option<String>,
 ) -> Result<Value, String> {
+    let workspace_root = match workspace_root {
+        Some(value) if value.trim().is_empty() => Some(
+            settings::default_workspace()
+                .map_err(|error| error.to_string())?
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        other => other,
+    };
     let updated = settings::update(&state.root, |current| {
         if let Some(value) = notify_on_saved {
             current.notify_on_saved = value;
@@ -177,11 +186,7 @@ fn settings_set(
             current.float_hidden_when_empty = value;
         }
         if let Some(value) = workspace_root.clone() {
-            current.workspace_root = if value.trim().is_empty() {
-                None
-            } else {
-                Some(value.trim().to_string())
-            };
+            current.workspace_root = Some(value.trim().to_string());
         }
     })
     .map_err(|error| error.to_string())?;
@@ -464,7 +469,8 @@ fn run_update(state: tauri::State<'_, State>, force: bool) -> Result<Value, Stri
 
 #[tauri::command]
 fn open_workspace(state: tauri::State<'_, State>) -> Result<(), String> {
-    apps::open_directory(&settings::workspace_root(&state.root)).map_err(|error| error.to_string())
+    let directory = settings::ensure_workspace(&state.root).map_err(|error| error.to_string())?;
+    apps::open_directory(&directory).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -649,6 +655,24 @@ Usage: cloudfile-desktop [--autostart]
                 item passes this so logging in never steals focus
 ";
 
+/// Share one alpha mark with the desktop UI. macOS templates follow the system
+/// menu-bar appearance; other platforms retain the Agent blue for visibility.
+fn tray_icon() -> tauri::Result<tauri::image::Image<'static>> {
+    let icon = tauri::image::Image::from_bytes(include_bytes!("../ui/cloudfile-mark.png"))?;
+    if cfg!(target_os = "macos") {
+        return Ok(icon);
+    }
+    let mut rgba = icon.rgba().to_vec();
+    for pixel in rgba.chunks_exact_mut(4) {
+        pixel[..3].copy_from_slice(&[30, 118, 238]);
+    }
+    Ok(tauri::image::Image::new_owned(
+        rgba,
+        icon.width(),
+        icon.height(),
+    ))
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     // The upgrade health check starts a freshly staged build and reads its
@@ -754,10 +778,11 @@ fn run(autostart: bool) -> anyhow::Result<()> {
             let separator = PredefinedMenuItem::separator(app)?;
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&open, &refresh, &guard_row, &separator, &quit])?;
-            let icon = tauri::image::Image::new_owned([30u8, 118, 238, 255].repeat(32 * 32), 32, 32);
+            let icon = tray_icon()?;
             // The window doubles as the fallback entry when no tray is allowed.
             let tray = TrayIconBuilder::with_id("main")
                 .icon(icon)
+                .icon_as_template(cfg!(target_os = "macos"))
                 .tooltip("CloudFile Agent 2.2")
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id.as_ref() {
@@ -979,4 +1004,21 @@ fn run(autostart: bool) -> anyhow::Result<()> {
         })
         .run(tauri::generate_context!())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tray_tests {
+    #[test]
+    fn embedded_mark_keeps_a_visible_shape_and_transparent_background() {
+        let icon = super::tray_icon().unwrap();
+        assert_eq!(icon.width(), icon.height());
+        assert_eq!(icon.rgba()[3], 0, "canvas corner must stay transparent");
+        let pixels = icon.rgba().chunks_exact(4).collect::<Vec<_>>();
+        let opaque = pixels.iter().filter(|pixel| pixel[3] > 240).count();
+        assert!(opaque > pixels.len() / 10, "the mark must not be empty");
+        assert!(
+            opaque < pixels.len() * 3 / 4,
+            "do not restore an opaque square"
+        );
+    }
 }

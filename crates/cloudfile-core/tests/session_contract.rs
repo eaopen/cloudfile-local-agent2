@@ -77,11 +77,20 @@ fn request(server: String) -> wire::Request {
 fn claim_download_and_preserve_user_bytes() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
+    cloudfile_core::settings::update(&root, |s| {
+        s.workspace_root = Some(
+            root.join("visible-workspace")
+                .to_string_lossy()
+                .into_owned(),
+        );
+    })
+    .unwrap();
     let (server, handle) = fixture(false, false);
     session::trust(&root, server.clone()).unwrap();
     let task = session::open_session(&root, request(server)).unwrap();
     handle.join().unwrap();
     let local = session::local_path(&root, &task).unwrap();
+    assert!(local.starts_with(root.join("visible-workspace")));
     assert_eq!(std::fs::read(&local).unwrap(), b"abc");
     std::fs::write(&local, b"user changes").unwrap();
     let loaded = session::load(&root, &task.task_id).unwrap();

@@ -246,7 +246,7 @@ pub fn query_local_file(root: &Path, repo_id: &str, path: &str, mode: &str) -> V
 pub fn query_local_folder(root: &Path, repo_id: &str, mode: &str) -> Value {
     match find(root, repo_id, "", mode) {
         Ok(Some(task)) => {
-            let directory = session::task_dir(root, &task.task_id)
+            let directory = session::working_dir(root, &task.task_id)
                 .map(|path| path.to_string_lossy().into_owned())
                 .unwrap_or_default();
             json!({"ok":true,"mode":mode_label(&task.mode),"local_exists":true,"local_path":directory})
@@ -260,10 +260,10 @@ pub fn query_local_folder(root: &Path, repo_id: &str, mode: &str) -> Value {
 /// supplies a path here; only a repository identity is accepted.
 pub fn open_workspace(root: &Path, repo_id: &str, path: &str, mode: &str) -> Value {
     if repo_id.is_empty() {
-        let target = settings::workspace_root(root);
-        if !target.is_dir() {
-            return json!({"ok":false,"error":"本地工作区尚未创建"});
-        }
+        let target = match settings::ensure_workspace(root) {
+            Ok(target) => target,
+            Err(error) => return json!({"ok":false,"error":error.to_string()}),
+        };
         return match apps::open_directory(&target) {
             Ok(()) => json!({"ok":true,"workspace_root":target.to_string_lossy(),
                 "local_path":target.to_string_lossy()}),
@@ -277,7 +277,7 @@ pub fn open_workspace(root: &Path, repo_id: &str, path: &str, mode: &str) -> Val
         }
         Err(error) => return json!({"ok":false,"error":error.to_string()}),
     };
-    let directory = match session::task_dir(root, &task.task_id) {
+    let directory = match session::working_dir(root, &task.task_id) {
         Ok(directory) => directory,
         Err(error) => return json!({"ok":false,"error":error.to_string()}),
     };

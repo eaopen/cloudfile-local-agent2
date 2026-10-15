@@ -88,7 +88,7 @@ pub fn open_with(root: &Path, open: &Open, client: &Client) -> Result<Task> {
             session::local_path(root, &task)?;
             task
         } else {
-            claim_and_download(open, client, &dir, &id)?
+            claim_and_download(root, open, client, &dir, &id)?
         }
     };
     if task.mode == "exclusive-edit" {
@@ -98,7 +98,13 @@ pub fn open_with(root: &Path, open: &Open, client: &Client) -> Result<Task> {
     }
     Ok(task)
 }
-fn claim_and_download(open: &Open, client: &Client, dir: &Path, id: &str) -> Result<Task> {
+fn claim_and_download(
+    root: &Path,
+    open: &Open,
+    client: &Client,
+    dir: &Path,
+    id: &str,
+) -> Result<Task> {
     let mut body = client.body();
     body["ticket"] = serde_json::json!(open.ticket);
     client.signed("challenge", "claim", &mut body)?;
@@ -135,7 +141,8 @@ fn claim_and_download(open: &Open, client: &Client, dir: &Path, id: &str) -> Res
         bail!("文件扩展名无效");
     }
     let name = format!("CloudFile-{}{}", &client.session_id[..8], ext);
-    let target = dir.join(&name);
+    let working = session::prepare_working_dir(root, id)?;
+    let target = working.join(&name);
     if target.exists() {
         bail!("已存在工作副本，请先检查本地文件");
     }
@@ -157,7 +164,7 @@ fn claim_and_download(open: &Open, client: &Client, dir: &Path, id: &str) -> Res
     {
         bail!("下载响应无效");
     }
-    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+    let mut tmp = tempfile::NamedTempFile::new_in(&working)?;
     let n = std::io::copy(&mut (&mut response).take(size + 1), &mut tmp)?;
     if n != size {
         bail!("下载未完成");
