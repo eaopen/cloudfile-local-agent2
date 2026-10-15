@@ -163,6 +163,9 @@ function renderExclusive(buttons, task, working) {
   );
   if (pending) {
     buttons.append(button('查询提交结果', () => action(task, 'recover_commit'), { disabled: working }));
+    buttons.append(button('重试原提交', () => action(task, 'retry_commit'), {
+      secondary: true, disabled: working,
+    }));
   }
   buttons.append(
     button('续租', () => action(task, 'renew_checkout'), {

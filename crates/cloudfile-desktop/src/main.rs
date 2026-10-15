@@ -574,6 +574,17 @@ async fn recover_commit(state: tauri::State<'_, State>, task_id: String) -> Resu
     .map_err(|_| "查询提交执行失败".to_string())?
 }
 
+/// Explicit retry of a frozen commit, kept separate from read-only recovery.
+#[tauri::command]
+async fn retry_commit(state: tauri::State<'_, State>, task_id: String) -> Result<Value, String> {
+    let root = state.root.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        exclusive::retry(&root, &task_id).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|_| "重试提交执行失败".to_string())?
+}
+
 #[tauri::command]
 async fn renew_checkout(state: tauri::State<'_, State>, task_id: String) -> Result<Value, String> {
     let root = state.root.clone();
@@ -727,6 +738,7 @@ fn run(autostart: bool) -> anyhow::Result<()> {
             set_auto_upload,
             commit_task,
             recover_commit,
+            retry_commit,
             renew_checkout,
             release_checkout
         ])
@@ -897,7 +909,7 @@ fn run(autostart: bool) -> anyhow::Result<()> {
                     wire::Request::OpenWorkspace { repo_id, path, mode } => {
                         native::open_workspace(&root, &repo_id, &path, &mode)
                     }
-                    wire::Request::OpenSessionFile { path } => native::open_session_file(&path),
+                    wire::Request::OpenSessionFile { path } => native::open_session_file(&root, &path),
                     wire::Request::PairEnrollment { server } => match device::enrollment(&root, &server) {
                         Ok(value) => json!({"ok":true,"enrollment":value,
                             "service_path":session::service_path(&root,&server).unwrap_or_default()}),

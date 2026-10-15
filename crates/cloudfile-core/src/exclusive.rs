@@ -348,6 +348,26 @@ pub fn recover(root: &Path, id: &str) -> Result<Value> {
     recover_with(root, id, &client)
 }
 pub fn recover_with(root: &Path, id: &str, client: &Client) -> Result<Value> {
+    bound(root, id, client)?;
+    let dir = session::task_dir(root, id)?;
+    let _lock = storage::lock(&dir.join("upload.lock"))?;
+    let intent = journal::pending(root, id)?.ok_or_else(|| anyhow::anyhow!("没有待确认的提交"))?;
+    if let Some(receipt) = query(client, &intent)? {
+        journal::accept(root, id, receipt)?;
+        return Ok(json!({"state":"published"}));
+    }
+    // This read-only query must never publish a prepared or missing intent.
+    Ok(json!({"state":"pending"}))
+}
+
+/// Explicit, user-triggered retry of the SAME frozen Intent, never a new
+/// snapshot or a new Intent. Always query first for an existing receipt.
+pub fn retry(root: &Path, id: &str) -> Result<Value> {
+    let (_, client, _) = exclusive(root, id)?;
+    retry_with(root, id, &client)
+}
+
+pub fn retry_with(root: &Path, id: &str, client: &Client) -> Result<Value> {
     let (_, lease) = bound(root, id, client)?;
     let dir = session::task_dir(root, id)?;
     let _lock = storage::lock(&dir.join("upload.lock"))?;

@@ -334,7 +334,7 @@ fn run_stdio() -> anyhow::Result<()> {
                 path,
                 mode,
             }) => native::open_workspace(&root, &repo_id, &path, &mode),
-            Ok(wire::Request::OpenSessionFile { path }) => native::open_session_file(&path),
+            Ok(wire::Request::OpenSessionFile { path }) => native::open_session_file(&root, &path),
             Ok(request) => forward(&root, request),
             Err(_) => wire::error("invalid or unsupported native message"),
         };

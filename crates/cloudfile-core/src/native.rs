@@ -4,7 +4,7 @@
 //! interface: names, types and the `capabilities` list must match what the
 //! browser-side code already checks. Everything here is derived from the
 //! durable store on each call; nothing is cached between requests.
-use crate::{apps, device, guard, journal, session, settings, update};
+use crate::{apps, device, guard, journal, session, settings, update, wire};
 use anyhow::{bail, Result};
 use serde_json::{json, Value};
 use sha2::Digest as _;
@@ -102,18 +102,18 @@ pub fn status(root: &Path) -> Value {
 
 /// Maps an internal mode onto the two values the extension understands.
 pub fn mode_label(mode: &str) -> &'static str {
-    if mode == "exclusive-edit" {
-        "exclusive-edit"
-    } else {
-        "local-edit"
+    match mode {
+        "exclusive-edit" => "exclusive-edit",
+        "local-view" => "local-view",
+        _ => "local-edit",
     }
 }
 
 fn matches_mode(task_mode: &str, requested: &str) -> bool {
     match requested {
-        "" => true,
+        "" | "local-edit" => matches!(task_mode, "local-edit" | "optimistic-edit"),
+        "local-view" => task_mode == "local-view",
         "exclusive-edit" => task_mode == "exclusive-edit",
-        "local-edit" => task_mode != "exclusive-edit",
         _ => false,
     }
 }
@@ -125,7 +125,7 @@ fn find(root: &Path, repo_id: &str, path: &str, mode: &str) -> Result<Option<ses
     if !path.is_empty() && !path.starts_with('/') {
         bail!("repository path must be absolute");
     }
-    if !matches!(mode, "" | "local-edit" | "exclusive-edit") {
+    if !matches!(mode, "" | "local-view" | "local-edit" | "exclusive-edit") {
         bail!("unsupported session mode");
     }
     for task in session::tasks(root)? {
@@ -142,8 +142,12 @@ fn find(root: &Path, repo_id: &str, path: &str, mode: &str) -> Result<Option<ses
 /// Public task list. Field names follow the extension contract; local paths and
 /// credentials are never included.
 pub fn task_summary(root: &Path) -> Value {
+    let tasks = match session::tasks(root) {
+        Ok(tasks) => tasks,
+        Err(_) => return json!({"ok":false, "error":"本地任务存储无法读取；请保留工作副本并检查任务中心"}),
+    };
     let mut rows = Vec::new();
-    for task in session::tasks(root).unwrap_or_default() {
+    for task in tasks {
         let changed = session::local_path(root, &task)
             .and_then(|path| session::digest(&path))
             .map(|digest| digest != task.baseline_digest);
@@ -271,18 +275,55 @@ pub fn open_workspace(root: &Path, repo_id: &str, path: &str, mode: &str) -> Val
     }
 }
 
-/// Compatibility entry for a handoff file produced by the browser.
-pub fn open_session_file(path: &str) -> Value {
+/// Chrome may pass a downloaded short-lived JSON session descriptor.
+#[derive(serde::Deserialize)]
+struct Handoff {
+    protocol: String,
+    server: String,
+    ticket: String,
+    expires_at: u64,
+    #[serde(default)]
+    local_action: String,
+}
+
+fn parse_handoff(path: &str) -> Result<wire::Request> {
     let candidate = Path::new(path);
-    if !candidate.is_absolute()
-        || candidate.extension().and_then(|value| value.to_str()) != Some("cloudfile")
-        || !candidate.is_file()
-    {
-        return json!({"ok":false,"error":"不是有效的 .cloudfile 交接文件"});
+    if !candidate.is_absolute() || candidate.extension().and_then(|v| v.to_str()) != Some("cloudfile") {
+        bail!("invalid CloudFile handoff path");
     }
-    match open::that(candidate) {
+    let metadata = std::fs::symlink_metadata(candidate)?;
+    if !metadata.file_type().is_file() || metadata.len() == 0 || metadata.len() > wire::LIMIT as u64 {
+        bail!("invalid CloudFile handoff file");
+    }
+    let content = std::fs::read(candidate)?;
+    let value: Handoff = serde_json::from_slice(&content)?;
+    if value.protocol != "cloudfile-local/v2"
+        || value.expires_at <= crate::now()
+        || value.server.is_empty()
+        || value.ticket.is_empty()
+    {
+        bail!("invalid or expired CloudFile handoff");
+    }
+    Ok(wire::Request::Open {
+        protocol: value.protocol,
+        server: value.server,
+        ticket: value.ticket,
+        expires_at: value.expires_at,
+        local_action: value.local_action,
+    })
+}
+
+/// Use the normal trusted server claim; never launch an arbitrary .cloudfile
+/// OS association and pretend the file was actually downloaded.
+pub fn open_session_file(root: &Path, path: &str) -> Value {
+    let result = (|| -> Result<()> {
+        let request = parse_handoff(path)?;
+        let task = session::open_session(root, request)?;
+        session::launch(root, &task.task_id)
+    })();
+    match result {
         Ok(()) => json!({"ok":true}),
-        Err(_) => json!({"ok":false,"error":"无法打开交接文件，请在任务中心重试"}),
+        Err(_) => json!({"ok":false,"error":"会话领取或本地打开失败；请检查服务信任及任务中心"}),
     }
 }
 
@@ -564,16 +605,66 @@ mod tests {
 
     #[test]
     fn handoff_files_must_be_absolute_cloudfile_paths() {
-        assert_eq!(open_session_file("relative.cloudfile")["ok"], false);
+        let (_dir, base) = crate::storage::test_root();
+        assert_eq!(open_session_file(base.as_path(), "relative.cloudfile")["ok"], false);
         // An absolute path that simply does not exist. Built from the host's
         // temporary directory so the case is genuinely exercised on Windows
         // too, where a Unix literal like `/tmp/x` is not absolute.
         let missing = std::env::temp_dir().join("cloudfile-missing-handoff.cloudfile");
         assert_eq!(
-            open_session_file(&missing.to_string_lossy())["ok"],
+            open_session_file(base.as_path(), &missing.to_string_lossy())["ok"],
             false,
             "{missing:?}"
         );
+    }
+
+    #[test]
+    fn readonly_queries_are_distinct_from_editable_copies() {
+        let (_dir, base) = crate::storage::test_root();
+        let root = base.as_path();
+        let task = store(root, "local-view", "report.pdf");
+        assert_eq!(query_local_file(root, &task.repo_id, &task.remote_path, "local-view")["local_exists"], true);
+        assert_eq!(query_local_folder(root, &task.repo_id, "local-view")["local_exists"], true);
+        assert_eq!(query_local_file(root, &task.repo_id, &task.remote_path, "local-edit")["local_exists"], false);
+        assert_eq!(query_local_file(root, &task.repo_id, &task.remote_path, "")["local_exists"], false);
+        assert_eq!(query_local_file(root, &task.repo_id, &task.remote_path, "local-view")["mode"], "local-view");
+    }
+
+    #[test]
+    fn broken_task_store_is_not_reported_as_an_empty_success() {
+        let (_dir, base) = crate::storage::test_root();
+        let root = base.as_path();
+        let task = store(root, "optimistic-edit", "damaged.txt");
+        let dir = session::task_dir(root, &task.task_id).unwrap();
+        std::fs::write(dir.join("task.json"), b"{invalid-json").unwrap();
+        assert_eq!(task_summary(root)["ok"], false);
+        assert!(task_summary(root)["tasks"].is_null());
+    }
+
+    #[test]
+    fn downloaded_handoff_is_parsed_not_launched_as_an_untrusted_file() {
+        let (_dir, base) = crate::storage::test_root();
+        let root = base.as_path();
+        let file = root.join("document.cloudfile");
+        std::fs::write(&file, serde_json::to_vec(&json!({
+            "protocol":"cloudfile-local/v2","server":"https://example.com",
+            "ticket":"one-time-ticket","expires_at":crate::now()+60
+        })).unwrap()).unwrap();
+        match parse_handoff(&file.to_string_lossy()).unwrap() {
+            wire::Request::Open { protocol, ticket, .. } => {
+                assert_eq!(protocol, "cloudfile-local/v2");
+                assert_eq!(ticket, "one-time-ticket");
+            }
+            _ => panic!("not an inline session"),
+        }
+        assert_eq!(open_session_file(root, &file.to_string_lossy())["ok"], false);
+        std::fs::write(&file, b"not-json").unwrap();
+        assert!(parse_handoff(&file.to_string_lossy()).is_err());
+        std::fs::write(&file, serde_json::to_vec(&json!({
+            "protocol":"cloudfile-local/v2","server":"https://example.com",
+            "ticket":"one-time-ticket","expires_at":crate::now()-1
+        })).unwrap()).unwrap();
+        assert!(parse_handoff(&file.to_string_lossy()).is_err());
     }
 
     #[test]

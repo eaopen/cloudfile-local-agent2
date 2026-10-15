@@ -431,6 +431,26 @@ fn conflict_wrong_receipt_and_bad_destination_keep_local_bytes_and_intent() {
     }
 }
 #[test]
+fn query_only_does_not_publish_a_prepared_intent_until_explicit_retry() {
+    let (_tmp, root, server, client, task) = setup("ok");
+    let path = session::local_path(&root, &task).unwrap();
+    std::fs::write(&path, b"original frozen bytes").unwrap();
+    // Simulate a crash after durable Intent preparation but before upload.
+    let intent = journal::capture(&root, &task.task_id, journal::Action::Commit).unwrap();
+    let lease = journal::lease(&root, &task.task_id).unwrap().unwrap();
+    exclusive::prepare(&client, &lease, &intent).unwrap();
+    std::fs::write(&path, b"later working copy").unwrap();
+    assert_eq!(exclusive::recover_with(&root, &task.task_id, &client).unwrap()["state"], "pending");
+    assert!(server.state.lock().unwrap().uploads.is_empty());
+    assert_eq!(journal::pending(&root, &task.task_id).unwrap().unwrap().intent_id, intent.intent_id);
+    // A distinct explicit action retries only the previous frozen snapshot.
+    assert_eq!(exclusive::retry_with(&root, &task.task_id, &client).unwrap()["state"], "published");
+    assert_eq!(server.state.lock().unwrap().uploads, vec![b"original frozen bytes".to_vec()]);
+    assert_eq!(std::fs::read(&path).unwrap(), b"later working copy");
+    assert!(journal::pending(&root, &task.task_id).unwrap().is_none());
+}
+
+#[test]
 fn renewal_and_release_require_an_active_guarded_checkout() {
     let (_tmp, root, server, client, task) = setup("ok");
     assert_eq!(
