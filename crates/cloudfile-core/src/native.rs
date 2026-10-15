@@ -144,7 +144,9 @@ fn find(root: &Path, repo_id: &str, path: &str, mode: &str) -> Result<Option<ses
 pub fn task_summary(root: &Path) -> Value {
     let tasks = match session::tasks(root) {
         Ok(tasks) => tasks,
-        Err(_) => return json!({"ok":false, "error":"本地任务存储无法读取；请保留工作副本并检查任务中心"}),
+        Err(_) => {
+            return json!({"ok":false, "error":"本地任务存储无法读取；请保留工作副本并检查任务中心"})
+        }
     };
     let mut rows = Vec::new();
     for task in tasks {
@@ -288,11 +290,14 @@ struct Handoff {
 
 fn parse_handoff(path: &str) -> Result<wire::Request> {
     let candidate = Path::new(path);
-    if !candidate.is_absolute() || candidate.extension().and_then(|v| v.to_str()) != Some("cloudfile") {
+    if !candidate.is_absolute()
+        || candidate.extension().and_then(|v| v.to_str()) != Some("cloudfile")
+    {
         bail!("invalid CloudFile handoff path");
     }
     let metadata = std::fs::symlink_metadata(candidate)?;
-    if !metadata.file_type().is_file() || metadata.len() == 0 || metadata.len() > wire::LIMIT as u64 {
+    if !metadata.file_type().is_file() || metadata.len() == 0 || metadata.len() > wire::LIMIT as u64
+    {
         bail!("invalid CloudFile handoff file");
     }
     let content = std::fs::read(candidate)?;
@@ -606,7 +611,10 @@ mod tests {
     #[test]
     fn handoff_files_must_be_absolute_cloudfile_paths() {
         let (_dir, base) = crate::storage::test_root();
-        assert_eq!(open_session_file(base.as_path(), "relative.cloudfile")["ok"], false);
+        assert_eq!(
+            open_session_file(base.as_path(), "relative.cloudfile")["ok"],
+            false
+        );
         // An absolute path that simply does not exist. Built from the host's
         // temporary directory so the case is genuinely exercised on Windows
         // too, where a Unix literal like `/tmp/x` is not absolute.
@@ -623,11 +631,26 @@ mod tests {
         let (_dir, base) = crate::storage::test_root();
         let root = base.as_path();
         let task = store(root, "local-view", "report.pdf");
-        assert_eq!(query_local_file(root, &task.repo_id, &task.remote_path, "local-view")["local_exists"], true);
-        assert_eq!(query_local_folder(root, &task.repo_id, "local-view")["local_exists"], true);
-        assert_eq!(query_local_file(root, &task.repo_id, &task.remote_path, "local-edit")["local_exists"], false);
-        assert_eq!(query_local_file(root, &task.repo_id, &task.remote_path, "")["local_exists"], false);
-        assert_eq!(query_local_file(root, &task.repo_id, &task.remote_path, "local-view")["mode"], "local-view");
+        assert_eq!(
+            query_local_file(root, &task.repo_id, &task.remote_path, "local-view")["local_exists"],
+            true
+        );
+        assert_eq!(
+            query_local_folder(root, &task.repo_id, "local-view")["local_exists"],
+            true
+        );
+        assert_eq!(
+            query_local_file(root, &task.repo_id, &task.remote_path, "local-edit")["local_exists"],
+            false
+        );
+        assert_eq!(
+            query_local_file(root, &task.repo_id, &task.remote_path, "")["local_exists"],
+            false
+        );
+        assert_eq!(
+            query_local_file(root, &task.repo_id, &task.remote_path, "local-view")["mode"],
+            "local-view"
+        );
     }
 
     #[test]
