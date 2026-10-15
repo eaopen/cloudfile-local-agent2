@@ -144,7 +144,7 @@ Rust 测试与配对脚本测试，并生成开发 ZIP 上传 Artifact；
 
 ## 验证状态
 
-已覆盖：`cargo test --workspace --locked`（91 项，含 1 项需要外部条件的 `#[ignore]`）、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo fmt --all --check`。
+已覆盖：`cargo test --workspace --locked`（macOS 实测 95 项：94 通过、1 项需要外部条件的 `#[ignore]`）、`cargo clippy --workspace --all-targets --locked -- -D warnings`（0 警告）、`cargo fmt --all --check`、`node --test scripts/dev-pairing.test.cjs`。前三项同时是 CI 门禁。
 其中 `cloudfile-native-host/tests/cli_contract.rs` 与 `cloudfile-desktop/tests/cli_contract.rs` 直接运行真实二进制，并把 `HOME`（Windows 另加 `LOCALAPPDATA`）重定向到临时目录，因此注册、接管、回退、卸载、健康检查与协议自检都不触碰开发机上的真实 Chrome 注册。
 
 尚未验收：

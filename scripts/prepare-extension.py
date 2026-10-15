@@ -58,6 +58,8 @@ def main():
             f'Looked for: {root.parent / "cloudfile-chrome-extension"}, '
             f'{root.parent.parent / "cloudfile-chrome-extension"}'
         )
+    if not source.is_dir():
+        sys.exit(f'error: extension source does not exist: {source}')
     if not (source / 'manifest.json').is_file():
         sys.exit(f'error: {source} is not a Chrome extension (no manifest.json)')
 
