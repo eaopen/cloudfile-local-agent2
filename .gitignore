@@ -2,3 +2,6 @@
 /dist/
 
 /crates/cloudfile-desktop/gen/
+
+.DS_Store
+__pycache__/

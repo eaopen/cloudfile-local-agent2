@@ -1,0 +1,52 @@
+name: Rust Agent CI
+
+# The repository root is the Cargo workspace, so there is no `agent22/`
+# working directory or path prefix any more. Long-lived branch is `dev`.
+on:
+  push:
+    branches: [dev]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-package:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # Formatting and lints are gates, not advice: without them the local
+      # toolchain and CI drift and style fixes land as review noise.
+      - name: Check formatting
+        run: cargo fmt --all --check
+      - name: Lint workspace
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test locked Rust workspace
+        # Keep going after a failing crate: without this, one Windows failure
+        # hides every other target and the platform gaps need repeated pushes.
+        run: cargo test --workspace --locked --no-fail-fast
+      - name: Test Chrome pairing adapter
+        run: node --test scripts/dev-pairing.test.cjs
+      - name: Package development build
+        run: python scripts/package.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cloudfile-agent2-${{ matrix.os }}
+          path: dist/*.zip
+          if-no-files-found: error
