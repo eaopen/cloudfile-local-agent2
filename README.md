@@ -1,8 +1,14 @@
 # CloudFile Agent 2.2 · MVP
 
-开发分支 `agent-rust`，全新 Rust + Tauri v2 实现。
-Chrome Native Messaging 与原有 CloudFile Hub/Server 保留为协议边界。
+本仓库 `eaopen/cloudfile-local-agent2` 是唯一的 Rust + Tauri v2 Agent 开发主线，长期分支 `dev`。
+全新 Rust + Tauri v2 实现，Chrome Native Messaging 与原有 CloudFile Hub/Server 保留为协议边界。
 历史参考基线：`e33d380f7e7ae65efdf39bcb0dec091e6d13b755`；不依赖 Go/.NET/Swift 运行时。
+
+仓库根目录即 Cargo Workspace（`crates/cloudfile-core`、`crates/cloudfile-native-host`、
+`crates/cloudfile-desktop`），没有外层目录。迁移来源与历史边界见 [docs/MIGRATION.md](docs/MIGRATION.md)，
+外部协议与本地身份契约见 [docs/CONTRACTS.md](docs/CONTRACTS.md)，开发顺序见 [docs/ROADMAP.md](docs/ROADMAP.md)，
+安装与发行约束见 [docs/RELEASE.md](docs/RELEASE.md)。
+旧仓库 `eaopen/cloudfile-local-agent` 的 `agent-rust` 只作只读回退参考，Rust 代码只在本仓库继续。
 
 ## 当前 MVP 实现
 
@@ -81,10 +87,13 @@ Windows 需已安装 WebView2 Runtime；Chrome 本身不提供此运行时，`cl
 ## Chrome 开发联调
 
 ```sh
-python3 scripts/prepare-extension.py
+python3 scripts/prepare-extension.py --extension-src ../cloudfile-chrome-extension
 ```
 
 （`prepare-extension.py` 是构建期工具，只用于生成开发扩展副本；目标机器不需要 Python。）
+共享扩展在本仓库之外，因此必须用 `--extension-src` 或 `CLOUDFILE_EXTENSION_SRC` 指定其 checkout；
+未指定时先找同级 `../cloudfile-chrome-extension`、再找上级 `../../cloudfile-chrome-extension`，
+都找不到就报错退出。开发副本始终写入 `dist/`，不提交、不回写共享扩展仓库。
 
 使用独立的 Chrome 配置文件（开发副本沿用现有扩展 ID，不能与正式扩展装在同一配置文件）。在扩展管理页以开发者模式加载 `dist/chrome-extension-agent22`，复制扩展 ID 后执行：
 
@@ -116,7 +125,8 @@ python3 scripts/package.py
 注册、登录项、升级与回退都由 `cloudfile-native-host` 自己完成，解压即可运行，
 目标机器不需要 Python 或 Rust 工具链。
 打包脚本本身仍需 Python 3.11 或更高版本（仅构建期）。macOS 包含可双击的开发 `.app`。
-GitHub Actions 对 macOS / Windows 分别执行 Rust 与配对脚本测试并生成开发 ZIP；
+GitHub Actions 对 macOS / Windows 分别执行 `cargo fmt --all --check`、`cargo clippy`（`-D warnings`）、
+Rust 测试与配对脚本测试，并生成开发 ZIP 上传 Artifact；
 构建通过不代替 Windows 实机和真实服务端验收。
 
 ## 代码边界
