@@ -860,10 +860,9 @@ fn run(autostart: bool) -> anyhow::Result<()> {
                                 if task.mode == "exclusive-edit"
                                     && cloudfile_core::v2_edit::has_checkout(&auto_root, &task.task_id)
                                     && !journal::closed(&auto_root, &task.task_id).unwrap_or(true)
+                                    && exclusive::renew_checkout(&auto_root, &task.task_id).is_err()
                                 {
-                                    if exclusive::renew_checkout(&auto_root, &task.task_id).is_err() {
-                                        let _ = auto_handle.emit("tasks-changed", ());
-                                    }
+                                    let _ = auto_handle.emit("tasks-changed", ());
                                 }
                             }
                         }
