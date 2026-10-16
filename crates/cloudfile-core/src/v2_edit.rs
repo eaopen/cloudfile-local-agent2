@@ -54,14 +54,8 @@ fn client() -> Result<Client> {
         .redirect(reqwest::redirect::Policy::none())
         .build()?)
 }
-fn endpoint(root: &Path, task: &Task, op: &str) -> Result<String> {
-    let prefix = session::service_path(root, &task.server)?;
-    Ok(format!(
-        "{}{}{}",
-        task.server,
-        prefix,
-        format!("/seafhttp/cf-edit/v1/{op}")
-    ))
+fn endpoint(_root: &Path, task: &Task, op: &str) -> Result<String> {
+    Ok(format!("{}/seafhttp/cf-edit/v1/{op}", task.server))
 }
 fn valid_id(s: &str) -> bool {
     s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())
@@ -158,9 +152,8 @@ pub fn open(root: &Path, uri: &str) -> Result<Task> {
         )?;
         return Ok(task);
     }
-    let prefix = session::service_path(root, &server)?;
     let res = client()?
-        .get(format!("{server}{prefix}/seafhttp/cf-edit/v1/read"))
+        .get(format!("{server}/seafhttp/cf-edit/v1/read"))
         .bearer_auth(&state.ticket)
         .send()?;
     if !res.status().is_success() {
