@@ -62,6 +62,9 @@ pub fn parse(uri: &str) -> Result<Open> {
     })
 }
 pub fn open(root: &Path, uri: &str) -> Result<Task> {
+    if crate::v2_edit::is_open_uri(uri) {
+        return crate::v2_edit::open(root, uri);
+    }
     let open = parse(uri)?;
     let client = Client::new(root, &open.instance, &open.session_id)?;
     open_with(root, &open, &client)

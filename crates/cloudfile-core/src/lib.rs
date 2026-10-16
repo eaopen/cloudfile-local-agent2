@@ -26,3 +26,4 @@ pub mod device;
 pub mod exclusive;
 pub mod paired_session;
 pub mod upload;
+pub mod v2_edit;

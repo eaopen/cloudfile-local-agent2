@@ -199,6 +199,11 @@ function exclusiveStatus(task, working) {
   if (task.checkout_closed) return '已签入并释放 Checkout；如需继续编辑请从网页重新发起';
   if (!task.has_lease) return 'Checkout 租约尚未就绪；请重新打开该文件以完成领取';
   if (!task.lease_acknowledged) return 'Checkout 交付尚未确认；请重新打开该文件';
+  if (task.authorization_expires_at) {
+    const remaining = task.authorization_expires_at * 1000 - Date.now();
+    if (remaining <= 0) return '编辑授权已到期；请在网页中再次打开此文件以恢复 Checkout，本地修改已保留';
+    if (remaining < 10 * 60 * 1000) return '编辑授权即将到期；请在网页中再次打开此文件以续期';
+  }
   if (task.pending_upload) {
     return task.pending_action === 'checkin'
       ? '原签入待确认，本地修改已保留'

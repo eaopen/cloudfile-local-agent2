@@ -43,10 +43,16 @@ fn task_client(root: &Path, id: &str) -> Result<(Task, Client)> {
     Ok((t, c))
 }
 pub fn save(root: &Path, id: &str) -> Result<Value> {
+    if crate::v2_edit::is_v2(root, id) {
+        return crate::v2_edit::save(root, id, None);
+    }
     let (_, client) = task_client(root, id)?;
     save_with(root, id, &client)
 }
 pub fn recover(root: &Path, id: &str) -> Result<Value> {
+    if crate::v2_edit::is_v2(root, id) {
+        return crate::v2_edit::recover(root, id);
+    }
     let (_, client) = task_client(root, id)?;
     let dir = session::task_dir(root, id)?;
     let _lock = storage::lock(&dir.join("upload.lock"))?;
@@ -62,6 +68,9 @@ pub fn save_with(root: &Path, id: &str, client: &Client) -> Result<Value> {
     save_inner(root, id, client, None)
 }
 pub fn save_observed(root: &Path, id: &str, digest: &str) -> Result<Value> {
+    if crate::v2_edit::is_v2(root, id) {
+        return crate::v2_edit::save(root, id, Some(digest));
+    }
     let (_, client) = task_client(root, id)?;
     save_observed_with(root, id, &client, digest)
 }

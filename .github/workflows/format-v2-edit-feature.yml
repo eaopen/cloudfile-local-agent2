@@ -1,0 +1,28 @@
+name: Format Guard-only Rust feature
+on:
+  push:
+    branches: [feature/v2-rust-guard-only]
+permissions:
+  contents: write
+jobs:
+  format:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/v2-rust-guard-only
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: rustfmt
+        run: cargo fmt --all
+      - name: Commit formatting only
+        run: |
+          if ! git diff --quiet; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add crates/cloudfile-core crates/cloudfile-desktop crates/cloudfile-native-host
+            git commit -m "style(agent2): rustfmt one-Guard editing transport"
+            git push origin HEAD:feature/v2-rust-guard-only
+          fi

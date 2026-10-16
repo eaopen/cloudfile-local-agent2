@@ -73,7 +73,8 @@ fn summaries(root: &Path, uploading: &Mutex<HashSet<String>>) -> anyhow::Result<
         let lease = journal::lease(root, &task.task_id);
         let acknowledged = journal::lease_acknowledged(root, &task.task_id);
         let closed = journal::closed(root, &task.task_id);
-        let exclusive_mode = task.mode == "exclusive-edit" && task.device_id.is_some();
+        let exclusive_mode = task.mode == "exclusive-edit"
+            && (task.device_id.is_some() || cloudfile_core::v2_edit::is_v2(root, &task.task_id));
         let action = pending.as_ref().ok().and_then(|value| {
             value.as_ref().map(|intent| {
                 match intent.action {
@@ -89,7 +90,8 @@ fn summaries(root: &Path, uploading: &Mutex<HashSet<String>>) -> anyhow::Result<
         let local_changed = changed.as_ref().copied().unwrap_or(false);
         let is_uploading = busy.contains(&task.task_id);
         let has_pending = pending.ok().flatten().is_some();
-        let has_lease = lease.ok().flatten().is_some();
+        let has_lease = lease.ok().flatten().is_some()
+            || cloudfile_core::v2_edit::has_checkout(root, &task.task_id);
         let closed = closed.unwrap_or(false);
         // Three states the user can act on, in the order they matter.
         let group = if needs_review || has_pending || (exclusive_mode && !closed && !has_lease) {
@@ -105,11 +107,13 @@ fn summaries(root: &Path, uploading: &Mutex<HashSet<String>>) -> anyhow::Result<
             "group":group,
             "local_changed":local_changed,
             "needs_review":needs_review,
-            "can_upload":task.mode == "optimistic-edit" && task.device_id.is_some(),
+            "can_upload":task.mode == "optimistic-edit" && (task.device_id.is_some() || cloudfile_core::v2_edit::is_v2(root, &task.task_id)),
             "exclusive":exclusive_mode,
             "has_lease":has_lease,
-            "lease_acknowledged":acknowledged.unwrap_or(false),
+            "lease_acknowledged":acknowledged.unwrap_or(false)
+                || cloudfile_core::v2_edit::has_checkout(root, &task.task_id),
             "checkout_closed":closed,
+            "authorization_expires_at":cloudfile_core::v2_edit::ticket_expires_at(root, &task.task_id),
             "auto_upload":automatic.ok(),"uploading":is_uploading,
             "pending_upload":has_pending,"pending_action":action}));
     }
@@ -847,7 +851,44 @@ fn run(autostart: bool) -> anyhow::Result<()> {
             std::thread::spawn(move || {
                 let started = std::time::Instant::now();
                 let mut observer = auto_upload::Observer::default();
+                let mut last_renew = std::time::Instant::now();
+                let mut reauth_warned = HashSet::<(String, i64)>::new();
                 loop {
+                    // Only the resident desktop renews Guards; browser lifetime
+                    // and popup windows must never drive a write lease.
+                    if last_renew.elapsed() >= std::time::Duration::from_secs(240) {
+                        if let Ok(tasks) = session::tasks(&auto_root) {
+                            for task in tasks {
+                                let open = task.mode == "exclusive-edit"
+                                    && cloudfile_core::v2_edit::has_checkout(&auto_root, &task.task_id)
+                                    && !journal::closed(&auto_root, &task.task_id).unwrap_or(true);
+                                if open && exclusive::renew_checkout(&auto_root, &task.task_id).is_err() {
+                                    let _ = auto_handle.emit("tasks-changed", ());
+                                }
+                                // The browser ticket cannot be refreshed silently; ask
+                                // once per ticket to reopen the file from the web.
+                                if let Some(expires) = cloudfile_core::v2_edit::ticket_expires_at(&auto_root, &task.task_id) {
+                                    let now = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.as_secs() as i64)
+                                        .unwrap_or(0);
+                                    if open
+                                        && expires - now < 600
+                                        && reauth_warned.insert((task.task_id.clone(), expires))
+                                        && settings::load(&auto_root).unwrap_or_default().notify_on_review
+                                    {
+                                        present_toast(
+                                            &auto_notice,
+                                            "warning",
+                                            &format!("{}：编辑授权即将到期，请在网页中再次打开此文件以继续独占编辑", task.file_name),
+                                        );
+                                        let _ = auto_handle.emit("tasks-changed", ());
+                                    }
+                                }
+                            }
+                        }
+                        last_renew = std::time::Instant::now();
+                    }
                     let notices = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
                     let writer = notices.clone();
                     let mut changed = false;
