@@ -41,7 +41,7 @@ fn update(root: &Path, id: &str, change: impl FnOnce(&mut Settings)) -> Result<(
 }
 pub fn set_enabled(root: &Path, id: &str, enabled: bool) -> Result<()> {
     let task = session::load(root, id)?;
-    if task.mode != "optimistic-edit" || task.device_id.is_none() {
+    if task.mode != "optimistic-edit" || (task.device_id.is_none() && !crate::v2_edit::is_v2(root, id)) {
         anyhow::bail!("此任务不支持自动上传");
     }
     update(root, id, |current| {
