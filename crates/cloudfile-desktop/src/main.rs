@@ -850,7 +850,25 @@ fn run(autostart: bool) -> anyhow::Result<()> {
             std::thread::spawn(move || {
                 let started = std::time::Instant::now();
                 let mut observer = auto_upload::Observer::default();
+                let mut last_renew = std::time::Instant::now();
                 loop {
+                    // Only the resident desktop renews Guards; browser lifetime
+                    // and popup windows must never drive a write lease.
+                    if last_renew.elapsed() >= std::time::Duration::from_secs(240) {
+                        if let Ok(tasks) = session::tasks(&auto_root) {
+                            for task in tasks {
+                                if task.mode == "exclusive-edit"
+                                    && cloudfile_core::v2_edit::has_checkout(&auto_root, &task.task_id)
+                                    && !journal::closed(&auto_root, &task.task_id).unwrap_or(true)
+                                {
+                                    if exclusive::renew_checkout(&auto_root, &task.task_id).is_err() {
+                                        let _ = auto_handle.emit("tasks-changed", ());
+                                    }
+                                }
+                            }
+                        }
+                        last_renew = std::time::Instant::now();
+                    }
                     let notices = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
                     let writer = notices.clone();
                     let mut changed = false;
