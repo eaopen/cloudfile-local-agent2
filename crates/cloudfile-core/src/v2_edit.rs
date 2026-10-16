@@ -122,7 +122,7 @@ pub fn open(root:&Path,uri:&str)->Result<Task>{
     let filename=std::path::Path::new(&remote).file_name()
        .and_then(|n|n.to_str()).filter(|s|!s.is_empty()&&*s!=".")
        .ok_or_else(||anyhow::anyhow!("文件名不可用"))?.to_string();
-    let dir_name=filename.replace(['/', '\\\\'],"_");
+    let dir_name=filename.replace('/', "_").replace(char::from(92), "_");
     let working=session::prepare_working_dir(root,&id)?;
     let dest=working.join(&dir_name);
     if dest.exists(){bail!("工作副本已存在，不能覆盖")}
