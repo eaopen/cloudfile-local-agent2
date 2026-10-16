@@ -306,7 +306,8 @@ fn resume(root: &Path, server: &str, ticket: &str) -> Result<Option<Task>> {
     if claims.mode != "exclusive-edit" {
         return Ok(None);
     }
-    for task in session::tasks(root)? {
+    // An unreadable sibling task must not block ordinary opening.
+    for task in session::tasks(root).unwrap_or_default() {
         if task.server != server
             || task.repo_id != claims.repo_id
             || task.remote_path != claims.path
