@@ -1,0 +1,19 @@
+name: Guard-only Rust core integration
+on:
+  push:
+    branches: [feature/v2-rust-guard-only]
+  pull_request:
+    branches: [dev]
+permissions:
+  contents: read
+jobs:
+  core:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test browser-scoped Guard-only Rust transport
+        run: cargo test -p cloudfile-core --lib --locked
+      - name: Enforce Rust formatting
+        run: cargo fmt --all -- --check
