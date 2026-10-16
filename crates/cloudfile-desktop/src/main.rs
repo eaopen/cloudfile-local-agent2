@@ -105,7 +105,7 @@ fn summaries(root: &Path, uploading: &Mutex<HashSet<String>>) -> anyhow::Result<
             "group":group,
             "local_changed":local_changed,
             "needs_review":needs_review,
-            "can_upload":task.mode == "optimistic-edit" && task.device_id.is_some(),
+            "can_upload":task.mode == "optimistic-edit" && (task.device_id.is_some() || cloudfile_core::v2_edit::is_v2(root, &task.task_id)),
             "exclusive":exclusive_mode,
             "has_lease":has_lease,
             "lease_acknowledged":acknowledged.unwrap_or(false),
