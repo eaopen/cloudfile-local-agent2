@@ -89,7 +89,7 @@ impl Observer {
             let id = &task.task_id;
             let current = settings(root, id)?;
             if task.mode != "optimistic-edit"
-                || task.device_id.is_none()
+                || (task.device_id.is_none() && !crate::v2_edit::is_v2(root, id))
                 || !current.enabled
                 || current.pause_reason.is_some()
                 || journal::pending(root, id)?.is_some()
