@@ -25,4 +25,5 @@ pub mod cdc;
 pub mod device;
 pub mod exclusive;
 pub mod paired_session;
+pub mod v2_edit;
 pub mod upload;
