@@ -31,6 +31,22 @@ struct State {
     ticket: String,
     guard: Option<Guard>,
 }
+#[derive(Deserialize)]
+struct TicketClaims {
+    repo_id: String,
+    path: String,
+    mode: String,
+    exp: i64,
+}
+/// Routing and expiry hint only: the native fileserver verifies every ticket.
+fn ticket_claims(ticket: &str) -> Option<TicketClaims> {
+    let payload = ticket.split('.').nth(1)?;
+    serde_json::from_slice(&B64.decode(payload).ok()?).ok()
+}
+/// Unix time at which the stored browser ticket stops authorizing the task.
+pub fn ticket_expires_at(root: &Path, id: &str) -> Option<i64> {
+    ticket_claims(&load(root, id).ok()?.ticket).map(|claims| claims.exp)
+}
 fn state_file(root: &Path, id: &str) -> Result<std::path::PathBuf> {
     Ok(session::task_dir(root, id)?.join("v2-edit.json"))
 }
@@ -130,6 +146,11 @@ pub fn open(root: &Path, uri: &str) -> Result<Task> {
         Sha256::digest(format!("{server}\\0{sid}").as_bytes())
     );
     let dir = session::task_dir(root, &id)?;
+    if !dir.join("task.json").exists() {
+        if let Some(task) = resume(root, &server, &ticket)? {
+            return Ok(task);
+        }
+    }
     storage::private_dir(&dir)?;
     let state = State {
         ticket,
@@ -273,6 +294,54 @@ pub fn open(root: &Path, uri: &str) -> Result<Task> {
     file.persist_noclobber(dest)?;
     storage::write(&dir.join("task.json"), &task)?;
     Ok(task)
+}
+/// Reopening a checked-out file from the browser is the only way to obtain a
+/// fresh ticket (no Agent login). Adopt it into the existing task ONLY when it
+/// renews the original Guard, which proves the same owner; otherwise fall
+/// back to an ordinary new Checkout.
+fn resume(root: &Path, server: &str, ticket: &str) -> Result<Option<Task>> {
+    let Some(claims) = ticket_claims(ticket) else {
+        return Ok(None);
+    };
+    if claims.mode != "exclusive-edit" {
+        return Ok(None);
+    }
+    for task in session::tasks(root)? {
+        if task.server != server
+            || task.repo_id != claims.repo_id
+            || task.remote_path != claims.path
+            || task.mode != "exclusive-edit"
+            || !is_v2(root, &task.task_id)
+            || journal::closed(root, &task.task_id).unwrap_or(true)
+        {
+            continue;
+        }
+        let dir = session::task_dir(root, &task.task_id)?;
+        let _lock = storage::lock(&dir.join("upload.lock"))?;
+        let mut st = load(root, &task.task_id)?;
+        let Some(g) = st.guard.clone() else {
+            continue;
+        };
+        let candidate = State {
+            ticket: ticket.into(),
+            guard: Some(g.clone()),
+        };
+        let renewed = request_json(
+            root,
+            &task,
+            &candidate,
+            "renew",
+            &json!({
+               "guard_id":g.guard_id,"generation":g.generation,"proof":g.proof
+            }),
+        );
+        if renewed.is_ok_and(|value| value["ok"] == true) {
+            st.ticket = ticket.into();
+            store(root, &task.task_id, &st)?;
+            return Ok(Some(task));
+        }
+    }
+    Ok(None)
 }
 fn status(root: &Path, task: &Task, st: &State) -> Result<Value> {
     let res = client()?
@@ -473,5 +542,18 @@ mod tests {
         assert!(!is_open_uri("cloudfile-open://v1/open?instance=x"));
         assert!(uri_parts("cloudfile-open://v2/open?instance=https%3A%2F%2Ffiles.example.com&session=11111111-1111-4111-8111-111111111111&ticket=x.y.z").is_ok());
         assert!(uri_parts("cloudfile-open://v2/open?instance=https%3A%2F%2Ffiles.example.com&session=11111111-1111-4111-8111-111111111111&ticket=nope").is_err());
+    }
+    #[test]
+    fn ticket_claims_route_reopen_without_trusting_signature() {
+        let payload = B64.encode(
+            br#"{"repo_id":"r","path":"/a.docx","mode":"exclusive-edit","exp":1700000000}"#,
+        );
+        let claims = ticket_claims(&format!("h.{payload}.s")).unwrap();
+        assert_eq!(claims.repo_id, "r");
+        assert_eq!(claims.path, "/a.docx");
+        assert_eq!(claims.mode, "exclusive-edit");
+        assert_eq!(claims.exp, 1700000000);
+        assert!(ticket_claims("h.not-json.s").is_none());
+        assert!(ticket_claims("nope").is_none());
     }
 }
