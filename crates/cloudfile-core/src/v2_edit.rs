@@ -60,7 +60,7 @@ fn endpoint(_root: &Path, task: &Task, op: &str) -> Result<String> {
 fn valid_id(s: &str) -> bool {
     s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
-fn read_response(mut res: reqwest::blocking::Response) -> Result<Value> {
+fn read_response(res: reqwest::blocking::Response) -> Result<Value> {
     let status = res.status();
     let mut buf = Vec::new();
     res.take(65537).read_to_end(&mut buf)?;
@@ -201,7 +201,7 @@ pub fn open(root: &Path, uri: &str) -> Result<Task> {
         .filter(|s| !s.is_empty() && *s != ".")
         .ok_or_else(|| anyhow::anyhow!("文件名不可用"))?
         .to_string();
-    let dir_name = filename.replace('/', "_").replace(char::from(92), "_");
+    let dir_name = filename.replace(['/', char::from(92)], "_");
     let working = session::prepare_working_dir(root, &id)?;
     let dest = working.join(&dir_name);
     if dest.exists() {
