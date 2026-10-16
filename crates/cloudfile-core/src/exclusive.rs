@@ -317,6 +317,10 @@ fn exclusive(root: &Path, id: &str) -> Result<(session::Task, Client, Lease)> {
 }
 /// Explicit user action. An existing pending intent must be recovered first.
 pub fn commit(root: &Path, id: &str, checkin: bool) -> Result<Value> {
+    if crate::v2_edit::is_v2(root, id) {
+        return crate::v2_edit::commit(root, id, checkin);
+    }
+
     let (_, client, _) = exclusive(root, id)?;
     commit_with(root, id, &client, checkin)
 }
@@ -344,6 +348,10 @@ pub fn commit_with(root: &Path, id: &str, client: &Client, checkin: bool) -> Res
 }
 /// Recovers the original intent without creating a new one or replacing bytes.
 pub fn recover(root: &Path, id: &str) -> Result<Value> {
+    if crate::v2_edit::is_v2(root, id) {
+        return crate::v2_edit::recover(root, id);
+    }
+
     let (_, client, _) = exclusive(root, id)?;
     recover_with(root, id, &client)
 }
@@ -363,6 +371,10 @@ pub fn recover_with(root: &Path, id: &str, client: &Client) -> Result<Value> {
 /// Explicit, user-triggered retry of the SAME frozen Intent, never a new
 /// snapshot or a new Intent. Always query first for an existing receipt.
 pub fn retry(root: &Path, id: &str) -> Result<Value> {
+    if crate::v2_edit::is_v2(root, id) {
+        return crate::v2_edit::commit(root, id, false);
+    }
+
     let (_, client, _) = exclusive(root, id)?;
     retry_with(root, id, &client)
 }
@@ -383,6 +395,10 @@ pub fn retry_with(root: &Path, id: &str, client: &Client) -> Result<Value> {
 }
 /// Releases the Checkout and marks the local session closed. Never automatic.
 pub fn release(root: &Path, id: &str) -> Result<Value> {
+    if crate::v2_edit::is_v2(root, id) {
+        return crate::v2_edit::release(root, id);
+    }
+
     let (_, client, _) = exclusive(root, id)?;
     release_with(root, id, &client)
 }
@@ -398,6 +414,10 @@ pub fn release_with(root: &Path, id: &str, client: &Client) -> Result<Value> {
     Ok(json!({"state":"released"}))
 }
 pub fn renew_checkout(root: &Path, id: &str) -> Result<Value> {
+    if crate::v2_edit::is_v2(root, id) {
+        return crate::v2_edit::renew(root, id);
+    }
+
     let (_, client, _) = exclusive(root, id)?;
     renew_with(root, id, &client)
 }
