@@ -28,6 +28,11 @@ fn state_file(root:&Path,id:&str)->Result<std::path::PathBuf> {
 pub fn is_v2(root:&Path,id:&str)->bool{
     state_file(root,id).is_ok_and(|file| file.exists())
 }
+/// A durable local credential indicates a possibly held Checkout even when
+/// the server has not been reached. Treat it as active for exit/upgrade safety.
+pub fn has_checkout(root:&Path,id:&str)->bool{
+    load(root,id).is_ok_and(|state| state.guard.is_some())
+}
 fn load(root:&Path,id:&str)->Result<State>{storage::read(&state_file(root,id)?)}
 fn store(root:&Path,id:&str,st:&State)->Result<()>{
     storage::write(&state_file(root,id)?,st)
