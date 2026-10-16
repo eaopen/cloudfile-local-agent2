@@ -168,6 +168,7 @@ fn issue(root:&Path,id:&str,observed:Option<&str>,checkin:bool)->Result<Value>{
     let mut st=load(root,id)?;
     if task.mode=="exclusive-edit" && st.guard.is_none() {bail!("Checkout 不存在")}
     let pending=journal::pending(root,id)?;
+    let was_pending=pending.is_some();
     let intent=match pending{
         Some(i)=>{
             if observed.is_some(){return Ok(json!({"state":"pending"}))}
@@ -184,7 +185,7 @@ fn issue(root:&Path,id:&str,observed:Option<&str>,checkin:bool)->Result<Value>{
     };
     // A caller-triggered retry MUST first check its original remote state.
     // Automatically observed edits never retry an uncertain pending snapshot.
-    if pending.is_some(){
+    if was_pending{
         let value=status(root,&task,&st)?;
         if value["sha256"]==intent.content_digest {
             return accept(root,id,&mut st,&intent,&value)
