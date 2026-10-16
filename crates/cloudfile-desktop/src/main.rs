@@ -73,7 +73,8 @@ fn summaries(root: &Path, uploading: &Mutex<HashSet<String>>) -> anyhow::Result<
         let lease = journal::lease(root, &task.task_id);
         let acknowledged = journal::lease_acknowledged(root, &task.task_id);
         let closed = journal::closed(root, &task.task_id);
-        let exclusive_mode = task.mode == "exclusive-edit" && task.device_id.is_some();
+        let exclusive_mode = task.mode == "exclusive-edit"
+            && (task.device_id.is_some() || cloudfile_core::v2_edit::is_v2(root, &task.task_id));
         let action = pending.as_ref().ok().and_then(|value| {
             value.as_ref().map(|intent| {
                 match intent.action {
@@ -89,7 +90,8 @@ fn summaries(root: &Path, uploading: &Mutex<HashSet<String>>) -> anyhow::Result<
         let local_changed = changed.as_ref().copied().unwrap_or(false);
         let is_uploading = busy.contains(&task.task_id);
         let has_pending = pending.ok().flatten().is_some();
-        let has_lease = lease.ok().flatten().is_some();
+        let has_lease = lease.ok().flatten().is_some()
+            || cloudfile_core::v2_edit::has_checkout(root, &task.task_id);
         let closed = closed.unwrap_or(false);
         // Three states the user can act on, in the order they matter.
         let group = if needs_review || has_pending || (exclusive_mode && !closed && !has_lease) {
@@ -108,7 +110,8 @@ fn summaries(root: &Path, uploading: &Mutex<HashSet<String>>) -> anyhow::Result<
             "can_upload":task.mode == "optimistic-edit" && (task.device_id.is_some() || cloudfile_core::v2_edit::is_v2(root, &task.task_id)),
             "exclusive":exclusive_mode,
             "has_lease":has_lease,
-            "lease_acknowledged":acknowledged.unwrap_or(false),
+            "lease_acknowledged":acknowledged.unwrap_or(false)
+                || cloudfile_core::v2_edit::has_checkout(root, &task.task_id),
             "checkout_closed":closed,
             "auto_upload":automatic.ok(),"uploading":is_uploading,
             "pending_upload":has_pending,"pending_action":action}));
