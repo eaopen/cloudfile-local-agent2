@@ -116,6 +116,14 @@ pub fn assess(root: &Path) -> Assessment {
                 if state.pending.is_some() {
                     reasons.push(Reason::PendingIntent);
                 }
+                if !state.closed && mode == "exclusive-edit"
+                    && crate::v2_edit::is_v2(root, &id) {
+                    if crate::v2_edit::has_checkout(root, &id) {
+                        reasons.push(Reason::ActiveCheckout);
+                    } else {
+                        reasons.push(Reason::UnreadableState);
+                    }
+                }
                 if state.closed {
                     // A confirmed checkin released the Checkout; nothing is held.
                     reasons.retain(|reason| *reason != Reason::ActiveCheckout);
