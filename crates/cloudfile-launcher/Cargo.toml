@@ -1,0 +1,9 @@
+[package]
+name = "cloudfile-launcher"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cloudfile-core = { path = "../cloudfile-core" }
+anyhow.workspace = true

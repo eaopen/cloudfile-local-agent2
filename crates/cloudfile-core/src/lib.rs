@@ -11,10 +11,11 @@ pub mod session;
 pub mod settings;
 pub mod storage;
 pub mod update;
+pub mod upgrade_guard;
 pub mod wire;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const HOST: &str = "com.cloudfile.agent22.dev";
+pub const HOST: &str = "com.cloudfile.agent23.dev";
 pub fn now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

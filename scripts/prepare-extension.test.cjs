@@ -20,7 +20,7 @@ test('dev packaging preserves the popup and uses the isolated Host without a pai
     ]);
     assert.equal(fs.readFileSync(path.join(output, 'popup.html'), 'utf8'), html);
     assert.equal(fs.existsSync(path.join(output, 'dev-pairing.js')), false);
-    assert.match(fs.readFileSync(path.join(output, 'background.js'), 'utf8'), /com\.cloudfile\.agent22\.dev/);
+    assert.match(fs.readFileSync(path.join(output, 'background.js'), 'utf8'), /com\.cloudfile\.agent23\.dev/);
     assert.deepEqual(JSON.parse(fs.readFileSync(path.join(output, 'manifest.json'))).permissions, ['nativeMessaging']);
     assert.match(fs.readFileSync(path.join(source, 'background.js'), 'utf8'), /com\.cloudfile\.agent2'/);
   } finally {

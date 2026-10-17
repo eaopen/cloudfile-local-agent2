@@ -1,8 +1,8 @@
 {
   "$schema":"https://schema.tauri.app/config/2",
-  "productName":"CloudFile Agent 2.2 Dev",
-  "version":"2.2.0-alpha.2",
-  "identifier":"com.cloudfile.agent22.dev",
+  "productName":"CloudFile Agent 2.3 Preview",
+  "version":"2.3.0-dev.1",
+  "identifier":"com.cloudfile.agent23.dev",
   "build":{"frontendDist":"ui"},
   "app":{
     "withGlobalTauri":true,

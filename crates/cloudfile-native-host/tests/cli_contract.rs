@@ -12,7 +12,7 @@ use std::process::Command;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const EXTENSION_ID: &str = "abcdefghijklmnopabcdefghijklmnop";
-const DEV_HOST: &str = "com.cloudfile.agent22.dev";
+const DEV_HOST: &str = "com.cloudfile.agent23.dev";
 
 #[test]
 fn chrome_launch_arguments_use_framed_native_messaging() {
@@ -122,7 +122,7 @@ impl Sandbox {
             self.local_app_data
                 .clone()
                 .unwrap()
-                .join("CloudFileAgent22/native-host")
+                .join("CloudFileAgent23/native-host")
         } else {
             self.home
                 .join("Library/Application Support/Google/Chrome/NativeMessagingHosts")

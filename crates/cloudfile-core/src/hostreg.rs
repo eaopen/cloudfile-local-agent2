@@ -7,7 +7,7 @@
 //! program.
 //!
 //! Development and production identities stay separate on purpose: the dev
-//! build registers `com.cloudfile.agent22.dev` and never touches the hosts the
+//! build registers `com.cloudfile.agent23.dev` and never touches the hosts the
 //! shipped Windows and macOS agents use.
 use crate::storage;
 use anyhow::{bail, Context, Result};
@@ -17,7 +17,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Isolated development host. Registered by this agent only.
-pub const DEV_HOST: &str = "com.cloudfile.agent22.dev";
+pub const DEV_HOST: &str = "com.cloudfile.agent23.dev";
 /// Hosts the shipped agents own. Listed so takeover can be explicit and
 /// reversible; never rewritten during development.
 pub const LEGACY_HOSTS: &[&str] = &[
@@ -26,7 +26,7 @@ pub const LEGACY_HOSTS: &[&str] = &[
     "com.cloudfile.local_agent",
 ];
 
-pub const DESCRIPTION: &str = "CloudFile Agent 2.2 Native Host";
+pub const DESCRIPTION: &str = "CloudFile Agent 2.3 Native Host";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Registration {
@@ -84,7 +84,7 @@ pub fn default_manifest_dir(
         "macos" => Ok(home.join("Library/Application Support/Google/Chrome/NativeMessagingHosts")),
         "windows" => {
             let local = local_app_data.context("LOCALAPPDATA is unavailable")?;
-            Ok(local.join("CloudFileAgent22").join("native-host"))
+            Ok(local.join("CloudFileAgent23").join("native-host"))
         }
         _ => bail!("native host registration supports Windows and macOS only"),
     }
@@ -267,7 +267,9 @@ pub fn install(
 fn is_agent_binary(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
-        .is_some_and(|name| name.starts_with("cloudfile-native-host"))
+        .is_some_and(|name| {
+            name.starts_with("cloudfile-native-host") || name.starts_with("cloudfile-launcher")
+        })
 }
 
 /// Removes only a manifest this agent owns. A foreign host is left untouched.
@@ -367,7 +369,7 @@ mod tests {
         );
         assert_eq!(
             default_manifest_dir("windows", home, Some(local)).unwrap(),
-            local.join("CloudFileAgent22/native-host")
+            local.join("CloudFileAgent23/native-host")
         );
         assert!(default_manifest_dir("linux", home, Some(local)).is_err());
         assert!(default_manifest_dir("windows", home, None).is_err());
@@ -377,7 +379,7 @@ mod tests {
     fn the_registry_key_is_fixed_for_the_current_user() {
         assert_eq!(
             registry_key(DEV_HOST),
-            "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.cloudfile.agent22.dev"
+            "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.cloudfile.agent23.dev"
         );
         assert_eq!(
             registry_key(LEGACY_HOSTS[0]),
@@ -387,13 +389,13 @@ mod tests {
 
     #[test]
     fn registry_arguments_are_exact_and_reversible() {
-        let manifest = Path::new(BASE).join("native-host/com.cloudfile.agent22.dev.json");
+        let manifest = Path::new(BASE).join("native-host/com.cloudfile.agent23.dev.json");
         let add = registry_arguments(DEV_HOST, Some(&manifest)).unwrap();
         assert_eq!(
             add,
             vec![
                 "add",
-                "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.cloudfile.agent22.dev",
+                "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.cloudfile.agent23.dev",
                 "/ve",
                 "/t",
                 "REG_SZ",
@@ -410,7 +412,7 @@ mod tests {
             remove,
             vec![
                 "delete",
-                "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.cloudfile.agent22.dev",
+                "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.cloudfile.agent23.dev",
                 "/f"
             ]
             .into_iter()

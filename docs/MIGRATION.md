@@ -11,7 +11,7 @@
 - GitHub：`eaopen/cloudfile-local-agent2`
 - 长期开发：`dev`；短期分支：`feature/<name>`；发行 `v2.2.x`
 - Cargo：保持 `cloudfile-core`、`cloudfile-native-host`、`cloudfile-desktop`，避免无用重命名
-- 正式产品：CloudFile Agent 2.2；开发产品：CloudFile Agent 2.2 Dev
+- 正式产品：CloudFile Agent 2.3；开发产品：CloudFile Agent 2.3 Dev
 
 ## 机械迁移后必须扫描
 

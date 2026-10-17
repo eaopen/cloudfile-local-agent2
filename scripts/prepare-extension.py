@@ -18,7 +18,7 @@ import pathlib
 import shutil
 import sys
 
-DEV_HOST = 'com.cloudfile.agent22.dev'
+DEV_HOST = 'com.cloudfile.agent23.dev'
 REPLACED_HOSTS = [
     'com.cloudfile.agent2',
     'com.cloudfile.local_agent',
@@ -77,7 +77,7 @@ def main():
 
     p = target / 'manifest.json'
     m = json.loads(p.read_text())
-    m['name'] = 'CloudFile Agent 2.2 Dev'
+    m['name'] = 'CloudFile Agent 2.3 Dev'
     p.write_text(json.dumps(m, ensure_ascii=False, indent=2))
 
     print(f'{target}\n  source: {source} ({origin})\n  dev host: {DEV_HOST}')

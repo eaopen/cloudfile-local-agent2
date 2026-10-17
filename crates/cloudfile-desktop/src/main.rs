@@ -1,4 +1,4 @@
-//! CloudFile Agent 2.2 desktop process.
+//! CloudFile Agent 2.3 desktop process.
 //!
 //! One resident process owns every task, lease and publication intent. The tray
 //! menu, the draggable entry and the light notice are all views onto that same
@@ -46,7 +46,11 @@ fn desktop_binary() -> PathBuf {
 }
 
 fn host_binary() -> Option<PathBuf> {
-    let directory = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    let exe = std::env::current_exe().ok()?;
+    if let Some(launcher) = update::launcher_binary(&update::install_root(&exe)) {
+        return Some(launcher);
+    }
+    let directory = exe.parent()?.to_path_buf();
     let name = if cfg!(windows) {
         "cloudfile-native-host.exe"
     } else {
@@ -444,16 +448,17 @@ async fn check_update(state: tauri::State<'_, State>) -> Result<Value, String> {
 /// it is refused while anything is at risk unless the caller passes `force`
 /// with the user's explicit consent — the same rule the exit path follows.
 #[tauri::command]
-fn run_update(state: tauri::State<'_, State>, force: bool) -> Result<Value, String> {
+fn run_update(state: tauri::State<'_, State>, _force: bool) -> Result<Value, String> {
     let config = session::config(&state.root).map_err(|error| error.to_string())?;
     if config.update_source.is_none() || config.update_public_key.is_none() {
         return Err("尚未配置签名更新源；请在配置中设置更新地址与公钥后再升级".to_string());
     }
-    let assessment = guard::assess(&state.root);
-    if !assessment.safe_to_exit && !force {
+    let assessment = cloudfile_core::upgrade_guard::assess(&state.root);
+    let binary = host_binary().ok_or_else(|| "本机未找到 cloudfile-native-host".to_string())?;
+    let managed = update::launcher_binary(&update::install_root(&binary)).is_some();
+    if !managed && !assessment.safe_to_upgrade {
         return Ok(json!({"state": "blocked", "assessment": assessment}));
     }
-    let binary = host_binary().ok_or_else(|| "本机未找到 cloudfile-native-host".to_string())?;
     let mut command = std::process::Command::new(binary);
     command
         .arg("--update")
@@ -633,7 +638,7 @@ fn refresh_tray(state: &State, app: &tauri::AppHandle) {
         )
     };
     if let Some(tray) = app.tray_by_id("main") {
-        let _ = tray.set_tooltip(Some(format!("CloudFile Agent 2.2 · {summary}")));
+        let _ = tray.set_tooltip(Some(format!("CloudFile Agent 2.3 · {summary}")));
     }
     if let Ok(row) = state.guard_row.lock() {
         if let Some(item) = row.as_ref() {
@@ -648,7 +653,7 @@ fn refresh_tray(state: &State, app: &tauri::AppHandle) {
 }
 
 const USAGE: &str = "\
-CloudFile Agent 2.2 desktop
+CloudFile Agent 2.3 desktop
 
 Usage: cloudfile-desktop [--autostart]
 
@@ -787,7 +792,7 @@ fn run(autostart: bool) -> anyhow::Result<()> {
             let tray = TrayIconBuilder::with_id("main")
                 .icon(icon)
                 .icon_as_template(cfg!(target_os = "macos"))
-                .tooltip("CloudFile Agent 2.2")
+                .tooltip("CloudFile Agent 2.3")
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "open" => show(app),
