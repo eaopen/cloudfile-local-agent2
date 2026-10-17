@@ -43,7 +43,7 @@
       <summary>如何开始本地编辑？</summary>
       <div class="help-content">
         <p>在 CloudFile 网页选择文件，点击“本地编辑”。文件打开后，回到本机应用继续工作。</p>
-        <div class="help-columns"><div><strong>普通编辑</strong><p>在本机应用保存后，Agent 自动上传；需要时也可手动保存云端。</p></div><div><strong>独占编辑</strong><p>编辑完成后，在任务中选择“提交”或“签入并释放”。</p></div></div>
+        <div class="help-columns"><div><strong>本地打开</strong><p>用于查看或参考；本地修改不会自动上传。</p></div><div><strong>普通编辑</strong><p>在本机应用保存后，Agent 自动上传；需要时也可手动保存云端。</p></div><div><strong>独占编辑</strong><p>编辑完成后，在任务中选择“提交版本”或“签入并释放”。</p></div></div>
         <p class="hint">遇到冲突或提交结果待确认，请在任务列表处理。本地文件会保留。单文件上限 128 MiB。</p>
         <p id="cdc-hint" class="hint" hidden>已启用大文件分块上传，符合条件时自动复用云端分块。</p>
       </div>
@@ -79,6 +79,7 @@
   </div>
   <div id="message" role="status" aria-live="polite"></div>
 </main>
+<script src="task-ux.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

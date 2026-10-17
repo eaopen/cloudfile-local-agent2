@@ -6,6 +6,7 @@
 // user's choice.
 const invoke = window.__TAURI__.core.invoke;
 const listen = window.__TAURI__.event.listen;
+const taskUX = window.CloudFileTaskUX;
 
 const message = document.querySelector('#message');
 const tasks = document.querySelector('#tasks');
@@ -139,9 +140,9 @@ function say(text) {
 }
 
 function stateText(result) {
-  if (result.state === 'published') return '已提交到云端。';
+  if (result.state === 'published') return '云端已确认新版本。';
   if (result.state === 'unchanged') return '没有需要提交的修改。';
-  if (result.state === 'pending') return '原提交尚未确认；请先查询原提交结果。';
+  if (result.state === 'pending') return '提交结果尚未确认，本地副本已保留；请先查询原提交结果。';
   if (result.state === 'released') return '已释放 Checkout，本地任务已关闭。';
   if (result.state === 'renewed') return 'Checkout 已续租。';
   if (result.state === 'running') return '更新已在后台开始；完成前不会替换正在运行的版本。';
@@ -174,44 +175,7 @@ const REASON_TEXT = {
   'active-checkout': '独占 Checkout 仍在续租中',
 };
 
-function automaticStatus(task, automatic, working) {
-  if (working) return 'Agent 正在上传…';
-  if (task.needs_review) return '工作副本需要检查';
-  if (task.pending_upload) {
-    if (task.pending_action === 'checkin') return '原签入待确认，本地修改已保留';
-    if (task.pending_action === 'commit') return '原提交待确认，本地修改已保留';
-    return '原上传待确认，本地修改已保留';
-  }
-  if (automatic && automatic.pause_reason) return '自动上传已暂停，本地修改已保留';
-  if (task.local_changed) {
-    return automatic && automatic.enabled
-      ? '有本地修改，等待文件保存稳定后自动上传'
-      : '有本地修改，自动上传已关闭';
-  }
-  if (automatic && automatic.last_synced_at) {
-    return '已保存云端 · ' + new Date(automatic.last_synced_at * 1000).toLocaleTimeString();
-  }
-  return '与云端保存基线一致';
-}
-
-function exclusiveStatus(task, working) {
-  if (working) return '正在提交…';
-  if (task.checkout_closed) return '已签入并释放 Checkout；如需继续编辑请从网页重新发起';
-  if (!task.has_lease) return 'Checkout 租约尚未就绪；请重新打开该文件以完成领取';
-  if (!task.lease_acknowledged) return 'Checkout 交付尚未确认；请重新打开该文件';
-  if (task.authorization_expires_at) {
-    const remaining = task.authorization_expires_at * 1000 - Date.now();
-    if (remaining <= 0) return '编辑授权已到期；请在网页中再次打开此文件以恢复 Checkout，本地修改已保留';
-    if (remaining < 10 * 60 * 1000) return '编辑授权即将到期；请在网页中再次打开此文件以续期';
-  }
-  if (task.pending_upload) {
-    return task.pending_action === 'checkin'
-      ? '原签入待确认，本地修改已保留'
-      : '原提交待确认，本地修改已保留';
-  }
-  if (task.local_changed) return '有本地修改，可提交保留 Checkout，或签入并释放';
-  return '与云端保存基线一致';
-}
+// Mode-specific task messages are derived by task-ux.js, not inferred by UI actions.
 
 function button(label, handler, { secondary = false, disabled = false } = {}) {
   const element = document.createElement('button');
@@ -232,18 +196,22 @@ function openButton(task) {
         say(String(error));
       }
     },
-    { secondary: true, disabled: task.needs_review },
+    { secondary: true },
   );
 }
 
 function renderOptimistic(buttons, task, automatic, working) {
   buttons.append(openButton(task));
-  buttons.append(
-    button(task.pending_upload ? '重试原上传' : '保存云端', () => action(task, 'save_cloud'), {
-      secondary: Boolean(task.pending_upload),
-      disabled: working || task.needs_review || (!task.local_changed && !task.pending_upload),
-    }),
-  );
+  if (task.pending_upload) {
+    buttons.append(button('查询原上传结果', () => action(task, 'recover_upload'), { disabled: working }));
+    buttons.append(button('重新尝试原上传', () => action(task, 'save_cloud'), {
+      secondary: true, disabled: working || task.needs_review,
+    }));
+  } else {
+    buttons.append(button('立即上传', () => action(task, 'save_cloud'), {
+      disabled: working || task.needs_review || !task.local_changed,
+    }));
+  }
   const paused = Boolean(automatic && automatic.pause_reason);
   buttons.append(
     button(
@@ -262,9 +230,6 @@ function renderOptimistic(buttons, task, automatic, working) {
       { secondary: true, disabled: working || task.needs_review || task.pending_upload },
     ),
   );
-  if (task.pending_upload) {
-    buttons.append(button('查询上传结果', () => action(task, 'recover_upload'), { disabled: working }));
-  }
 }
 
 function renderExclusive(buttons, task, working) {
@@ -272,7 +237,7 @@ function renderExclusive(buttons, task, working) {
   if (task.checkout_closed) return;
   const pending = task.pending_upload;
   buttons.append(
-    button('提交', () => action(task, 'commit_task', { checkin: false }), {
+    button('提交版本（继续独占）', () => action(task, 'commit_task', { checkin: false }), {
       disabled: working || task.needs_review || pending,
     }),
   );
@@ -284,7 +249,7 @@ function renderExclusive(buttons, task, working) {
   );
   if (pending) {
     buttons.append(button('查询提交结果', () => action(task, 'recover_commit'), { disabled: working }));
-    buttons.append(button('重试原提交', () => action(task, 'retry_commit'), {
+    buttons.append(button('重新尝试原提交', () => action(task, 'retry_commit'), {
       secondary: true, disabled: working,
     }));
   }
@@ -295,7 +260,10 @@ function renderExclusive(buttons, task, working) {
     }),
   );
   buttons.append(
-    button('放弃保留', () => action(task, 'release_checkout'), {
+    button('释放独占（不提交）', () => {
+      const warning = taskUX.releaseWarning(task);
+      if (warning && window.confirm(warning)) action(task, 'release_checkout');
+    }, {
       secondary: true,
       disabled: working || pending || !task.has_lease,
     }),
@@ -314,13 +282,22 @@ function renderTask(task) {
   const status = document.createElement('span');
   const working = busy.has(task.task_id) || task.uploading;
   const automatic = task.auto_upload;
-  status.textContent = task.exclusive
-    ? exclusiveStatus(task, working)
-    : automaticStatus(task, automatic, working);
+  status.textContent = taskUX.status(task, automatic, working);
   const mode = document.createElement('small');
   mode.className = 'hint';
-  mode.textContent = task.exclusive ? '独占编辑' : '普通编辑';
+  mode.textContent = taskUX.modeLabel(task);
+  const source = document.createElement('small');
+  source.className = 'task-source';
+  source.textContent = [task.service, task.remote_path].filter(Boolean).join(' · ');
   info.append(name, mode, status);
+  if (source.textContent) info.append(source);
+  const reference = taskUX.referenceHint(task.file_name);
+  if (reference) {
+    const warning = document.createElement('small');
+    warning.className = 'task-reference';
+    warning.textContent = reference;
+    info.append(warning);
+  }
 
   if (automatic && automatic.pause_reason && !task.exclusive) {
     const reason = document.createElement('p');
@@ -339,10 +316,9 @@ function renderTask(task) {
     buttons.append(openButton(task));
     const hint = document.createElement('small');
     hint.className = 'hint';
-    hint.textContent =
-      task.mode === 'local-view'
-        ? '只读副本'
-        : '旧会话仅支持本地打开；请从网页重新选择本地编辑';
+    hint.textContent = task.mode === 'local-view'
+      ? '仅供查看，本地修改不会回传云端'
+      : '旧会话仅支持本地打开；要上传请从网页重新发起普通编辑';
     buttons.append(hint);
   }
 
