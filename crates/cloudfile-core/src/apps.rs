@@ -106,9 +106,11 @@ impl OpenRule {
 /// editing rule.
 pub fn mode_family(mode: &str) -> &str {
     match mode {
-        "exclusive-edit" => "exclusive-edit",
+        // Checkout changes server authorization and commit lifecycle, not
+        // which application is suitable to open the local file.
+        "exclusive-edit" | "optimistic-edit" | "local-edit" => "local-edit",
         "local-view" => "local-view",
-        _ => "local-edit",
+        _ => "unknown",
     }
 }
 
@@ -787,6 +789,27 @@ mod tests {
         rule("ok", &["local-edit"], &["dwg"], &[TOOL, "{file}"])
             .validate()
             .unwrap();
+    }
+
+    #[test]
+    fn exclusive_checkout_uses_edit_application_rule_but_view_does_not() {
+        let rule = rule("company-cad", &["local-edit"], &["dwg"], &[TOOL, "{file}"]);
+        rule.validate().unwrap();
+        let rules = vec![rule];
+        assert_eq!(
+            resolve_open_rule(&rules, "optimistic-edit", "drawing.dwg")
+                .unwrap()
+                .id,
+            "company-cad"
+        );
+        assert_eq!(
+            resolve_open_rule(&rules, "exclusive-edit", "drawing.dwg")
+                .unwrap()
+                .id,
+            "company-cad"
+        );
+        assert!(resolve_open_rule(&rules, "local-view", "drawing.dwg").is_none());
+        assert!(resolve_open_rule(&rules, "other-mode", "drawing.dwg").is_none());
     }
 
     #[test]

@@ -43,6 +43,8 @@ jobs:
         run: cargo test --workspace --locked --no-fail-fast
       - name: Test development extension packaging
         run: node --test scripts/prepare-extension.test.cjs
+      - name: Test local task-centre UX rules
+        run: node --test crates/cloudfile-desktop/tests/task-ux.test.cjs
       - name: Package development build
         run: python scripts/package.py
       - uses: actions/upload-artifact@v4
