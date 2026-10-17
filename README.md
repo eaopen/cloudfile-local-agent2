@@ -59,14 +59,14 @@ cloudfile-native-host --status                                            # 版�
 
 ### 大文件 CDC 分块上传
 
-客户端开关 `CLOUDFILE_AGENT2_CDC_ENABLED=1`，需与服务端 `CLOUDFILE_AGENT2_CDC_ENABLED` 同时开启。边界与顺序：
+**V2 目标语义：** CDC 是同一编辑提交引擎的自动传输策略，根据当前文件大小、块复用收益和服务端提供的实际分块接口能力选择；不要求用户在客户端和服务端各配置一个功能 ENABLE。以下为现有开发版尚待真实联调的传输安全边界：
 
 - 计划、暂存、发布每一步都单独向 `commit-upload-authorize`（或 `optimistic-upload-authorize`）申请一次性的 60 秒票据；不跨步复用，票据只在 header 里传。
 - 暂存原始块不改变任何文件：只有原生 Branch 内的守卫事务才写文件路径，并在其中重新校验账号、设备、租约、基线与回执。
 - 回退是安全的：计划请求失败或计划显示不划算时，尚未发布任何内容，因此回落到全量传输仍使用同一个已准备 Intent。一旦发布请求已发出，就不再回退——回执丢失时保留工作副本与原快照，先“查询提交结果”。
 - 单文件上限 128 MiB、单块上限 10 MiB、单 Intent 最多 64 块，与 `cf_device_block_plan` 一致。
 
-服务端边界：`optimistic-edit` 需要 `CLOUDFILE_AGENT2_OPTIMISTIC_UPLOAD_ENABLED`，`exclusive-edit` 需要部署显式开启 Agent2 独占能力（`CLOUDFILE_EDITING_ENABLED` + Agent2 exclusive 开关）。分块传输另需两侧同时开启 `CLOUDFILE_AGENT2_CDC_ENABLED`。接口未启用会显示失败并保留副本，不会降级为普通网页上传；分块传输未启用时会回落到全量传输。
+**V2 对接边界：** 普通乐观编辑始终属于 CloudFile 内置能力；独占编辑依赖服务端真实安装并验证的 `cf_edit_guard` 和原生写入围栏。CDC 仅在真实分块协议支持时才选择，否则在尚未发布的安全边界内使用全量上传。旧版 mock/v0.9 协议中的 `CLOUDFILE_*_ENABLED` 参数不是 V2 产品部署要求；本仓库对旧协议的运行实现与真实 Hub/Server 对接尚未完成，不能仅凭文档更新宣称已取消旧代码门禁。接口缺失必须明确返回不可用并保留工作副本，不能盲目回退或越权发布。
 
 验证：macOS 编译、静态检查与协议集成测试。CDC 分块切分与参考 Agent 的字节输出做交叉校验（32 MiB 镜像的块 ID、尺寸、SHA-256 与 File ID 完全一致），并在 mock Hub 上覆盖计划、只上传缺失块、发布、不划算回落、传输未启用回落与暂存被拒保留原 Intent。尚未完成运行中 Hub/Server + Chrome + Office 的端到端验收，也未实机验证 Windows，真实服务端分块上传仍待联调。
 
@@ -115,9 +115,9 @@ cargo build -p cloudfile-native-host --locked
 2. 支持首次配对的网页在第一次本地编辑时通过 `pair_prepare`、`pair_sign`、`pair_confirm` 完成设备配对；扩展弹窗不再添加临时“连接 Agent 2.2”按钮。浏览器登录 Cookie 不会交给 Agent。此流程需要网页和 Hub 同步支持并启用相关接口，Agent 就绪不代表设备已配对。
 3. 从网页发起“普通本地编辑”（设备会话 `cloudfile-open://v1/open`），在本地应用保存修改。
 4. Agent 在文件内容稳定后自动上传，也可在任务中心点击“保存云端”。确认发布后可继续编辑。
-5. 独占编辑：从网页发起独占会话（服务端需开启 Agent2 独占能力），Agent 领取并确认 Checkout 租约后在任务中心显示“独占编辑”任务；点击“提交”保留 Checkout，点击“签入并释放”结束本次独占。提交结果未确认时先点“查询提交结果”，不会自动重发。
+5. 独占编辑：从网页发起独占会话（服务端需具备并实际执行 Checkout Guard 能力），Agent 领取并确认 Checkout 租约后在任务中心显示“独占编辑”任务；点击“提交”保留 Checkout，点击“签入并释放”结束本次独占。提交结果未确认时先点“查询提交结果”，不会自动重发。
 
-服务端必须已启用设备会话。普通编辑需要 `CLOUDFILE_AGENT2_OPTIMISTIC_UPLOAD_ENABLED` 并部署原生发布接口；独占编辑还需要部署显式开启 Agent2 独占能力（`CLOUDFILE_EDITING_ENABLED` 与 Agent2 exclusive 开关，默认关闭）。接口未启用会显示失败并保留副本，不会降级为普通网页上传。
+V2 不要求单独开启普通编辑或独占编辑功能开关：普通编辑必须有合法原生发布接口；独占取决于服务端 Guard 是否已安装、验证并强制执行。Agent2 当前旧版设备会话/签名和真实 V2 Hub/Server 仍需联调，不能把历史开关参数直接复制到新版部署。接口或授权不可用时显示失败并保留副本，不降级为未经验证的 Web 上传。
 原上传待确认时，“查询上传结果”只查询；“重试原上传”先查询，再在未发布时重发同一 Intent 的原快照。后来修改仍留在工作副本，下次保存再上传。独占编辑对应“查询提交结果”，语义相同，但只在新独立提交/签入时可再次发起，且签入成功后本地会话关闭，必须从网页重新发起。
 
 ```sh
