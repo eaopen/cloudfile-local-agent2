@@ -127,6 +127,18 @@ pub fn install(binary: &Path) -> Result<()> {
         add(&class, Some("URL Protocol"), "")?;
         add(&format!(r"{class}\shell\open\command"), None, &command)?;
         add(&associations, Some(scheme), progid)?;
+        // No client present: a protocol scheme must itself exist for Windows
+        // to launch a URL. Register it ONLY when HKCR has no handler at all.
+        // If SeaDrive/Sync Client owns the merged HKCR scheme, do not create
+        // an HKCU shadow entry that would silently take precedence.
+        let direct = format!(r"HKCU\Software\Classes\{scheme}");
+        let merged = format!(r"HKCR\{scheme}");
+        if owned(&direct) || (!exists(&merged) && !exists(&direct)) {
+            add(&direct, Some(OWNER_VALUE), OWNER_ID)?;
+            add(&direct, None, &format!("URL:{scheme} (CloudFile Agent2)"))?;
+            add(&direct, Some("URL Protocol"), "")?;
+            add(&format!(r"{direct}\shell\open\command"), None, &command)?;
+        }
     }
     // Application capability is deliberately NOT a UserChoice write. Existing
     // Seafile or SeaDrive handling remains the default until user chooses us.
@@ -147,6 +159,13 @@ pub fn uninstall() -> Result<()> {
         let class = format!(r"HKCU\Software\Classes\{progid}");
         if exists(&class) && !owned(&class) {
             bail!("one protocol class is no longer Agent-owned");
+        }
+    }
+    // Finish validating ownership before mutating ANY protocol entry.
+    for (scheme, _) in PROGIDS {
+        let direct = format!(r"HKCU\Software\Classes\{scheme}");
+        if owned(&direct) {
+            remove(&direct)?;
         }
     }
     // Remove our capability first, not somebody else's active UserChoice.

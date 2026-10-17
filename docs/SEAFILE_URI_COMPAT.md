@@ -36,7 +36,10 @@ cloudfile-native-host.exe --protocol-state
 
 Registration creates **HKCU-only** application ProgIDs and Windows
 `RegisteredApplications` capabilities for `seafile` and `cloudfile-open`.
-It intentionally does **not** change `UserChoice` or the default handlers
+If neither the current user nor the machine has an existing URL-scheme handler,
+it also registers a direct HKCU scheme so the URL can actually launch without
+SeaDrive. It refuses to shadow an existing merged HKCR handler. It
+intentionally does **not** change `UserChoice` or the default handlers
 already selected for Seafile Sync Client / SeaDrive. Users can select CloudFile
 Agent2 via *Windows Settings → Apps → Default apps → Choose defaults by link
 type*. Unknown or non-Agent-owned registry classes are never overwritten.
