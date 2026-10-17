@@ -160,3 +160,11 @@ Rust 测试与开发扩展打包测试，并生成开发 ZIP 上传 Artifact；
 - **Code signing / 公证 / 运行时安装器**。当前 ZIP 是开发包。
 
 参考：[Tauri v2](https://v2.tauri.app/)、[Chrome Native Messaging](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging)。
+
+### Seafile `seafile://` legacy links (Windows per-user compatibility)
+
+See [Seafile URI compatibility and non-admin deployment](docs/SEAFILE_URI_COMPAT.md).
+The optional Windows registration advertises link handlers without overriding
+an installed SeaDrive/Sync Client default. Legacy links remain untrusted
+locators; a fresh file opens the authorized web page for a new V2 editing
+grant. No SeaDrive engine or file-system driver is bundled.

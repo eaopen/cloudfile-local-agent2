@@ -85,6 +85,40 @@ fn run_command(args: &[String]) -> anyhow::Result<()> {
     let host = flag(args, "--host-name").unwrap_or_else(|| hostreg::DEV_HOST.to_string());
     let command = args[0].as_str();
     match command {
+        "--open-uri" => {
+            if args.len() != 2 {
+                anyhow::bail!("--open-uri requires exactly one URI");
+            }
+            let uri = &args[1];
+            if uri.len() > 16384
+                || !(uri.starts_with("seafile://") || uri.starts_with("cloudfile-open://"))
+            {
+                anyhow::bail!("unsupported OS protocol URL");
+            }
+            let result = ipc::call(&root, wire::Request::OpenUri { uri: uri.clone() })?;
+            if result["ok"] != true {
+                anyhow::bail!(
+                    "{}",
+                    result["error"].as_str().unwrap_or("desktop rejected URL")
+                );
+            }
+            println!("{}", serde_json::to_string(&result)?);
+        }
+        "--register-protocols" => {
+            let binary = host_binary()?;
+            cloudfile_core::protocol_registration::install(&binary)?;
+            println!("registered per-user URL handler candidates; select defaults in OS settings");
+        }
+        "--unregister-protocols" => {
+            cloudfile_core::protocol_registration::uninstall()?;
+            println!("removed Agent-owned URL handler candidates");
+        }
+        "--protocol-state" => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&cloudfile_core::protocol_registration::state()?)?
+            );
+        }
         "--version" => println!("{}", cloudfile_core::VERSION),
         "--component" => {
             let value = json!({

@@ -1003,6 +1003,18 @@ fn run(autostart: bool) -> anyhow::Result<()> {
                         }
                         Err(error) => wire::error(&error.to_string()),
                     },
+                    wire::Request::OpenUri { uri } if uri.starts_with("seafile:") => {
+                        match cloudfile_core::legacy_seafile::dispatch(&root, &uri) {
+                            Ok(cloudfile_core::legacy_seafile::Destination::ExistingTask(_)) => {
+                                show(&handle);
+                                json!({"ok":true,"state":"opened-local-copy"})
+                            }
+                            Ok(cloudfile_core::legacy_seafile::Destination::BrowserUrl(_)) => {
+                                json!({"ok":true,"state":"requires-browser-auth"})
+                            }
+                            Err(error) => wire::error(&error.to_string()),
+                        }
+                    },
                     wire::Request::OpenUri { uri } => match paired_session::open(&root, &uri) {
                         Ok(task) => {
                             show(&handle);
