@@ -17,7 +17,7 @@ use crate::storage;
 use anyhow::Context;
 
 pub const MACOS_LABEL: &str = "com.cloudfile.agent22.autostart";
-pub const WINDOWS_VALUE: &str = "CloudFileAgent22";
+pub const WINDOWS_VALUE: &str = "CloudFileAgent23";
 
 fn xml_escape(value: &str) -> String {
     value
@@ -228,9 +228,9 @@ mod tests {
 
     /// Same, for the registry argument test, which needs an `.exe` suffix.
     #[cfg(windows)]
-    const EXE: &str = "C:/CloudFileAgent22/cloudfile-desktop.exe";
+    const EXE: &str = "C:/CloudFileAgent23/cloudfile-desktop.exe";
     #[cfg(not(windows))]
-    const EXE: &str = "/opt/CloudFileAgent22/cloudfile-desktop.exe";
+    const EXE: &str = "/opt/CloudFileAgent23/cloudfile-desktop.exe";
 
     #[test]
     fn plist_is_a_well_formed_login_item() {
@@ -277,7 +277,7 @@ mod tests {
             add[1],
             "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"
         );
-        assert_eq!(add[3], "CloudFileAgent22");
+        assert_eq!(add[3], "CloudFileAgent23");
         assert_eq!(add[7], EXE);
         assert_eq!(add.len(), 9);
         let remove = run_key_arguments(WINDOWS_VALUE, None).unwrap();
@@ -287,7 +287,7 @@ mod tests {
                 "delete",
                 "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
                 "/v",
-                "CloudFileAgent22",
+                "CloudFileAgent23",
                 "/f"
             ]
             .into_iter()

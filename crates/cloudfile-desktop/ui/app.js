@@ -145,7 +145,7 @@ function stateText(result) {
   if (result.state === 'pending') return '提交结果尚未确认，本地副本已保留；请先查询原提交结果。';
   if (result.state === 'released') return '已释放 Checkout，本地任务已关闭。';
   if (result.state === 'renewed') return 'Checkout 已续租。';
-  if (result.state === 'running') return '更新已在后台开始；完成前不会替换正在运行的版本。';
+  if (result.state === 'running') return '正在后台准备更新包；有活动编辑时待安全启动后切换。';
   return '操作已完成。';
 }
 
@@ -616,21 +616,10 @@ function wire() {
     try {
       let result = await invoke('run_update', { force: false });
       if (result.state === 'blocked') {
-        // Exactly the exit dialog's trade-off: an upgrade stops the process
-        // that renews Checkouts, so it is never silent when something is at risk.
-        const risks = (result.assessment && result.assessment.risks) || [];
-        const detail = risks
-          .slice(0, 4)
-          .map((risk) => `${risk.file_name}：${REASON_TEXT[risk.reasons[0]] || risk.reasons[0]}`)
-          .join('\n');
-        const proceed = window.confirm(
-          `仍有任务未处理，升级会中断后台续租：\n${detail}\n\n本地工作副本与待确认的 Intent 都会保留。是否继续升级？`,
-        );
-        if (!proceed) {
-          say('已取消升级；当前版本保持不变。');
-          return;
-        }
-        result = await invoke('run_update', { force: true });
+        const blockers = result.assessment?.blockers || [];
+        const detail = blockers.slice(0, 3).map(item => item.file_name || item.reason).join('、');
+        say(`升级暂缓：仍有编辑任务需要结束或确认（${detail}）。本地文件已保留，不会自动关闭或释放 Checkout。`);
+        return;
       }
       say(stateText(result));
       updateBanner.hidden = true;

@@ -1,4 +1,4 @@
-# CloudFile Agent 2.2 · MVP
+# CloudFile Agent 2.3 · Preview
 
 本仓库 `eaopen/cloudfile-local-agent2` 是唯一的 Rust + Tauri v2 Agent 开发主线，长期分支 `dev`。
 全新 Rust + Tauri v2 实现，Chrome Native Messaging 与原有 CloudFile Hub/Server 保留为协议边界。
@@ -25,8 +25,8 @@
 - **大文件 CDC 分块上传（可选，默认关闭）**：≥16 MiB 的快照先按 Seafile 原生 CDC（Rabin，6/8/10 MiB）切分，用服务端已存在的原生块做签名 missing-block 计划；只有确实节省 ≥4 MiB 且复用 ≥25% 时才改走 `*-block-plan` / `*-block-stage` / `*-block-publish`，否则仍用已验证的全量传输。独占与普通本地编辑两条路径共用同一套计划与回退逻辑。
 - **本机安装、升级与回退均由自带程序完成**：`cloudfile-native-host` 同时是 CLI，注册 Host、登录项、下载校验、版本目录切换、回退与清理都不需要目标机器安装 Python 或 Rust 工具链。
 - 密钥存储在 macOS Keychain / Windows Credential Manager；采用 Rust P-256 签名，不依赖旧 Agent。当前是系统保护的可读密钥，不宣称 CNG/硬件不可导出密钥。
-- 独立用户目录 `CloudFileAgent22`、开发 Host `com.cloudfile.agent22.dev`。
-- 开发版新工作副本默认放在用户主目录 `CloudFile-Dev/Workspace/<任务 ID>/`，可在任务中心更改；首次打开目录时自动创建。修改目录只影响新任务，已有任务仍使用原位置。密钥、任务记录、Intent 与上传快照继续保存在私有 `CloudFileAgent22` 目录。
+- 独立用户目录 `CloudFileAgent23`、开发 Host `com.cloudfile.agent23.dev`。
+- 开发版新工作副本默认放在用户主目录 `CloudFile-Dev/Workspace/<任务 ID>/`，可在任务中心更改；首次打开目录时自动创建。修改目录只影响新任务，已有任务仍使用原位置。密钥、任务记录、Intent 与上传快照继续保存在私有 `CloudFileAgent23` 目录。
 
 本地应用 Ctrl/Cmd+S 保存到磁盘后，普通编辑由 Agent 自动观察工作副本并上传；独占编辑不会自动上传，必须由用户在任务中心显式提交。发生网络中断、冲突或未确认回执时暂停或保持待确认状态，保留工作副本与原上传快照；不会盲目自动重发。
 当前单文件上限与现有服务端一致，为 128 MiB。
@@ -112,7 +112,7 @@ cargo build -p cloudfile-native-host --locked
 开发扩展是共享扩展的隔离副本；连接步骤：
 
 1. 在开发 Chrome 配置文件登录 CloudFile 服务。
-2. 支持首次配对的网页在第一次本地编辑时通过 `pair_prepare`、`pair_sign`、`pair_confirm` 完成设备配对；扩展弹窗不再添加临时“连接 Agent 2.2”按钮。浏览器登录 Cookie 不会交给 Agent。此流程需要网页和 Hub 同步支持并启用相关接口，Agent 就绪不代表设备已配对。
+2. 支持首次配对的网页在第一次本地编辑时通过 `pair_prepare`、`pair_sign`、`pair_confirm` 完成设备配对；扩展弹窗不再添加临时“连接 Agent 2.3”按钮。浏览器登录 Cookie 不会交给 Agent。此流程需要网页和 Hub 同步支持并启用相关接口，Agent 就绪不代表设备已配对。
 3. 从网页发起“普通本地编辑”（设备会话 `cloudfile-open://v1/open`），在本地应用保存修改。
 4. Agent 在文件内容稳定后自动上传，也可在任务中心点击“保存云端”。确认发布后可继续编辑。
 5. 独占编辑：从网页发起独占会话（服务端需具备并实际执行 Checkout Guard 能力），Agent 领取并确认 Checkout 租约后在任务中心显示“独占编辑”任务；点击“提交”保留 Checkout，点击“签入并释放”结束本次独占。提交结果未确认时先点“查询提交结果”，不会自动重发。
@@ -168,3 +168,10 @@ The optional Windows registration advertises link handlers without overriding
 an installed SeaDrive/Sync Client default. Legacy links remain untrusted
 locators; a fresh file opens the authorized web page for a new V2 editing
 grant. No SeaDrive engine or file-system driver is bundled.
+
+### Agent 2.3 preview baseline
+
+See [Agent 2.3 architecture, HTTP/HTTPS and upgrade rules](docs/AGENT23_ARCHITECTURE.md).
+The fixed Launcher / versioned portable package and stricter upgrade gate
+are introduced in stages. Downloaded update artifacts always require a
+pinned manifest signature and SHA-256 check even on a trusted HTTP intranet.

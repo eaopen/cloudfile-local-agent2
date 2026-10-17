@@ -24,8 +24,18 @@ use std::path::{Path, PathBuf};
 pub const IPC_VERSION: u32 = 1;
 pub const JOURNAL_VERSION: u32 = 1;
 
+/// The codebase is shared; a release with a pre-release suffix is Preview.
+/// Stable builds have a final SemVer, never an implicit preview download.
+pub fn build_channel() -> &'static str {
+    if env!("CARGO_PKG_VERSION").contains('-') {
+        "dev"
+    } else {
+        "stable"
+    }
+}
+
 const MAX_RELEASE_BYTES: usize = 64 * 1024;
-const DOMAIN: &str = "cloudfile.agent2.release.v1";
+const DOMAIN: &str = "cloudfile.agent23.release.v1";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Binary {
@@ -47,15 +57,17 @@ impl Binary {
             _ => bail!("unknown release artifact kind"),
         }
     }
-    pub fn file_name(self, os: &str, version: &str) -> String {
-        let base = match self {
-            Binary::NativeHost => format!("cloudfile-native-host-{version}"),
-            Binary::Desktop => format!("cloudfile-desktop-{version}"),
+    pub fn file_name(self, os: &str, _version: &str) -> String {
+        // The version is already in bin/<version>. Keep both executables
+        // adjacent under their stable filenames for IPC and autostart.
+        let name = match self {
+            Binary::NativeHost => "cloudfile-native-host",
+            Binary::Desktop => "cloudfile-desktop",
         };
         if os == "windows" {
-            format!("{base}.exe")
+            format!("{name}.exe")
         } else {
-            base
+            name.to_string()
         }
     }
 }
@@ -72,6 +84,7 @@ pub struct Artifact {
 #[serde(deny_unknown_fields)]
 pub struct Release {
     pub version: String,
+    pub channel: String,
     pub platform: String,
     pub notes: String,
     pub expires_at: u64,
@@ -93,6 +106,8 @@ pub fn signing_payload(release: &Release) -> Vec<u8> {
     payload.push('\n');
     payload.push_str(&release.version);
     payload.push('\n');
+    payload.push_str(&release.channel);
+    payload.push('\n');
     payload.push_str(&release.platform);
     payload.push('\n');
     payload.push_str(&release.notes);
@@ -113,62 +128,19 @@ pub fn signing_payload(release: &Release) -> Vec<u8> {
 }
 
 fn valid_version(value: &str) -> bool {
-    if value.is_empty() || value.len() > 32 {
-        return false;
-    }
-    let (core, suffix) = match value.split_once('-') {
-        Some((core, suffix)) => (core, Some(suffix)),
-        None => (value, None),
-    };
-    let parts: Vec<&str> = core.split('.').collect();
-    if parts.len() != 3
-        || parts
-            .iter()
-            .any(|part| part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()))
-    {
-        return false;
-    }
-    match suffix {
-        None => true,
-        Some(suffix) => {
-            !suffix.is_empty()
-                && suffix.len() <= 16
-                && suffix
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
-        }
-    }
+    value.len() <= 64
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        && semver::Version::parse(value).is_ok_and(|v| v.build.is_empty())
 }
 
-/// Orders dotted versions by numeric weight. A pre-release sorts before its
-/// release, matching the usual expectation that `2.2.0-rc.1 < 2.2.0`.
+/// SemVer precedence: dev.10 > dev.2, rc.1 < final, not lexical suffix ordering.
+/// Rejected versions must never reach path construction, sorting or activation.
 pub fn compare(left: &str, right: &str) -> Ordering {
-    let split = |value: &str| -> (Vec<u64>, Option<String>) {
-        let (core, suffix) = match value.split_once('-') {
-            Some((core, suffix)) => (core, Some(suffix.to_string())),
-            None => (value, None),
-        };
-        (
-            core.split('.')
-                .map(|part| part.parse::<u64>().unwrap_or(0))
-                .collect(),
-            suffix,
-        )
-    };
-    let (left_core, left_suffix) = split(left);
-    let (right_core, right_suffix) = split(right);
-    for index in 0..left_core.len().max(right_core.len()) {
-        let a = left_core.get(index).copied().unwrap_or(0);
-        let b = right_core.get(index).copied().unwrap_or(0);
-        if a != b {
-            return a.cmp(&b);
-        }
-    }
-    match (left_suffix, right_suffix) {
-        (None, None) => Ordering::Equal,
-        (None, Some(_)) => Ordering::Greater,
-        (Some(_), None) => Ordering::Less,
-        (Some(a), Some(b)) => a.cmp(&b),
+    match (semver::Version::parse(left), semver::Version::parse(right)) {
+        (Ok(a), Ok(b)) => a.cmp(&b),
+        _ => Ordering::Equal,
     }
 }
 
@@ -183,20 +155,26 @@ fn same_origin(source: &str, url: &str) -> bool {
     let (Ok(source), Ok(url)) = (url::Url::parse(source), url::Url::parse(url)) else {
         return false;
     };
-    source.scheme() == "https"
-        && url.scheme() == "https"
+    matches!(source.scheme(), "http" | "https")
+        && url.scheme() == source.scheme()
         && source.origin() == url.origin()
         && url.username().is_empty()
         && url.password().is_none()
         && url.fragment().is_none()
 }
 
-/// The update source itself must be a canonical https origin.
+/// The update source is a canonical HTTP or HTTPS origin. Both require the
+/// *same* pinned signature key and full artifact SHA-256 verification.
 pub fn valid_source(source: &str) -> bool {
-    url::Url::parse(source)
-        .map(|url| url.as_str().trim_end_matches('/') == source)
-        .unwrap_or(false)
-        && same_origin(source, source)
+    url::Url::parse(source).is_ok_and(|url| {
+        matches!(url.scheme(), "http" | "https")
+            && url.origin().ascii_serialization() == source
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.path() == "/"
+            && url.query().is_none()
+            && url.fragment().is_none()
+    })
 }
 
 /// Decodes the pinned public key: base64url of the 65-byte uncompressed point.
@@ -226,6 +204,9 @@ pub fn verify(
     if release.platform != platform {
         bail!("release is built for a different platform");
     }
+    if !matches!(release.channel.as_str(), "dev" | "stable") {
+        bail!("release channel is invalid");
+    }
     if compare(&release.version, current_version) != Ordering::Greater {
         bail!("release is not newer than the installed version");
     }
@@ -236,7 +217,7 @@ pub fn verify(
         bail!("release speaks an incompatible protocol version");
     }
     if !valid_source(source) {
-        bail!("update source must be a canonical https origin");
+        bail!("update source must be a canonical HTTP(S) origin");
     }
     let mut seen = std::collections::BTreeSet::new();
     for artifact in &release.artifacts {
@@ -273,16 +254,34 @@ pub fn parse_release(bytes: &[u8]) -> Result<Release> {
 
 /// Fixed name under the update origin. No redirects: a re-pointed manifest
 /// would move the trust anchor away from the pinned key.
-pub fn fetch_manifest(source: &str) -> Result<Vec<u8>> {
-    if !valid_source(source) {
-        bail!("update source must be a canonical https origin");
+pub fn manifest_url(source: &str, channel: &str, platform: &str) -> Result<String> {
+    if !valid_source(source)
+        || !matches!(channel, "dev" | "stable")
+        || platform.is_empty()
+        || platform.len() > 50
+        || !platform
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+    {
+        bail!("invalid channel, platform or HTTP(S) update origin");
     }
+    Ok(format!(
+        "{source}/cloudfile-agent23-{channel}-{platform}.json"
+    ))
+}
+
+pub fn fetch_manifest(source: &str) -> Result<Vec<u8>> {
+    let url = manifest_url(
+        source,
+        build_channel(),
+        &platform_id(std::env::consts::OS, std::env::consts::ARCH),
+    )?;
     let client = reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
     let response = client
-        .get(format!("{source}/cloudfile-agent2-update.json"))
+        .get(url)
         .send()
         .context("update manifest request failed")?;
     if response.status() != 200 {
@@ -324,6 +323,115 @@ pub fn download(artifact: &Artifact) -> Result<Vec<u8>> {
         bail!("artifact digest does not match the signed manifest");
     }
     Ok(bytes)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LauncherCurrent {
+    pub version: String,
+    #[serde(default)]
+    pub previous: Option<String>,
+}
+
+pub fn read_launcher_current(root: &Path) -> Result<LauncherCurrent> {
+    let state: LauncherCurrent = storage::read(&root.join("current.json"))?;
+    if !valid_version(&state.version)
+        || state.previous.as_deref().is_some_and(|v| !valid_version(v))
+    {
+        bail!("invalid launcher version selection");
+    }
+    Ok(state)
+}
+
+/// Only the updater may publish a new version. Never accept an arbitrary
+/// executable path from a manifest, webpage or CLI argument.
+pub fn activate_launcher(root: &Path, version: &str) -> Result<()> {
+    let dir = version_dir(root, version)?;
+    for binary in [Binary::NativeHost, Binary::Desktop] {
+        let path = dir.join(binary.file_name(std::env::consts::OS, version));
+        let meta = fs::symlink_metadata(&path)
+            .with_context(|| format!("candidate {} missing", binary.kind()))?;
+        if !meta.is_file() || meta.file_type().is_symlink() {
+            bail!("candidate executable is not a regular file");
+        }
+        if probe(&path)? != version {
+            bail!("staged executable returned the wrong version");
+        }
+        probe_component(&path)?;
+    }
+    let current = read_launcher_current(root).ok();
+    if current.as_ref().is_some_and(|s| s.version == version) {
+        return Ok(());
+    }
+    storage::write(
+        &root.join("current.json"),
+        &LauncherCurrent {
+            version: version.into(),
+            previous: current.map(|s| s.version),
+        },
+    )
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PendingSelection {
+    version: String,
+}
+
+/// A signed and health-checked artifact has already been staged before this
+/// call. Do not install over a resident desktop or an unfinished edit.
+pub fn queue_launcher(root: &Path, version: &str) -> Result<()> {
+    version_dir(root, version)?;
+    storage::write(
+        &root.join("pending.json"),
+        &PendingSelection {
+            version: version.into(),
+        },
+    )
+}
+
+pub fn try_activate_pending(root: &Path, user_data: &Path) -> Result<bool> {
+    let path = root.join("pending.json");
+    if !path.is_file() {
+        return Ok(false);
+    }
+    let queued: PendingSelection = storage::read(&path)?;
+    version_dir(root, &queued.version)?;
+    // Desktop holds this lock for its entire lifetime. This is separate
+    // from the task gate: a clean file may still be open in another process.
+    let desktop_guard = match storage::lock(&user_data.join("desktop.lock")) {
+        Ok(guard) => guard,
+        Err(_) => return Ok(false),
+    };
+    if !crate::upgrade_guard::assess(user_data).safe_to_upgrade {
+        return Ok(false);
+    }
+    // Re-probe executable identity immediately before committing pointer.
+    activate_launcher(root, &queued.version)?;
+    fs::remove_file(path)?;
+    drop(desktop_guard);
+    Ok(true)
+}
+
+pub fn rollback_launcher(root: &Path) -> Result<()> {
+    let current = read_launcher_current(root)?;
+    let previous = current.previous.context("no previous launcher version")?;
+    activate_launcher(root, &previous)
+}
+
+/// Only a fixed launcher, never a versioned binary, should appear in external
+/// per-user protocol, Chrome Native Host and login-item registrations.
+pub fn launcher_binary(root: &Path) -> Option<PathBuf> {
+    let name = if cfg!(windows) {
+        "cloudfile-launcher.exe"
+    } else {
+        "cloudfile-launcher"
+    };
+    let path = root.join(name);
+    fs::symlink_metadata(&path)
+        .ok()
+        .filter(|m| m.is_file() && !m.file_type().is_symlink())?;
+    Some(path)
 }
 
 pub fn install_root(exe: &Path) -> PathBuf {
@@ -435,6 +543,15 @@ pub fn activate(root: &Path, dir: &Path, host: &str, version: &str) -> Result<Pa
     if !host_binary.is_file() || !desktop_binary.is_file() {
         bail!("staged version is incomplete; activation refused");
     }
+    if launcher_binary(root).is_some() {
+        // On macOS a complete signed .app must be replaced as a unit; writing
+        // binaries into an installed Bundle invalidates its code signature.
+        if cfg!(target_os = "macos") {
+            bail!("macOS updater needs a complete signed .app replacement");
+        }
+        activate_launcher(root, version)?;
+        return Ok(host_binary);
+    }
     let current = hostreg::state(dir, host, None)?;
     let extension_id = current
         .extension_id
@@ -453,15 +570,32 @@ pub fn rollback(dir: &Path, host: &str) -> Result<PathBuf> {
 /// active version is always kept even if it is not the newest one.
 pub fn prune(root: &Path, host: &str, dir: &Path, keep: usize) -> Result<Vec<String>> {
     let keep = keep.max(1);
-    let active = active_version(dir, host).unwrap_or(None);
+    let current = read_launcher_current(root).ok();
+    let active = current
+        .as_ref()
+        .map(|c| c.version.clone())
+        .or_else(|| active_version(dir, host).unwrap_or(None));
+    let previous = current.and_then(|c| c.previous);
+    let pending = storage::read::<PendingSelection>(&root.join("pending.json"))
+        .ok()
+        .map(|p| p.version);
     let mut versions = installed_versions(root)?;
     let mut removed = Vec::new();
     while versions.len() > keep {
         let candidate = versions.remove(0);
-        if Some(&candidate) == active.as_ref() {
+        if Some(&candidate) == active.as_ref()
+            || Some(&candidate) == previous.as_ref()
+            || Some(&candidate) == pending.as_ref()
+        {
             // Never delete the version Chrome is currently launching.
             versions.push(candidate);
-            if versions.len() <= keep {
+            if versions.len() <= keep
+                || versions.iter().all(|v| {
+                    Some(v) == active.as_ref()
+                        || Some(v) == previous.as_ref()
+                        || Some(v) == pending.as_ref()
+                })
+            {
                 break;
             }
             continue;
@@ -532,6 +666,12 @@ mod tests {
     fn release(version: &str) -> Release {
         Release {
             version: version.into(),
+            channel: if version.contains('-') {
+                "dev"
+            } else {
+                "stable"
+            }
+            .into(),
             platform: platform_id(std::env::consts::OS, std::env::consts::ARCH),
             notes: "notes".into(),
             expires_at: crate::now() + 3600,
@@ -652,11 +792,90 @@ mod tests {
         assert_eq!(compare("2.2.0", "2.2.0-rc.1"), Ordering::Greater);
         assert_eq!(compare("2.2.0-rc.1", "2.2.0"), Ordering::Less);
         assert_eq!(compare("2.2.0", "2.2.0"), Ordering::Equal);
+        assert_eq!(compare("2.3.0-dev.10", "2.3.0-dev.2"), Ordering::Greater);
+        assert_eq!(compare("2.3.0-rc.2", "2.3.0-rc.10"), Ordering::Less);
         assert!(valid_version("2.2.0"));
         assert!(valid_version("2.2.0-alpha.2"));
         for bad in ["", "2.2", "2.2.0.1", "v2.2.0", "../evil", "2.2.0-"] {
             assert!(!valid_version(bad), "{bad} must be rejected");
         }
+    }
+
+    #[test]
+    fn release_channel_is_cryptographically_bound() {
+        let (key, pinned) = key();
+        let item = signed(&key, release("2.3.0-dev.3"));
+        let mut forged = item.clone();
+        forged.channel = "stable".into();
+        assert!(verify(
+            &forged,
+            "https://updates.example.com",
+            "2.3.0-dev.1",
+            crate::now(),
+            &current_platform(),
+            &pinned
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn channel_manifest_urls_are_platform_scoped_and_support_both_schemes() {
+        assert_eq!(
+            manifest_url("http://intranet:8080", "dev", "windows-x86_64").unwrap(),
+            "http://intranet:8080/cloudfile-agent23-dev-windows-x86_64.json"
+        );
+        assert_eq!(
+            manifest_url("https://updates.example", "stable", "macos-aarch64").unwrap(),
+            "https://updates.example/cloudfile-agent23-stable-macos-aarch64.json"
+        );
+        assert!(manifest_url("http://intranet", "anything", "windows").is_err());
+        assert!(manifest_url("http://intranet/path", "dev", "windows").is_err());
+    }
+
+    #[test]
+    fn http_and_https_use_same_origin_and_signed_release_requirements() {
+        for source in ["http://files.example", "https://files.example"] {
+            assert!(valid_source(source));
+            let mut item = release("2.3.0-dev.3");
+            item.artifacts.iter_mut().for_each(|a| {
+                a.url = a.url.replace("https://updates.example.com", source);
+            });
+            let (key, pinned) = key();
+            item = signed(&key, item);
+            assert!(verify(
+                &item,
+                source,
+                "2.3.0-dev.1",
+                crate::now(),
+                &item.platform,
+                &pinned
+            )
+            .is_ok());
+            let mismatched = if source.starts_with("http://") {
+                source.replacen("http://", "https://", 1)
+            } else {
+                source.replacen("https://", "http://", 1)
+            };
+            assert!(!valid_source(&format!("{source}/path")));
+            assert!(item
+                .artifacts
+                .iter()
+                .all(|a| !same_origin(&mismatched, &a.url)));
+            let mut bad = item.clone();
+            bad.notes.push_str(" modified");
+            assert!(verify(
+                &bad,
+                source,
+                "2.3.0-dev.1",
+                crate::now(),
+                &bad.platform,
+                &pinned
+            )
+            .is_err());
+        }
+        assert!(!valid_source("ftp://files.example"));
+        assert!(!valid_source("http://user@files.example"));
+        assert!(!valid_source("http://files.example/a"));
     }
 
     #[test]

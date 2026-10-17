@@ -146,7 +146,7 @@ pub fn set_update(
     if let Some(value) = &source {
         crate::update::valid_source(value)
             .then_some(())
-            .ok_or_else(|| anyhow::anyhow!("update source must be a canonical https origin"))?;
+            .ok_or_else(|| anyhow::anyhow!("update source must be a canonical HTTP(S) origin"))?;
         crate::update::verifying_key(
             public_key
                 .as_ref()

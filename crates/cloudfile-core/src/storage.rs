@@ -9,7 +9,7 @@ use std::{
 pub fn root() -> Result<PathBuf> {
     let path = dirs::data_local_dir()
         .context("user data directory unavailable")?
-        .join("CloudFileAgent22");
+        .join("CloudFileAgent23");
     private_dir(&path)?;
     crate::settings::initialize_workspace(
         &path,

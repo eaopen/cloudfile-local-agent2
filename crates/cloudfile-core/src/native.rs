@@ -13,7 +13,7 @@ use std::path::Path;
 /// The version family the extension matches with `^2\.[0-9]+\.[0-9]+$`. The
 /// build version is reported separately so a pre-release still routes to this
 /// agent instead of falling back to a legacy host.
-pub const FAMILY_VERSION: &str = "2.2.0";
+pub const FAMILY_VERSION: &str = "2.3.0";
 
 const CAP_OPEN_SESSION: &str = "open_session";
 const CAP_OPEN_SESSION_FILE: &str = "open_session_file";
@@ -84,7 +84,7 @@ pub fn status(root: &Path) -> Value {
         "platform": std::env::consts::OS,
         "capabilities": capabilities(root),
         "applications": apps::names(),
-        "release_channel": "development",
+        "release_channel": update::build_channel(),
         "workspace_root": settings::workspace_root(root).to_string_lossy(),
         "can_open_workspace": configured(root),
     });
@@ -95,7 +95,11 @@ pub fn status(root: &Path) -> Value {
         value["last_update_state"] = result["state"].clone();
         value["last_update_kind"] = result["kind"].clone();
     }
-    let probe = check_update(root);
+    // Native Messaging status is on the browser's critical path. Never wait
+    // for a network update check while opening a local Office/CAD file.
+    let probe = load_update_check(root).unwrap_or_else(
+        || json!({"update_available":false,"update_source_set":update_configured(root)}),
+    );
     for key in [
         "update_source_set",
         "update_available",
@@ -374,14 +378,33 @@ pub fn load_update_result(root: &Path) -> Option<Value> {
     crate::storage::read::<Value>(&path).ok().filter(|value| {
         matches!(
             value["state"].as_str(),
-            Some("running" | "completed" | "failed")
+            Some("running" | "prepared" | "completed" | "failed")
         ) && matches!(value["kind"].as_str(), Some("agent" | "extension"))
     })
+}
+
+fn update_check_path(root: &Path) -> std::path::PathBuf {
+    root.join("update-check.json")
+}
+
+/// Read a bounded local cache only; update checks must be explicit/asynchronous.
+fn load_update_check(root: &Path) -> Option<Value> {
+    crate::storage::read::<Value>(&update_check_path(root))
+        .ok()
+        .filter(|v| v["checked_at"].as_u64().is_some() && v["current_version"] == crate::VERSION)
 }
 
 /// Version probe. An unconfigured or unreachable source is not an error: the
 /// extension only uses the answer to show an update hint.
 pub fn check_update(root: &Path) -> Value {
+    let mut value = check_update_network(root);
+    value["checked_at"] = json!(crate::now());
+    value["current_version"] = json!(crate::VERSION);
+    let _ = crate::storage::write(&update_check_path(root), &value);
+    value
+}
+
+fn check_update_network(root: &Path) -> Value {
     let config = session::config(root).unwrap_or_default();
     let (Some(source), Some(public_key)) = (
         config.update_source.clone(),
@@ -397,6 +420,10 @@ pub fn check_update(root: &Path) -> Value {
         Ok(bytes) => match update::parse_release(&bytes) {
             Ok(release) => {
                 let platform = update::platform_id(std::env::consts::OS, std::env::consts::ARCH);
+                if release.channel != update::build_channel() {
+                    value["update_error"] = json!("更新包不属于当前 Dev/Stable 渠道");
+                    return value;
+                }
                 match update::verify(
                     &release,
                     &source,
@@ -514,8 +541,8 @@ mod tests {
             value["build_version"]
                 .as_str()
                 .unwrap()
-                .starts_with("2.2.0"),
-            "build version must stay in the 2.2 family"
+                .starts_with("2.3.0"),
+            "build version must stay in the 2.3 family"
         );
         assert!(value["applications"].as_array().unwrap().len() > 1);
         assert!(value["workspace_root"].as_str().unwrap().ends_with("tasks"));

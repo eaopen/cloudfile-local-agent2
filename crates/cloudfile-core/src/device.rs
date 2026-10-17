@@ -97,7 +97,7 @@ fn entry(alias: &str) -> Result<keyring::Entry> {
     if !uuid(alias) {
         bail!("invalid key alias");
     }
-    Ok(keyring::Entry::new("com.cloudfile.agent22.device", alias)?)
+    Ok(keyring::Entry::new("com.cloudfile.agent23.device", alias)?)
 }
 fn read_key(alias: &str) -> Result<SigningKey> {
     #[cfg(any(target_os = "macos", target_os = "windows"))]

@@ -365,7 +365,7 @@ dependencies = [
 
 [[package]]
 name = "cloudfile-core"
-version = "2.2.0-alpha.2"
+version = "2.3.0-dev.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -375,6 +375,7 @@ dependencies = [
  "open",
  "p256",
  "reqwest 0.12.28",
+ "semver",
  "serde",
  "serde_json",
  "sha1",
@@ -387,7 +388,7 @@ dependencies = [
 
 [[package]]
 name = "cloudfile-desktop"
-version = "2.2.0-alpha.2"
+version = "2.3.0-dev.1"
 dependencies = [
  "anyhow",
  "cloudfile-core",
@@ -398,8 +399,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cloudfile-launcher"
+version = "2.3.0-dev.1"
+dependencies = [
+ "anyhow",
+ "cloudfile-core",
+]
+
+[[package]]
 name = "cloudfile-native-host"
-version = "2.2.0-alpha.2"
+version = "2.3.0-dev.1"
 dependencies = [
  "anyhow",
  "cloudfile-core",

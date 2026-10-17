@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
 const USAGE: &str = "\
-CloudFile Agent 2.2
+CloudFile Agent 2.3
 
 Usage: cloudfile-native-host [command]
 
@@ -231,8 +231,15 @@ fn run_command(args: &[String]) -> anyhow::Result<()> {
             run_update(&root, &host, Some(PathBuf::from(path)))?;
         }
         "--rollback" => {
-            let dir = hostreg::manifest_dir()?;
-            println!("{}", update::rollback(&dir, &host)?.to_string_lossy());
+            let binary = std::env::current_exe()?;
+            let install_root = update::install_root(&binary);
+            if update::launcher_binary(&install_root).is_some() {
+                update::rollback_launcher(&install_root)?;
+                println!("launcher restored previous version");
+            } else {
+                let dir = hostreg::manifest_dir()?;
+                println!("{}", update::rollback(&dir, &host)?.to_string_lossy());
+            }
         }
         "--prune" => {
             let binary = host_binary()?;
@@ -249,13 +256,21 @@ fn run_command(args: &[String]) -> anyhow::Result<()> {
 
 fn host_binary() -> anyhow::Result<PathBuf> {
     let binary = std::env::current_exe()?;
-    Ok(binary.canonicalize().unwrap_or(binary))
+    let binary = binary.canonicalize().unwrap_or(binary);
+    Ok(update::launcher_binary(&update::install_root(&binary)).unwrap_or(binary))
 }
 
 /// The desktop executable is installed next to the native host; the mailbox
 /// protocol depends on that, and so does the login item.
 fn desktop_binary() -> anyhow::Result<PathBuf> {
     let host = host_binary()?;
+    if host
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|s| s.starts_with("cloudfile-launcher"))
+    {
+        return Ok(host);
+    }
     let name = if cfg!(windows) {
         "cloudfile-desktop.exe"
     } else {
@@ -274,27 +289,43 @@ fn desktop_binary() -> anyhow::Result<PathBuf> {
 /// Verify, stage, health check and activate. Ordering is the safety property:
 /// nothing replaces the running build until the staged build has started and
 /// answered the local protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpgradeOutcome {
+    Activated,
+    Prepared,
+}
+
 fn run_update(root: &Path, host: &str, manifest: Option<PathBuf>) -> anyhow::Result<()> {
     native::record_update_result(root, "agent", "running");
     let result = apply_update(root, host, manifest);
     native::record_update_result(
         root,
         "agent",
-        if result.is_ok() {
-            "completed"
-        } else {
-            "failed"
+        match &result {
+            Ok(UpgradeOutcome::Activated) => "completed",
+            Ok(UpgradeOutcome::Prepared) => "prepared",
+            Err(_) => "failed",
         },
     );
-    let install = update::install_root(&std::env::current_exe()?);
-    if result.is_ok() {
+    if matches!(result, Ok(UpgradeOutcome::Activated)) {
+        let install = update::install_root(&std::env::current_exe()?);
         let dir = hostreg::manifest_dir()?;
         let _ = update::prune(&install, host, &dir, 2);
     }
-    result
+    result.map(|_| ())
 }
 
-fn apply_update(root: &Path, host: &str, manifest: Option<PathBuf>) -> anyhow::Result<()> {
+fn apply_update(
+    root: &Path,
+    host: &str,
+    manifest: Option<PathBuf>,
+) -> anyhow::Result<UpgradeOutcome> {
+    let install = update::install_root(&std::env::current_exe()?);
+    let launcher = update::launcher_binary(&install).is_some();
+    anyhow::ensure!(
+        !(launcher && cfg!(target_os = "macos")),
+        "macOS updater needs a complete signed app Bundle"
+    );
     let config = session::config(root)?;
     let (source, public_key) = match (&config.update_source, &config.update_public_key) {
         (Some(source), Some(key)) => (source.clone(), key.clone()),
@@ -307,6 +338,10 @@ fn apply_update(root: &Path, host: &str, manifest: Option<PathBuf>) -> anyhow::R
         None => update::fetch_manifest(&source)?,
     };
     let release = update::parse_release(&bytes)?;
+    anyhow::ensure!(
+        release.channel == update::build_channel(),
+        "update channel mismatch: Dev cannot install Stable or vice versa"
+    );
     update::verify(
         &release,
         &source,
@@ -345,17 +380,36 @@ fn apply_update(root: &Path, host: &str, manifest: Option<PathBuf>) -> anyhow::R
         let _ = std::fs::remove_dir_all(&staged);
         return Err(error);
     }
-    let dir = hostreg::manifest_dir()?;
-    update::activate(&install, &dir, host, &release.version)?;
+    let outcome = if launcher {
+        // Signed binaries may be downloaded while editing. Pointer switching
+        // happens only after desktop shutdown and task-store validation.
+        update::queue_launcher(&install, &release.version)?;
+        if update::try_activate_pending(&install, root)? {
+            UpgradeOutcome::Activated
+        } else {
+            UpgradeOutcome::Prepared
+        }
+    } else {
+        let risk = cloudfile_core::upgrade_guard::assess(root);
+        anyhow::ensure!(
+            risk.safe_to_upgrade,
+            "升级暂缓：有 {} 项活动编辑任务，禁止替换",
+            risk.blockers.len()
+        );
+        let dir = hostreg::manifest_dir()?;
+        update::activate(&install, &dir, host, &release.version)?;
+        UpgradeOutcome::Activated
+    };
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({
-            "version": release.version,
-            "install_root": install.to_string_lossy(),
-            "native_host": staged_host.to_string_lossy(),
+            "version":release.version,
+            "state":if outcome == UpgradeOutcome::Prepared {"prepared"} else {"completed"},
+            "install_root":install.to_string_lossy(),
+            "native_host":staged_host.to_string_lossy()
         }))?
     );
-    Ok(())
+    Ok(outcome)
 }
 
 fn run_stdio() -> anyhow::Result<()> {
