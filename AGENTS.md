@@ -24,3 +24,10 @@ P0 任务中心；P1 Windows .NET 现有功能覆盖；P2 独占编辑与 CDC �
 ## 交付纪律
 
 每轮提交明确：改变了什么、为什么、哪些测试实际运行、哪些 E2E 未验证、剩余阻塞；不把 Mock 结果写成真实 Server/Office 验收。保持独立于旧仓库构建；不得覆盖现有工作区未提交改动。保留许可证与 NOTICE。
+
+## Native capability detection (2026-10-17)
+
+- Server-provided, supported editing modes are capabilities, not user-configured ENABLE flags. CloudFile V2 optimistic editing is available regardless of Checkout; Checkout depends on the installed verified Guard table and native enforcement. Never bypass native authorization because of a missing toggle.
+- Agent must negotiate runtime capability with Hub/Server and select full upload versus native CDC using actual size/reuse and supported endpoints. Local user preferences (auto-start, tray/floating UI, per-task pause) remain preferences and are not product feature flags.
+- Historic `CLOUDFILE_EDITING_ENABLED`, `CLOUDFILE_AGENT2_OPTIMISTIC_UPLOAD_ENABLED`, `CLOUDFILE_AGENT2_CDC_ENABLED` and exclusive-enable switches may describe incomplete older server contracts; do not introduce or keep them as requirements for a finalized V2 API. Preserve fail-closed behavior until server capability negotiation is proved in real end-to-end tests; never silently skip safe-write checks.
+- External dependencies and missing Checkout capabilities degrade only their dependent operations. No unapproved server endpoint, DB table or agent protocol change. Record and verify any legacy contract cleanup before deleting live compatibility logic.
