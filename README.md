@@ -206,6 +206,11 @@ cargo build -p cloudfile-native-host --locked
 任务中心里也不再有「填 ID + 注册」这一路：引导页的「一键完成」或「Chrome 注册与升级」里的「重新注册」都用同一个常量。
 Host 注册只影响当前用户。命令行默认不会覆盖其它程序的注册，只有明确传入 `--takeover` 或在安装/修复界面执行接管时才会备份再替换
 （原 Manifest 存为 `<host>.previous.json`，`--rollback-host` 可还原）。
+首次安装/修复引导不会自动覆盖其它程序的 Host；如果 Windows 上仍由旧 .NET
+客户端占用 `com.cloudfile.current_agent`，需从「设置 → 浏览器连接与诊断 → 重新注册 Host」
+阅读提示并明确确认，或者对命令行安装显式加 `--takeover`。
+原有 Rust Host 更新无需额外接管确认；接管其它程序时也不会继承对方的扩展 ID。
+
 
 ### Host 名（为什么 Windows 上是 `com.cloudfile.current_agent`）
 

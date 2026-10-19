@@ -185,10 +185,10 @@ const SETUP_STEPS = [
     hint: '扩展 ID 固定，注册由 Agent 自动写入',
     state: (s) => ({
       ok: s.host_registered,
-      detail: s.host_registered
-        ? `${s.host} 已注册`
-        : s.host_foreign
-          ? `${s.host} 由其他程序注册，一键完成会备份后接管`
+      detail: s.host_foreign
+        ? `${s.host} 由其他程序注册；一键修复不会接管，请在设置中确认替换`
+        : s.host_registered
+          ? `${s.host} 已注册`
           : `${s.host} 尚未注册`,
     }),
   },
@@ -818,7 +818,18 @@ function wire() {
 
   document.querySelector('#host-register').onclick = async () => {
     try {
-      const outcome = await invoke('register_host', { takeover: true });
+      // Query the live registration, not the stale settings render. A generic
+      // "register" click is not consent to replace a legacy .NET controller.
+      const state = await invoke('setup_state');
+      if (state.host_foreign && !window.confirm(
+        `检测到 ${state.host} 已由其他程序注册。\n` +
+        '接管会改由 Rust Agent 响应浏览器请求，可能中断原 Windows .NET 客户端。\n' +
+        '原注册将先备份，之后可在此点击“回退 Host 注册”。\n\n确认接管？',
+      )) {
+        say('已取消 Host 接管；原客户端保持不变。');
+        return;
+      }
+      const outcome = await invoke('register_host', { takeover: state.host_foreign === true });
       say(
         outcome.backed_up
           ? `Host 已注册，原注册已备份到 ${outcome.previous_manifest_path}。`
