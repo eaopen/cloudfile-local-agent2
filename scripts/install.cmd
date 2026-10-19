@@ -37,7 +37,24 @@ if not exist "%WORKDIR%" mkdir "%WORKDIR%" >nul 2>&1
 set "TARGET=%~dp0%INSTALLER%"
 if exist "%TARGET%" goto run
 set "TARGET=%WORKDIR%\%INSTALLER%"
-if exist "%TARGET%" goto run
+if exist "%TARGET%" (
+  rem Cached executables outside the supplied bundle also require publisher verification.
+  if not defined CLOUDFILE_INSTALL_BOOTSTRAP_SHA256 (
+    echo [ERROR] Cached installer requires CLOUDFILE_INSTALL_BOOTSTRAP_SHA256.
+    set "CODE=1"
+    goto end
+  )
+  goto run
+)
+
+rem A network-downloaded executable is never a trusted bootstrap on size alone.
+rem Supply its publisher-pinned SHA-256, or ship cloudfile-install.exe alongside this CMD.
+if not defined CLOUDFILE_INSTALL_BOOTSTRAP_SHA256 (
+  echo [ERROR] Cannot download a bootstrap EXE without a pinned SHA-256.
+  echo Put cloudfile-install.exe next to this script, or set CLOUDFILE_INSTALL_BOOTSTRAP_SHA256.
+  set "CODE=1"
+  goto end
+)
 
 echo 正在获取安装引导体...
 call :fetch "%BASE_PRIMARY%/%INSTALLER%"
@@ -55,6 +72,15 @@ set "CODE=1"
 goto end
 
 :run
+rem If the publisher supplied a hash, verify both cached and downloaded EXEs.
+if defined CLOUDFILE_INSTALL_BOOTSTRAP_SHA256 (
+  call :verify
+  if errorlevel 1 (
+    echo [ERROR] Bootstrap SHA-256 verification failed. Refusing to execute it.
+    set "CODE=1"
+    goto end
+  )
+)
 echo 通道：%BASE_PRIMARY%
 if defined BASE_MIRROR (
   "%TARGET%" --source "%BASE_PRIMARY%" --source-fallback "%BASE_MIRROR%" %*
@@ -65,19 +91,16 @@ set "CODE=%ERRORLEVEL%"
 goto end
 
 :fetch
-rem 下载到 %TARGET%，并做一次「体积像不像一个 exe」的粗检：
-rem 断流、代理返回的错误页都会明显偏小，别把它当真值去执行。
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 60 -Uri '%~1' -OutFile '%TARGET%' -ErrorAction Stop } catch { exit 1 }" >nul 2>&1
-if errorlevel 1 exit /b 1
-if not exist "%TARGET%" exit /b 1
-set "SIZE="
-for %%F in ("%TARGET%") do set "SIZE=%%~zF"
-if not defined SIZE exit /b 1
-if %SIZE% LSS 1000000 (
-  del /q "%TARGET%" >nul 2>&1
-  exit /b 1
-)
-exit /b 0
+rem Both primary and fallback must match the same publisher-pinned digest.
+set "CF_INSTALL_FETCH_URL=%~1"
+set "CF_INSTALL_FETCH_TARGET=%TARGET%"
+powershell -NoProfile -Command "$ErrorActionPreference='Stop'; try { $want=$env:CLOUDFILE_INSTALL_BOOTSTRAP_SHA256; if ($want -notmatch '^[a-fA-F0-9]{64}$') { exit 2 }; Invoke-WebRequest -UseBasicParsing -TimeoutSec 60 -Uri $env:CF_INSTALL_FETCH_URL -OutFile $env:CF_INSTALL_FETCH_TARGET; $got=(Get-FileHash -Algorithm SHA256 -LiteralPath $env:CF_INSTALL_FETCH_TARGET).Hash; if ($got -ine $want) { Remove-Item -LiteralPath $env:CF_INSTALL_FETCH_TARGET -Force -ErrorAction SilentlyContinue; exit 3 } } catch { Remove-Item -LiteralPath $env:CF_INSTALL_FETCH_TARGET -Force -ErrorAction SilentlyContinue; exit 1 }"
+exit /b %ERRORLEVEL%
+
+:verify
+set "CF_INSTALL_FETCH_TARGET=%TARGET%"
+powershell -NoProfile -Command "$ErrorActionPreference='Stop'; try { $want=$env:CLOUDFILE_INSTALL_BOOTSTRAP_SHA256; if ($want -notmatch '^[a-fA-F0-9]{64}$') { exit 2 }; $got=(Get-FileHash -Algorithm SHA256 -LiteralPath $env:CF_INSTALL_FETCH_TARGET).Hash; if ($got -ine $want) { exit 3 } } catch { exit 1 }"
+exit /b %ERRORLEVEL%
 
 :end
 if not defined CODE set "CODE=1"

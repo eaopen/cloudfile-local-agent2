@@ -169,6 +169,13 @@ Windows 注册 `com.cloudfile.current_agent`，接管其他程序的 Host 需要
 签名 Agent 更新需要事先提供发行方公钥和更新源。自带 bootstrap/Windows CMD
 也不包含特定企业的主备源，部署方应通过 `--source` / `--source-fallback`，
 或 `CLOUDFILE_INSTALL_SOURCE` / `CLOUDFILE_INSTALL_FALLBACK` 提供地址。
+
+Windows `install.cmd` / `install.dev.cmd` 首选同目录可信发行包内的
+`cloudfile-install.exe`。如果需要从更新地址下载**引导 EXE 本身**，
+部署方必须另外设置 `CLOUDFILE_INSTALL_BOOTSTRAP_SHA256`（发行方提供的
+64 位十六进制 SHA-256 摘要）；主备来源均按该摘要验证，失败时拒绝执行。
+不要将随下载地址一起获取的摘要当作独立信任锚。下载后的 Rust 引导体
+再使用发行方 P-256 公钥验签正式更新清单。
 Chrome 扩展需要用户自己在 `chrome://extensions` 确认安装；不能静默安装。
 
 ## Chrome 开发联调

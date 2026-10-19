@@ -43,8 +43,30 @@ jobs:
         run: cargo test --workspace --locked --no-fail-fast
       - name: Test development extension packaging
         run: node --test scripts/prepare-extension.test.cjs
-      - name: Test local task-centre UX rules
-        run: node --test crates/cloudfile-desktop/tests/task-ux.test.cjs
+      - name: Test local task-centre UX and HTML/JS integration
+        run: node --test crates/cloudfile-desktop/tests/task-ux.test.cjs crates/cloudfile-desktop/tests/ui-contract.test.cjs
+      - name: Test bootstrap digest gate
+        run: node --test scripts/installer-guard.test.cjs
+      - name: Windows bootstrap refuses an unverified network executable
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:CLOUDFILE_INSTALL_SOURCE = 'http://127.0.0.1:1/agent2-updates'
+          $env:CLOUDFILE_AGENT2_HOME = Join-Path $env:RUNNER_TEMP 'agent2-bootstrap-check'
+          $env:CLOUDFILE_INSTALL_BOOTSTRAP_SHA256 = ''
+          $env:CLOUDFILE_NO_PAUSE = '1'
+          & cmd /c '.\scripts\install.cmd'
+          if ($LASTEXITCODE -eq 0) { throw 'Unverified bootstrap was incorrectly accepted' }
+          if (Test-Path (Join-Path $env:CLOUDFILE_AGENT2_HOME 'cloudfile-install.exe')) {
+            throw 'Bootstrap unexpectedly downloaded without a pinned digest'
+          }
+          New-Item -Path $env:CLOUDFILE_AGENT2_HOME -ItemType Directory -Force | Out-Null
+          Set-Content -Path (Join-Path $env:CLOUDFILE_AGENT2_HOME 'cloudfile-install.exe') -Value 'not a trusted bootstrap'
+          $env:CLOUDFILE_INSTALL_BOOTSTRAP_SHA256 = '0' * 64
+          $output = & cmd /c '.\scripts\install.cmd' 2>&1
+          if ($LASTEXITCODE -eq 0 -or -not ($output -match 'SHA-256 verification failed')) {
+            throw 'A mismatched cached bootstrap was not rejected by digest verification'
+          }
       - name: Package development build
         run: python scripts/package.py
       - uses: actions/upload-artifact@v4

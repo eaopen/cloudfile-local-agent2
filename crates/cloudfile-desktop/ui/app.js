@@ -705,6 +705,8 @@ async function renderOrigins() {
     state.textContent = stateTextMap[service.state] || service.state;
     label.append(address, state);
     item.append(label);
+    const actions = document.createElement('div');
+    actions.className = 'row';
     if (service.state !== 'paired') {
       const element = document.createElement('button');
       element.textContent = '连接说明';
@@ -718,7 +720,7 @@ async function renderOrigins() {
           say(String(error));
         }
       };
-      item.append(element);
+      actions.append(element);
     }
     // 默认项不给按钮：能不能删由核心层判定，界面上连入口都不留。
     if (!service.default) {
@@ -784,7 +786,6 @@ function wire() {
       say('本机设置已保存。');
       await loadSettings();
       invoke('float_sync').catch(() => {});
-      await loadSettings();
     } catch (error) {
       say(String(error));
     }
