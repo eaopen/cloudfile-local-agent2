@@ -172,3 +172,95 @@ impl Observer {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{session::Task, storage};
+    use serde_json::json;
+
+    #[test]
+    fn office_atomic_replacement_resets_settle_without_pausing_or_uploading() {
+        let (_temp, root) = storage::test_root();
+        let id = "c".repeat(64);
+        let dir = session::task_dir(&root, &id).unwrap();
+        storage::private_dir(&dir).unwrap();
+        let task = Task {
+            task_id: id.clone(),
+            device_id: None,
+            file_name: "office.docx".into(),
+            mode: "optimistic-edit".into(),
+            server: "https://example.com".into(),
+            repo_id: "11111111-1111-4111-8111-111111111111".into(),
+            remote_path: "/office.docx".into(),
+            session_id: "22222222-2222-4222-8222-222222222222".into(),
+            baseline_file_id: "a".repeat(40),
+            baseline_digest: "b".repeat(64),
+            size: 3,
+        };
+        storage::write(&dir.join("task.json"), &task).unwrap();
+        // Mark the task as V2 without ever reaching the remote service.
+        storage::write(&dir.join("v2-edit.json"), &json!({})).unwrap();
+        let working = dir.join("office.docx");
+        std::fs::write(&working, b"first edit").unwrap();
+        let mut observer = Observer::default();
+        let mut calls = 0;
+        observer.scan_with(&root, 0, |_, _| {
+            calls += 1;
+            Ok(json!({"state":"published"}))
+        }).unwrap();
+
+        let temporary = dir.join("office.tmp");
+        std::fs::rename(&working, &temporary).unwrap();
+        observer.scan_with(&root, 1000, |_, _| {
+            calls += 1;
+            Ok(json!({"state":"published"}))
+        }).unwrap();
+        std::fs::rename(&temporary, &working).unwrap();
+
+        observer.scan_with(&root, 2500, |_, _| {
+            calls += 1;
+            Ok(json!({"state":"published"}))
+        }).unwrap();
+        assert_eq!(calls, 0, "settle period restarts after a replacement");
+        observer.scan_with(&root, 5600, |_, _| {
+            calls += 1;
+            Ok(json!({"state":"changing"}))
+        }).unwrap();
+        assert_eq!(calls, 1);
+        assert!(settings(&root, &id).unwrap().pause_reason.is_none());
+    }
+
+    #[test]
+    fn view_and_exclusive_tasks_never_offer_automatic_upload() {
+        let (_temp, root) = storage::test_root();
+        for (suffix, mode) in [('d', "local-view"), ('e', "exclusive-edit")] {
+            let id = suffix.to_string().repeat(64);
+            let dir = session::task_dir(&root, &id).unwrap();
+            storage::private_dir(&dir).unwrap();
+            let task = Task {
+                task_id: id.clone(),
+                device_id: None,
+                file_name: "document.txt".into(),
+                mode: mode.into(),
+                server: "https://example.com".into(),
+                repo_id: "11111111-1111-4111-8111-111111111111".into(),
+                remote_path: "/document.txt".into(),
+                session_id: "22222222-2222-4222-8222-222222222222".into(),
+                baseline_file_id: "a".repeat(40),
+                baseline_digest: "b".repeat(64),
+                size: 3,
+            };
+            storage::write(&dir.join("task.json"), &task).unwrap();
+            storage::write(&dir.join("v2-edit.json"), &json!({})).unwrap();
+            std::fs::write(dir.join("document.txt"), b"new content").unwrap();
+            assert!(set_enabled(&root, &id, true).is_err());
+        }
+        let mut calls = 0;
+        Observer::default().scan_with(&root, 5000, |_, _| {
+            calls += 1;
+            Ok(json!({"state":"published"}))
+        }).unwrap();
+        assert_eq!(calls, 0);
+    }
+}
