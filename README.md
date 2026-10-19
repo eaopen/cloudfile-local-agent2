@@ -189,6 +189,12 @@ python3 scripts/prepare-extension.py --extension-src ../cloudfile-chrome-extensi
 未指定时先找同级 `../cloudfile-chrome-extension`、再找上级 `../../cloudfile-chrome-extension`，
 都找不到就报错退出。开发副本始终写入 `dist/`，不提交、不回写共享扩展仓库。
 
+打包脚本只将 **macOS 开发版的 `AGENT2_HOST`** 指向 `com.cloudfile.agent22.dev`。
+Windows `CURRENT_HOST` 必须保留 `com.cloudfile.current_agent`，与 Rust 当前平台注册一致。
+共享扩展的 `LEGACY_GO` Host 也不更改；上游路由契约变化时打包直接失败，不覆盖上一次产物。
+开发阶段应手动加载本脚本生成的隔离扩展副本；普通更新通道下载的共享扩展不保证指向 macOS 开发 Host。
+
+
 使用独立的 Chrome 配置文件（开发副本沿用现有扩展 ID，不能与正式扩展装在同一配置文件）。在扩展管理页以开发者模式加载 `dist/chrome-extension-agent22`，然后：
 
 ```sh
@@ -198,7 +204,7 @@ cargo build -p cloudfile-native-host --locked
 
 扩展 ID 是产品常量（`hostreg::EXTENSION_ID`），不需要传 —— 只有换扩展公钥重新打包时才需要 `--extension-id`。
 任务中心里也不再有「填 ID + 注册」这一路：引导页的「一键完成」或「Chrome 注册与升级」里的「重新注册」都用同一个常量。
-注册只影响当前用户的 Host，不替换旧 Host；若该 Host 已被其他程序注册，会先备份再接管
+Host 注册只影响当前用户。命令行默认不会覆盖其它程序的注册，只有明确传入 `--takeover` 或在安装/修复界面执行接管时才会备份再替换
 （原 Manifest 存为 `<host>.previous.json`，`--rollback-host` 可还原）。
 
 ### Host 名（为什么 Windows 上是 `com.cloudfile.current_agent`）

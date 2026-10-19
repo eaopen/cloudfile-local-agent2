@@ -55,16 +55,18 @@ jobs:
           $env:CLOUDFILE_AGENT2_HOME = Join-Path $env:RUNNER_TEMP 'agent2-bootstrap-check'
           $env:CLOUDFILE_INSTALL_BOOTSTRAP_SHA256 = ''
           $env:CLOUDFILE_NO_PAUSE = '1'
-          & cmd /c '.\scripts\install.cmd'
-          if ($LASTEXITCODE -eq 0) { throw 'Unverified bootstrap was incorrectly accepted' }
+          $first = Start-Process -FilePath $env:ComSpec -ArgumentList '/d', '/c', 'call .\scripts\install.cmd' -NoNewWindow -Wait -PassThru
+          if ($first.ExitCode -eq 0) { throw 'Unverified bootstrap was incorrectly accepted' }
           if (Test-Path (Join-Path $env:CLOUDFILE_AGENT2_HOME 'cloudfile-install.exe')) {
             throw 'Bootstrap unexpectedly downloaded without a pinned digest'
           }
           New-Item -Path $env:CLOUDFILE_AGENT2_HOME -ItemType Directory -Force | Out-Null
           Set-Content -Path (Join-Path $env:CLOUDFILE_AGENT2_HOME 'cloudfile-install.exe') -Value 'not a trusted bootstrap'
           $env:CLOUDFILE_INSTALL_BOOTSTRAP_SHA256 = '0' * 64
-          $output = & cmd /c '.\scripts\install.cmd' 2>&1
-          if ($LASTEXITCODE -eq 0 -or -not ($output -match 'SHA-256 verification failed')) {
+          $logPath = Join-Path $env:RUNNER_TEMP 'agent2-bootstrap-mismatch.txt'
+          $second = Start-Process -FilePath $env:ComSpec -ArgumentList '/d', '/c', 'call .\scripts\install.cmd' -NoNewWindow -Wait -PassThru -RedirectStandardOutput $logPath
+          $output = Get-Content -Path $logPath -Raw
+          if ($second.ExitCode -eq 0 -or -not ($output -match 'SHA-256 verification failed')) {
             throw 'A mismatched cached bootstrap was not rejected by digest verification'
           }
       - name: Package development build
