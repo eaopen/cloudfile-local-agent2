@@ -73,6 +73,9 @@ fn client() -> Result<Client> {
 fn endpoint(_root: &Path, task: &Task, op: &str) -> Result<String> {
     Ok(format!("{}/seafhttp/cf-edit/v1/{op}", task.server))
 }
+fn supported_open_mode(mode: &str) -> bool {
+    matches!(mode, "local-view" | "optimistic-edit" | "exclusive-edit")
+}
 fn valid_id(s: &str) -> bool {
     s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
@@ -211,7 +214,7 @@ pub fn open(root: &Path, uri: &str) -> Result<Task> {
         || uuid::Uuid::parse_str(&repo_id).is_err()
         || !remote.starts_with('/')
         || remote.contains("..")
-        || !matches!(mode.as_str(), "optimistic-edit" | "exclusive-edit")
+        || !supported_open_mode(&mode)
         || size > crate::device::MAX_FILE
     {
         bail!("服务端文件元数据无效")
@@ -235,6 +238,13 @@ pub fn open(root: &Path, uri: &str) -> Result<Task> {
     }
     file.flush()?;
     file.as_file().sync_all()?;
+    if mode == "local-view" {
+        // Defense in depth only. The native Fileserver is the authority:
+        // this ticket is valid for READ alone, never publish or Checkout.
+        let mut permissions = file.as_file().metadata()?.permissions();
+        permissions.set_readonly(true);
+        file.as_file().set_permissions(permissions)?;
+    }
     let mut state = state;
     let task = Task {
         task_id: id.clone(),
@@ -578,6 +588,17 @@ mod tests {
         assert!(!is_open_uri("cloudfile-open://v1/open?instance=x"));
         assert!(uri_parts("cloudfile-open://v2/open?instance=https%3A%2F%2Ffiles.example.com&session=11111111-1111-4111-8111-111111111111&ticket=x.y.z").is_ok());
         assert!(uri_parts("cloudfile-open://v2/open?instance=https%3A%2F%2Ffiles.example.com&session=11111111-1111-4111-8111-111111111111&ticket=nope").is_err());
+    }
+    #[test]
+    fn v2_readonly_mode_is_explicit_and_never_implicitly_editable() {
+        assert!(supported_open_mode("local-view"));
+        assert!(supported_open_mode("optimistic-edit"));
+        assert!(supported_open_mode("exclusive-edit"));
+        assert!(!supported_open_mode("local-edit"));
+        assert!(!supported_open_mode("download"));
+        for action in [Action::OptimisticUpdate, Action::Commit, Action::Checkin] {
+            assert!(!valid_action("local-view", &action));
+        }
     }
     #[test]
     fn write_operations_never_cross_view_optimistic_or_exclusive_modes() {
