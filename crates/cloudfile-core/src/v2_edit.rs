@@ -583,6 +583,41 @@ mod tests {
         assert!(!valid_action("exclusive-edit", &Action::OptimisticUpdate));
     }
     #[test]
+    fn optimistic_observed_save_reports_transient_change_and_busy_without_network() {
+        let (_dir, root) = storage::test_root();
+        let id = "a".repeat(64);
+        let dir = session::task_dir(&root, &id).unwrap();
+        storage::private_dir(&dir).unwrap();
+        let task = Task {
+            task_id: id.clone(),
+            device_id: None,
+            file_name: "edit.txt".into(),
+            mode: "optimistic-edit".into(),
+            server: "https://example.com".into(),
+            repo_id: "11111111-1111-4111-8111-111111111111".into(),
+            remote_path: "/edit.txt".into(),
+            session_id: "22222222-2222-4222-8222-222222222222".into(),
+            baseline_file_id: "a".repeat(40),
+            baseline_digest: "b".repeat(64),
+            size: 1,
+        };
+        storage::write(&dir.join("task.json"), &task).unwrap();
+        fs::write(dir.join("edit.txt"), b"x").unwrap();
+        store(&root, &id, &State { ticket: "no-network".into(), guard: None }).unwrap();
+        let changed = save(&root, &id, Some(&"0".repeat(64))).unwrap();
+        assert_eq!(changed["state"], "changing");
+        assert!(journal::pending(&root, &id).unwrap().is_none());
+
+        let _held = storage::lock(&dir.join("upload.lock")).unwrap();
+        let busy = save(&root, &id, Some(&"0".repeat(64))).unwrap();
+        assert_eq!(busy["state"], "busy");
+        assert!(journal::pending(&root, &id).unwrap().is_none());
+
+        // Cross-mode misuse must fail before any provider request or journal.
+        assert!(commit(&root, &id, true).is_err());
+        assert!(commit(&root, &id, false).is_err());
+    }
+    #[test]
     fn ticket_claims_route_reopen_without_trusting_signature() {
         let payload = B64.encode(
             br#"{"repo_id":"r","path":"/a.docx","mode":"exclusive-edit","exp":1700000000}"#,
