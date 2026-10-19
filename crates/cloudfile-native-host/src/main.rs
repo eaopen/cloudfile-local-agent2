@@ -66,7 +66,6 @@ Registration options:
   --takeover                     back up and replace a host another program owns
 ";
 
-
 fn flag(args: &[String], name: &str) -> Option<String> {
     let index = args.iter().position(|value| value == name)?;
     args.get(index + 1).cloned()
@@ -190,8 +189,8 @@ fn run_command(args: &[String]) -> anyhow::Result<()> {
         "--register-host" => {
             // 扩展 ID 是产品常量：正常路径不需要传，传了也只是同一组字符
             // （`hostreg::install` 仍会校验 32 位 a-p 的形状）。
-            let extension_id = flag(args, "--extension-id")
-                .unwrap_or_else(|| hostreg::EXTENSION_ID.to_string());
+            let extension_id =
+                flag(args, "--extension-id").unwrap_or_else(|| hostreg::EXTENSION_ID.to_string());
             let takeover = args.iter().any(|value| value == "--takeover");
             let binary = host_binary()?;
             let dir = hostreg::manifest_dir()?;

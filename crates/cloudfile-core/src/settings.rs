@@ -335,7 +335,7 @@ mod tests {
         assert!(load(root).is_ok());
 
         // 只把权限放松（内容一字不改）—— 内容仍然是合法的，所以拒绝的唯一理由就是权限。
-        std::fs::set_permissions(&path(root), std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::set_permissions(path(root), std::fs::Permissions::from_mode(0o644)).unwrap();
         let error = load(root).unwrap_err().to_string();
         assert!(error.contains("private"), "{error}");
         // 而且「没配过」的回落仍然安全：不因为一份不可信文件就编出一个工作区路径。

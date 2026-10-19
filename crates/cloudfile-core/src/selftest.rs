@@ -339,7 +339,7 @@ mod tests {
             allowed_origins: Vec::new(),
             service_paths: Default::default(),
             // 带了尾斜杠：不是规范 origin，拼出来的清单地址会多一条斜杠。
-            update_source: Some("http://10.9.8.162:6111/cloudfile-updates-dev/".into()),
+            update_source: Some("http://192.0.2.10:6111/cloudfile-updates-dev/".into()),
             update_public_key: None,
             extension_dir: None,
             allow_insecure_update_source: false,
@@ -385,7 +385,7 @@ mod tests {
         let host = root.join("host");
         std::fs::write(&host, b"stub").unwrap();
         let config = session::Config {
-            update_source: Some("http://10.9.8.162:6111/cloudfile-updates-dev".into()),
+            update_source: Some("http://192.0.2.10:6111/cloudfile-updates-dev".into()),
             allow_insecure_update_source: true,
             ..session::Config::default()
         };
@@ -397,7 +397,10 @@ mod tests {
         let detail = check["detail"].as_str().unwrap();
         // 明文源是常态（内网只有 http），自检要把**实际在用的地址**报出来；
         // 没有签名公钥时说清「只有扩展能升级」。
-        assert!(detail.contains("http://10.9.8.162:6111/cloudfile-updates-dev"), "{detail}");
+        assert!(
+            detail.contains("http://192.0.2.10:6111/cloudfile-updates-dev"),
+            "{detail}"
+        );
         assert!(detail.contains("签名公钥"), "{detail}");
 
         // 没有源时只报「未配置」；历史开关位开着也不再额外提示

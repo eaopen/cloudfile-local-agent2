@@ -63,6 +63,8 @@ pub fn private_directory(path: &Path) -> Result<fs::Metadata> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     /// 真值表在任何平台都能跑 —— 这是本模块在 Windows 上仍被覆盖的方式。
     #[test]
@@ -96,7 +98,8 @@ mod tests {
         assert!(private_file(&path).is_err());
 
         // 目录同样按位判断。
-        assert!(private_directory(directory.path()).is_ok()); // tempfile 建的是 0700
+        std::fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(private_directory(directory.path()).is_ok());
         std::fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o755)).unwrap();
         assert!(private_directory(directory.path()).is_err());
     }
@@ -128,6 +131,7 @@ mod tests {
     /// Windows 上判据是 no-op —— 把这件事**钉住**：它是设计，不是遗漏。
     /// 谁要是为了「更安全」改成返回 false，Windows 上的 Agent 会立刻读不到自己的状态，
     /// 这条测试会先红。
+    #[cfg(windows)]
     #[test]
     fn on_windows_the_check_is_deliberately_a_no_op() {
         let directory = tempfile::tempdir().unwrap();

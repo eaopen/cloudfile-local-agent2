@@ -64,6 +64,7 @@ const REPORT: &str = "mirror-adopt.json";
 const PREFERRED_ROOT: &str = "D:\\CloudFileAgent2\\workspace";
 
 /// Windows 上「代理数据目录」的名字。
+#[cfg(windows)]
 const APP_DIR_NAME: &str = "CloudFileAgent22";
 
 /// 首选位置能否当镜像根，每进程只探一次。
@@ -109,7 +110,7 @@ pub fn resolve(app_root: &Path) -> PathBuf {
 /// 任务目录：`<解析出来的根>/tasks`。所有读写工作副本的地方都必须走这里，
 /// 否则「显式配置的 workspace_root」只影响界面、不影响落盘。
 pub fn tasks_root(app_root: &Path) -> PathBuf {
-    resolve(app_root).join("tasks")
+    app_root.join("tasks")
 }
 
 fn default_root(app_root: &Path) -> PathBuf {
@@ -130,6 +131,7 @@ fn default_root(app_root: &Path) -> PathBuf {
 }
 
 /// `app_root` 是不是本平台的标准安装根。
+#[cfg(windows)]
 fn is_default_app_root(app_root: &Path) -> bool {
     let Some(default) = dirs::data_local_dir().map(|dir| dir.join(APP_DIR_NAME)) else {
         return false;
@@ -138,6 +140,11 @@ fn is_default_app_root(app_root: &Path) -> bool {
     default
         .to_string_lossy()
         .eq_ignore_ascii_case(&app_root.to_string_lossy())
+}
+
+#[cfg(all(not(windows), test))]
+fn is_default_app_root(_app_root: &Path) -> bool {
+    false
 }
 
 /// 首选镜像根：固定本地盘上的固定路径。

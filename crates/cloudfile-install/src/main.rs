@@ -22,16 +22,8 @@ use cloudfile_core::update;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
-/// 通道名。二进制只编**一份**，测试/正式的区别不在这里：
-/// `install.cmd` 走 `cloudfile-updates`（正式），`install.dev.cmd` 走
-/// `cloudfile-updates-dev`（测试），两者都通过 `--source` 传进来。
-/// 这里的内置值只服务于「双击 cloudfile-install.exe」时的默认行为 —— 必须是正式通道。
-const CHANNEL: &str = "cloudfile-updates";
-/// 主源：域名（可换域名/证书，机器上要能解析）。
-const HOST_PRIMARY: &str = "etech.stcetech.ad01.sec.com";
-/// 备用源：直连静态服务的 IP（DNS 或代理出问题时用）。
-const HOST_MIRROR: &str = "10.9.8.162:6111";
-
+/// Release origins are deployment configuration; never bake customer
+/// hosts, internal addresses or trust decisions into this public binary.
 /// 打包时注入的钉住公钥（base64url 的未压缩 P-256 点）。
 /// **空着就只能在命令行显式给 `--public-key`**，绝不悄悄从通道取。
 const PINNED_KEY: Option<&str> = option_env!("CLOUDFILE_INSTALL_PUBLIC_KEY");
@@ -41,7 +33,7 @@ CloudFile Agent 2.2 bootstrap
 
 Usage: cloudfile-install [options] [-- <extra cloudfile-native-host --install options>]
 
-  --source <url>            primary update origin (defaults to the built-in channel)
+  --source <url>            primary update origin (or CLOUDFILE_INSTALL_SOURCE)
   --source-fallback <url>   mirror used when the primary is unreachable
   --public-key <base64url>  pinned P-256 release key (defaults to the built-in one)
   --install-dir <path>      install root (defaults to %LOCALAPPDATA%\\CloudFileAgent22,
@@ -208,20 +200,20 @@ struct Options {
 }
 
 impl Options {
-    /// 候选源：显式给的优先，否则用内置的通道地址（主源 + 备用源）。
+    /// Explicit arguments win. A packaged deployment can supply local
+    /// environment defaults; a bare open-source bootstrap has none.
     fn candidates(&self) -> Vec<String> {
-        match (&self.source, &self.fallback) {
-            (Some(source), fallback) => {
-                let mut list = vec![source.clone()];
-                list.extend(fallback.clone());
-                list
-            }
-            (None, _) => vec![
-                // 内网门户只有明文 http：测试与正式通道同域名、只差路径一节。
-                format!("http://{HOST_PRIMARY}/{CHANNEL}"),
-                format!("http://{HOST_MIRROR}/{CHANNEL}"),
-            ],
-        }
+        let primary = self.source.clone().or_else(|| {
+            std::env::var("CLOUDFILE_INSTALL_SOURCE")
+                .ok()
+                .filter(|s| !s.is_empty())
+        });
+        let fallback = self.fallback.clone().or_else(|| {
+            std::env::var("CLOUDFILE_INSTALL_FALLBACK")
+                .ok()
+                .filter(|s| !s.is_empty())
+        });
+        primary.into_iter().chain(fallback).collect()
     }
 }
 

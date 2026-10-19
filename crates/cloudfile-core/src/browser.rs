@@ -80,7 +80,8 @@ pub fn open_extensions_page() -> Result<Option<PathBuf>> {
     }
     // 没有 Chrome（或没装在标准位置）：把 URL 交给系统默认浏览器。
     // Chrome 专有协议在别的浏览器里打不开，但至少不会静默什么都不发生。
-    open::that(EXTENSIONS_URL).context("无法打开扩展管理页；请在浏览器地址栏输入 chrome://extensions")?;
+    open::that(EXTENSIONS_URL)
+        .context("无法打开扩展管理页；请在浏览器地址栏输入 chrome://extensions")?;
     Ok(None)
 }
 

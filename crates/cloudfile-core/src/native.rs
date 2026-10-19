@@ -87,7 +87,7 @@ pub fn status(root: &Path) -> Value {
         "capabilities": capabilities(root),
         "applications": apps::names(),
         "release_channel": "development",
-        "workspace_root": crate::workspace::tasks_root(root).to_string_lossy(),
+        "workspace_root": crate::settings::workspace_root(root).to_string_lossy(),
         "can_open_workspace": configured(root),
     });
     if let Ok(executable) = std::env::current_exe() {
@@ -169,12 +169,6 @@ fn find(root: &Path, repo_id: &str, path: &str, mode: &str) -> Result<Option<ses
 /// Public task list. Field names follow the extension contract; local paths and
 /// credentials are never included.
 pub fn task_summary(root: &Path) -> Value {
-    let tasks = match session::tasks(root) {
-        Ok(tasks) => tasks,
-        Err(_) => {
-            return json!({"ok":false, "error":"本地任务存储无法读取；请保留工作副本并检查任务中心"})
-        }
-    };
     let mut rows = Vec::new();
     // 任务根不可信时**不能**报成「没有任务」：扩展据此判断要不要提示，
     // 把「状态文件权限被改松了」说成「一切正常、没有任务」是误导，用户会以为工作副本没了。

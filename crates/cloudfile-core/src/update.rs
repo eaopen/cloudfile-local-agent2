@@ -191,7 +191,7 @@ pub fn valid_sha256(value: &str) -> bool {
 /// 更新源的信任策略。
 ///
 /// 更新源接受 **http 或 https**，而且明文 http 是**默认支持**的：内网门户
-/// （`http://etech.stcetech.ad01.sec.com`）本身只提供 http，测试通道与正式通道
+/// （`http://files.example.com`）本身只提供 http，测试通道与正式通道
 /// 都挂在它下面、只差路径一节（`/cloudfile-updates-dev` 与 `/cloudfile-updates`）。
 ///
 /// 放宽的**只有 scheme 一项**。规范 origin（不带尾斜杠 / userinfo / fragment）、
@@ -683,14 +683,14 @@ mod tests {
     fn the_source_policy_accepts_plain_http_but_widens_nothing_else() {
         // 内网门户只有 http：两个策略常量都认 http 与 https，行为一致。
         for policy in [SourcePolicy::STRICT, SourcePolicy::DEV] {
-            assert!(policy.valid_source("http://10.9.8.162:6111/channel"));
+            assert!(policy.valid_source("http://192.0.2.10:6111/channel"));
             assert!(policy.valid_source("https://updates.example.com/channel"));
             for bad in [
-                "http://10.9.8.162:6111/channel/",     // 尾斜杠 = 不是规范 origin
-                "http://user@10.9.8.162:6111/channel", // 带用户信息
-                "http://10.9.8.162:6111/channel#frag", // 带 fragment
-                "ftp://10.9.8.162:6111/channel",       // 别的 scheme
-                "10.9.8.162:6111/channel",             // 没有 scheme
+                "http://192.0.2.10:6111/channel/",     // 尾斜杠 = 不是规范 origin
+                "http://user@192.0.2.10:6111/channel", // 带用户信息
+                "http://192.0.2.10:6111/channel#frag", // 带 fragment
+                "ftp://192.0.2.10:6111/channel",       // 别的 scheme
+                "192.0.2.10:6111/channel",             // 没有 scheme
             ] {
                 assert!(!policy.valid_source(bad), "{bad}");
             }
@@ -702,11 +702,11 @@ mod tests {
         // 域名源与 IP 源必须读**不同**的清单：清单里的 artifact URL 含 host，
         // 同源校验会把「IP 源 + 域名清单」直接拒掉。所以这条规则不能靠调用方记得传参。
         assert_eq!(
-            manifest_file("http://etech.stcetech.ad01.sec.com/cloudfile-updates-dev"),
+            manifest_file("http://files.example.com/cloudfile-updates-dev"),
             MANIFEST_FILE
         );
         assert_eq!(
-            manifest_file("http://10.9.8.162:6111/cloudfile-updates-dev"),
+            manifest_file("http://192.0.2.10:6111/cloudfile-updates-dev"),
             MANIFEST_FILE_IP
         );
         // IPv6 字面量也算 IP 源。
@@ -723,9 +723,9 @@ mod tests {
         // 不是「允许把 https 通道里的下载降级」。
         assert!(!SourcePolicy::DEV.same_origin(source, "http://updates.example.com/channel/x.zip"));
         // 反过来（源是 http）也不行：混用说明清单被改过。
-        let insecure = "http://10.9.8.162:6111/channel";
-        assert!(SourcePolicy::DEV.same_origin(insecure, "http://10.9.8.162:6111/channel/x.zip"));
-        assert!(!SourcePolicy::DEV.same_origin(insecure, "https://10.9.8.162:6111/channel/x.zip"));
+        let insecure = "http://192.0.2.10:6111/channel";
+        assert!(SourcePolicy::DEV.same_origin(insecure, "http://192.0.2.10:6111/channel/x.zip"));
+        assert!(!SourcePolicy::DEV.same_origin(insecure, "https://192.0.2.10:6111/channel/x.zip"));
         // 换主机永远不行。
         assert!(!SourcePolicy::DEV.same_origin(insecure, "http://evil.example.com/x.zip"));
     }

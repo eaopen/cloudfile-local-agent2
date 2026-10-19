@@ -406,8 +406,14 @@ async fn register_host(state: tauri::State<'_, State>, takeover: bool) -> Result
     let binary = host_binary().ok_or_else(|| "本机未找到 cloudfile-native-host".to_string())?;
     let dir = hostreg::manifest_dir().map_err(|error| error.to_string())?;
     // 扩展 ID 是产品常量：界面上没有「手输 ID」这条路，所以这里也不需要参数。
-    let outcome = hostreg::install(&dir, hostreg::HOST, hostreg::EXTENSION_ID, &binary, takeover)
-        .map_err(|error| error.to_string())?;
+    let outcome = hostreg::install(
+        &dir,
+        hostreg::HOST,
+        hostreg::EXTENSION_ID,
+        &binary,
+        takeover,
+    )
+    .map_err(|error| error.to_string())?;
     let _ = state.root;
     serde_json::to_value(outcome).map_err(|error| error.to_string())
 }
@@ -490,11 +496,11 @@ async fn setup_apply(state: tauri::State<'_, State>) -> Result<Value, String> {
             .map(|config| config.allowed_origins.len())
             .unwrap_or_default();
         steps.push(json!({"key":"trusted","ok":trusted_count > 0,
-            "detail": if trusted_count > 0 {
-                format!("{trusted_count} 个受信任服务已配置")
-            } else {
-                "请先在「服务连接」中添加组织提供的网盘地址".to_string()
-            }}));
+        "detail": if trusted_count > 0 {
+            format!("{trusted_count} 个受信任服务已配置")
+        } else {
+            "请先在「服务连接」中添加组织提供的网盘地址".to_string()
+        }}));
 
         // 2) 工作目录：默认地址在 D:\CloudFileAgent2\workspace（可在设置里改）。
         let workspace = cloudfile_core::workspace::resolve(&root);
@@ -509,15 +515,10 @@ async fn setup_apply(state: tauri::State<'_, State>) -> Result<Value, String> {
 
         // 3) 注册 Host。扩展 ID 固定；接管的旧注册会先备份，可用「回退」还原。
         let registration = (|| -> anyhow::Result<hostreg::InstallOutcome> {
-            let binary = host_binary().ok_or_else(|| anyhow::anyhow!("本机未找到 cloudfile-native-host"))?;
+            let binary =
+                host_binary().ok_or_else(|| anyhow::anyhow!("本机未找到 cloudfile-native-host"))?;
             let dir = hostreg::manifest_dir()?;
-            hostreg::install(
-                &dir,
-                hostreg::HOST,
-                hostreg::EXTENSION_ID,
-                &binary,
-                true,
-            )
+            hostreg::install(&dir, hostreg::HOST, hostreg::EXTENSION_ID, &binary, true)
         })();
         steps.push(match registration {
             Ok(outcome) => json!({"key":"host","ok":true,"detail":outcome.manifest_path,

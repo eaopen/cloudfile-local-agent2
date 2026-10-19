@@ -20,10 +20,14 @@ rem ---------------------------------------------------------------
 
 set "CHANNEL=cloudfile-updates-dev"
 
-set "HOST_PRIMARY=etech.stcetech.ad01.sec.com"
-set "HOST_MIRROR=10.9.8.162:6111"
-set "BASE_PRIMARY=http://%HOST_PRIMARY%/%CHANNEL%"
-set "BASE_MIRROR=http://%HOST_MIRROR%/%CHANNEL%"
+rem Deployment must set release origins explicitly.
+set "BASE_PRIMARY=%CLOUDFILE_INSTALL_SOURCE%"
+set "BASE_MIRROR=%CLOUDFILE_INSTALL_FALLBACK%"
+if not defined BASE_PRIMARY (
+  echo [ERROR] CLOUDFILE_INSTALL_SOURCE is not set.
+  echo Set it to the signed release channel URL before running this installer.
+  exit /b 1
+)
 
 set "INSTALLER=cloudfile-install.exe"
 set "WORKDIR=%LOCALAPPDATA%\CloudFileAgent22"
@@ -38,7 +42,7 @@ if exist "%TARGET%" goto run
 echo 正在获取安装引导体...
 call :fetch "%BASE_PRIMARY%/%INSTALLER%"
 if not errorlevel 1 goto run
-call :fetch "%BASE_MIRROR%/%INSTALLER%"
+if defined BASE_MIRROR call :fetch "%BASE_MIRROR%/%INSTALLER%"
 if not errorlevel 1 goto run
 
 echo.
@@ -52,7 +56,11 @@ goto end
 
 :run
 echo 通道：%BASE_PRIMARY%
-"%TARGET%" --source "%BASE_PRIMARY%" --source-fallback "%BASE_MIRROR%" %*
+if defined BASE_MIRROR (
+  "%TARGET%" --source "%BASE_PRIMARY%" --source-fallback "%BASE_MIRROR%" %*
+) else (
+  "%TARGET%" --source "%BASE_PRIMARY%" %*
+)
 set "CODE=%ERRORLEVEL%"
 goto end
 

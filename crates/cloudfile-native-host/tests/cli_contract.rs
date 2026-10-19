@@ -74,7 +74,11 @@ impl Sandbox {
         let home = directory.path().canonicalize().unwrap();
         std::fs::create_dir_all(home.join("Library/Application Support")).unwrap();
         std::fs::create_dir_all(home.join("AppData/Local")).unwrap();
-        let local_app_data = cfg!(windows).then(|| home.join("AppData/Local"));
+        let local_app_data = Some(if cfg!(windows) {
+            home.join("AppData/Local")
+        } else {
+            home.join("Library/Application Support")
+        });
         Sandbox {
             _directory: directory,
             home,
@@ -630,7 +634,7 @@ fn a_plain_http_channel_is_accepted_but_still_needs_a_pinned_key() {
     // 「有源、没签名公钥」的通道只服务扩展更新，Agent 自身不可升级，默认不接受。
     let refusal = sandbox.refuses(&[
         "--set-update-source",
-        "http://10.9.8.162:6111/cloudfile-updates-dev",
+        "http://192.0.2.10:6111/cloudfile-updates-dev",
     ]);
     assert!(refusal.contains("pinned release key"), "{refusal}");
     assert_eq!(

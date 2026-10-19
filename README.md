@@ -156,50 +156,20 @@ powershell -ExecutionPolicy Bypass -File make-agent22-release.ps1 \
 
 ## 安装引导（首次运行）
 
-桌面程序第一次启动（`settings.setup_completed` 为 false）时停在**安装引导页**，之后可以从左侧「安装引导」随时打开做修复。
-它把六件事按顺序列出来，并各自给出完成判据（判据全部来自 `setup_state`，界面不做推断）：
+新仓库的任务中心保留「安装引导」入口：可以检查本地安装、Host 注册、
+自动启动、工作副本目录、扩展部署和服务连接。
 
-| 步骤 | 判据 | 谁来做 |
-|---|---|---|
-| 安装 Agent | 进程正在运行 | 引导体 `cloudfile-install` / `install.cmd` |
-| 受信任的 CloudFile 服务 | `trusted_missing_defaults == 0` | 启动时自动补齐出厂默认项 |
-| 工作目录 | 目录存在 | 默认 `D:\CloudFileAgent2\workspace`，可在设置里改 |
-| 注册 Chrome Host | `host_registered` | 「一键完成」自动注册（固定扩展 ID） |
-| 开机自启 | `autostart_enabled` | 「一键完成」自动设置 |
-| 安装浏览器扩展 | `extension_version` 有值 | 自动下载解包；**最后在 Chrome 里点三下** |
+选择「安装或修复本机组件」只处理当前机器，不从旧仓注入客户内部服务地址。
+CloudFile 服务须在「服务连接」中显式添加；配对仍须在浏览器确认。
+扩展 ID 由 `hostreg::EXTENSION_ID` 固定，用户不需要手填。
+Windows 注册 `com.cloudfile.current_agent`，接管其他程序的 Host 需要明确执行，
+原注册保留回退。
 
-「一键完成」是幂等的：它依次做「补默认服务 → 建工作目录 → 注册 Host（接管会先备份）→ 设自启 → 部署扩展」，
-每一步独立成败，失败项在页面上带原因，可以再点一次重试。
-
-Chrome 不允许程序静默安装非商店扩展，所以最后一步只能提示：页面提供「打开扩展管理页」（用注册表
-`App Paths` 找到的 `chrome.exe` 打开 `chrome://extensions/`）和「打开扩展目录」，并显示固定的扩展 ID。
-开关「开发者模式 → 加载已解压的扩展程序」必须由用户点。
-
-**默认值都是 1.0 的形状，不需要用户重配一遍**：
-
-- 受信任服务：`http://10.9.8.162:6111`、`http://10.12.1.157:8092`、`http://etech.stcetech.ad01.sec.com`、
-  `https://etech.stcetech.ad01.sec.com`（`session::DEFAULT_ORIGINS`）。这些是**默认项**，界面上标「默认 · 不可删除」，
-  `session::untrust` 会拒绝删除它们；自己加的服务可以移除。
-- 工作目录：`D:\CloudFileAgent2\workspace`（1.0 的默认地址），本地副本落在其下的 `tasks\`。
-  `settings.workspace_root` 显式配置永远优先，设置面板有「恢复默认地址」。
-- 扩展 ID：`gocnpbhnbikcpnlafmodflddgnmfcjoc`（`hostreg::EXTENSION_ID`）。扩展 `manifest.json` 钉了 `key`，
-  所以 ID 与解压路径无关 —— 界面和安装都不再要求手输。
-
-
-在本目录执行（工具链由 `rust-toolchain.toml` 固定）：
-
-```sh
-cargo test --workspace --locked
-cargo build --workspace --locked
-cargo run -p cloudfile-desktop --locked
-```
-
-桌面程序接受三个自检参数，都不需要窗口或私有目录：`--version`、`--component`（本地组件契约 JSON）、`--help`。
-登录项会用 `--autostart` 启动它：有托盘时保持常驻不打开窗口，避免每次登录抢焦点。
-
-先在任务中心添加完整服务地址，例如 `https://files.example.com` 或 `https://files.example.com/seafile/`。部署路径由本机配置保存，设备签名仍绑定根 Origin。连接设备前会检查服务端编辑能力和配对接口；未启用时直接显示原因，不创建配对密钥。
-Windows 需已安装 WebView2 Runtime；Chrome 本身不提供此运行时，`cloudfile-native-host --status` 会如实报告是否检测到。macOS 使用系统 WebKit。
-当前 ZIP 是开发包，不含签名、公证或运行时安装器。
+工作区沿用新仓 V2 的配置；目录迁移不会因为状态查询自动触发。
+签名 Agent 更新需要事先提供发行方公钥和更新源。自带 bootstrap/Windows CMD
+也不包含特定企业的主备源，部署方应通过 `--source` / `--source-fallback`，
+或 `CLOUDFILE_INSTALL_SOURCE` / `CLOUDFILE_INSTALL_FALLBACK` 提供地址。
+Chrome 扩展需要用户自己在 `chrome://extensions` 确认安装；不能静默安装。
 
 ## Chrome 开发联调
 

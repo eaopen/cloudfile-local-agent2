@@ -340,20 +340,20 @@ mod tests {
     #[test]
     fn the_plain_http_channel_is_usable_without_widening_anything_else() {
         // 就是测试通道的真实地址（明文 http + 通道目录）。
-        const DEV_SOURCE: &str = "http://10.9.8.162:6111/cloudfile-updates-dev";
+        const DEV_SOURCE: &str = "http://192.0.2.10:6111/cloudfile-updates-dev";
         // 明文 http 默认就支持：两个策略常量拿到的地址完全一样。
         assert_eq!(
             manifest_url(update::SourcePolicy::STRICT, DEV_SOURCE).unwrap(),
-            "http://10.9.8.162:6111/cloudfile-updates-dev/extension-update.json"
+            "http://192.0.2.10:6111/cloudfile-updates-dev/extension-update.json"
         );
         assert_eq!(
             manifest_url(update::SourcePolicy::DEV, DEV_SOURCE).unwrap(),
-            "http://10.9.8.162:6111/cloudfile-updates-dev/extension-update.json"
+            "http://192.0.2.10:6111/cloudfile-updates-dev/extension-update.json"
         );
         // 包仍然按同源解析，跨源/跨 scheme 照样拒绝。
         assert_eq!(
             archive_url(update::SourcePolicy::DEV, DEV_SOURCE, "receiver.zip").unwrap(),
-            "http://10.9.8.162:6111/cloudfile-updates-dev/receiver.zip"
+            "http://192.0.2.10:6111/cloudfile-updates-dev/receiver.zip"
         );
         assert!(archive_url(
             update::SourcePolicy::DEV,
@@ -368,7 +368,7 @@ mod tests {
         )
         .is_err());
         // 放行 scheme 不等于放行「随便写的源」。
-        assert!(manifest_url(update::SourcePolicy::DEV, "http://10.9.8.162:6111/dev/").is_err());
+        assert!(manifest_url(update::SourcePolicy::DEV, "http://192.0.2.10:6111/dev/").is_err());
     }
 
     #[test]
