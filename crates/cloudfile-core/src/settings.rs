@@ -50,6 +50,9 @@ pub struct Settings {
     pub float_hidden_when_empty: bool,
     /// Advisory mirror of the login-item state; the OS remains authoritative.
     pub autostart: bool,
+    /// Whether the user completed the optional first-run browser setup guide.
+    #[serde(default)]
+    pub setup_completed: bool,
     /// Directory for new working copies, initialized on first app startup.
     pub workspace_root: Option<String>,
     /// Explicit local openers, evaluated before detection and the OS default.
@@ -67,6 +70,7 @@ impl Default for Settings {
             float_enabled: true,
             float_hidden_when_empty: true,
             autostart: false,
+            setup_completed: false,
             workspace_root: None,
             open_rules: Vec::new(),
             float_positions: BTreeMap::new(),
@@ -141,6 +145,9 @@ pub fn load(root: &Path) -> Result<Settings> {
     if !p.exists() {
         return Ok(Settings::default());
     }
+    // 读前加固，对应 Go 的 `internal/taskcenter/preferences.go`（非私有 = ErrCorrupt）：
+    // 权限松掉的偏好文件不能当成可信输入。Windows 上无从判断（见 fsaccess::private）。
+    crate::fsaccess::private_file(&p)?;
     let settings: Settings = storage::read(&p)?;
     settings.validate()?;
     Ok(settings)
@@ -182,8 +189,8 @@ pub fn set_position(root: &Path, display: &str, x: i32, y: i32) -> Result<()> {
     Ok(())
 }
 
-/// The directory working copies live in. Configuration cannot escape the store
-/// silently: a missing or unusable override falls back to the agent root.
+/// Preserve the existing public workspace-root contract used by V2 settings
+/// and its migration tests. Task paths are resolved separately by session.
 pub fn workspace_root(root: &Path) -> PathBuf {
     match load(root) {
         Ok(settings) => settings
@@ -191,6 +198,22 @@ pub fn workspace_root(root: &Path) -> PathBuf {
             .map(PathBuf::from)
             .unwrap_or_else(|| root.join("tasks")),
         Err(_) => root.join("tasks"),
+    }
+}
+
+/// The explicitly configured workspace root, if the user set one.
+///
+/// 显式配置时始终优先，并且**不参与搬迁**（镜像就固定在那儿）。返回值只在
+/// 配置合法且为绝对路径时给出；文件缺失、损坏或不合法都当作「没配过」，
+/// 由 `workspace::resolve` 走平台默认，绝不让一个坏配置把会话卡死。
+pub fn configured_workspace_root(root: &Path) -> Option<PathBuf> {
+    let settings = load(root).ok()?;
+    let configured = settings.workspace_root?;
+    let path = PathBuf::from(configured);
+    if path.is_absolute() {
+        Some(path)
+    } else {
+        None
     }
 }
 
@@ -208,6 +231,20 @@ mod tests {
 
     fn tmp() -> (tempfile::TempDir, PathBuf) {
         crate::storage::test_root()
+    }
+
+    /// 以「Agent 自己会写出的权限」植入一个状态文件。
+    ///
+    /// `std::fs::write` 得到的是 0644（受 umask 影响），在 POSIX 上会被
+    /// `fsaccess::private_file` 判成「不可信状态」—— 那会让下面这些用例变成在测权限，
+    /// 而不是在测「损坏的文件怎么处理」。所以显式落成 0600，与 `storage::write` 一致。
+    fn plant(path: &Path, bytes: &[u8]) {
+        std::fs::write(path, bytes).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
     }
 
     #[test]
@@ -278,10 +315,31 @@ mod tests {
     fn corrupt_file_is_reported_and_never_reset() {
         let (_dir, root) = tmp();
         let root = root.as_path();
-        std::fs::write(path(root), b"{ not json").unwrap();
+        plant(&path(root), b"{ not json");
         assert!(load(root).is_err());
-        // The fallback keeps working copies reachable instead of inventing a new root.
-        assert_eq!(workspace_root(root), root.join("tasks"));
+        // A corrupt file means "never configured" — the workspace root then falls back to
+        // the platform default (workspace::resolve) instead of inventing a broken path.
+        assert!(configured_workspace_root(root).is_none());
+    }
+
+    /// 权限松掉的状态文件必须被拒（fail closed），与 Go 的 preferences.go 同一处判断。
+    /// Windows 上这一条无从判断（`fsaccess::private` 恒为 true），所以用例只在 POSIX 上跑。
+    #[cfg(unix)]
+    #[test]
+    fn a_world_readable_preferences_file_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, root) = tmp();
+        let root = root.as_path();
+        // 先按正常路径写出一份合法设置，确认它本来读得出来。
+        update(root, |settings| settings.notify_on_saved = false).unwrap();
+        assert!(load(root).is_ok());
+
+        // 只把权限放松（内容一字不改）—— 内容仍然是合法的，所以拒绝的唯一理由就是权限。
+        std::fs::set_permissions(&path(root), std::fs::Permissions::from_mode(0o644)).unwrap();
+        let error = load(root).unwrap_err().to_string();
+        assert!(error.contains("private"), "{error}");
+        // 而且「没配过」的回落仍然安全：不因为一份不可信文件就编出一个工作区路径。
+        assert!(configured_workspace_root(root).is_none());
     }
 
     #[test]
@@ -295,8 +353,11 @@ mod tests {
         .unwrap();
         assert!(!settings.notify_on_saved);
         assert_eq!(load(root).unwrap(), settings);
-        assert_eq!(workspace_root(root), PathBuf::from(WORKSPACE));
-        std::fs::write(path(root), br#"{"schema":1,"upload":true}"#).unwrap();
+        assert_eq!(
+            configured_workspace_root(root),
+            Some(PathBuf::from(WORKSPACE))
+        );
+        plant(&path(root), br#"{"schema":1,"upload":true}"#);
         assert!(load(root).is_err());
     }
 }

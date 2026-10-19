@@ -27,6 +27,15 @@ pub const JOURNAL_VERSION: u32 = 1;
 const MAX_RELEASE_BYTES: usize = 64 * 1024;
 const DOMAIN: &str = "cloudfile.agent2.release.v1";
 
+/// 通道上的清单文件名（域名源）。
+pub const MANIFEST_FILE: &str = "cloudfile-agent2-update.json";
+/// 通道上的清单文件名（**IP 直连源**）。
+///
+/// 清单里的 artifact URL 必须与更新源同源，而 origin 里含 host —— 域名源那份清单
+/// 里写的是 `<域名>/...`，把源换成 IP 之后即使用同一份文件，也会被同源校验拒掉。
+/// 所以 IP 源必须有自己的一份清单（同一批产物、不同的 URL 前缀、各自签名）。
+pub const MANIFEST_FILE_IP: &str = "cloudfile-agent2-update.ip.json";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Binary {
     NativeHost,
@@ -112,7 +121,7 @@ pub fn signing_payload(release: &Release) -> Vec<u8> {
     payload.into_bytes()
 }
 
-fn valid_version(value: &str) -> bool {
+pub(crate) fn valid_version(value: &str) -> bool {
     if value.is_empty() || value.len() > 32 {
         return false;
     }
@@ -179,24 +188,84 @@ pub fn valid_sha256(value: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-fn same_origin(source: &str, url: &str) -> bool {
-    let (Ok(source), Ok(url)) = (url::Url::parse(source), url::Url::parse(url)) else {
-        return false;
-    };
-    source.scheme() == "https"
-        && url.scheme() == "https"
-        && source.origin() == url.origin()
-        && url.username().is_empty()
-        && url.password().is_none()
-        && url.fragment().is_none()
+/// 更新源的信任策略。
+///
+/// 更新源接受 **http 或 https**，而且明文 http 是**默认支持**的：内网门户
+/// （`http://etech.stcetech.ad01.sec.com`）本身只提供 http，测试通道与正式通道
+/// 都挂在它下面、只差路径一节（`/cloudfile-updates-dev` 与 `/cloudfile-updates`）。
+///
+/// 放宽的**只有 scheme 一项**。规范 origin（不带尾斜杠 / userinfo / fragment）、
+/// 产物必须与源同源、sha256、P-256 签名，一条都没有放松 ——
+/// 「通道是不是明文」与「这个包是不是我们签的」是两件事，后者才是信任锚。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SourcePolicy {
+    /// 历史字段。早期只有显式打开它才允许 http（`--allow-insecure-source` /
+    /// `allow_insecure_update_source`）；现在 http 已是默认行为，这个位只作为
+    /// 「这台机器当初显式开过」的审计记录保留在 config.json 与 status 输出里，
+    /// **不再参与任何判定**。
+    pub allow_insecure: bool,
 }
 
-/// The update source itself must be a canonical https origin.
+impl SourcePolicy {
+    /// 不带额外开关时的策略（http/https 都可，其余规则照旧）。
+    pub const STRICT: SourcePolicy = SourcePolicy {
+        allow_insecure: false,
+    };
+    /// 与 [`Self::STRICT`] 行为一致，保留名字只是为了旧调用点可读。
+    pub const DEV: SourcePolicy = SourcePolicy {
+        allow_insecure: true,
+    };
+
+    /// http 与 https 都允许。这里刻意不看 `self.allow_insecure`：
+    /// 内网通道全是明文，要求显式开关只会让每一次安装都多一个能忘的参数。
+    fn permits(self, scheme: &str) -> bool {
+        let _ = self;
+        scheme == "https" || scheme == "http"
+    }
+
+    /// 源与目标是否同一个 origin（并且是允许的 scheme）。
+    pub fn same_origin(self, source: &str, url: &str) -> bool {
+        let (Ok(source), Ok(url)) = (url::Url::parse(source), url::Url::parse(url)) else {
+            return false;
+        };
+        self.permits(source.scheme())
+            && self.permits(url.scheme())
+            && source.origin() == url.origin()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.fragment().is_none()
+    }
+
+    /// 更新源本身必须是规范 origin（严格到「重新序列化后一字不差」）。
+    pub fn valid_source(self, source: &str) -> bool {
+        url::Url::parse(source)
+            .map(|url| url.as_str().trim_end_matches('/') == source)
+            .unwrap_or(false)
+            && self.same_origin(source, source)
+    }
+}
+
+/// 正式通道下的源校验（等价于 [`SourcePolicy::STRICT`]）。
 pub fn valid_source(source: &str) -> bool {
-    url::Url::parse(source)
-        .map(|url| url.as_str().trim_end_matches('/') == source)
-        .unwrap_or(false)
-        && same_origin(source, source)
+    SourcePolicy::STRICT.valid_source(source)
+}
+
+/// 这个源该读哪一份清单：**域名源与 IP 源各一份**。
+///
+/// 判据是 host 字面量是不是 IP，不看调用方传了什么参数 —— 主源（域名）与备用源
+/// （直连静态服务的 IP）在 install.cmd 里被同时传给引导体，两边的清单名必须能自动
+/// 对上，否则「主源不通时回落 IP」这条路上会在拉清单那一步就失败。
+pub fn manifest_file(source: &str) -> &'static str {
+    match url::Url::parse(source) {
+        Ok(url)
+            if url
+                .host()
+                .is_some_and(|host| matches!(host, url::Host::Ipv4(_) | url::Host::Ipv6(_))) =>
+        {
+            MANIFEST_FILE_IP
+        }
+        _ => MANIFEST_FILE,
+    }
 }
 
 /// Decodes the pinned public key: base64url of the 65-byte uncompressed point.
@@ -213,6 +282,7 @@ pub fn verifying_key(encoded: &str) -> Result<VerifyingKey> {
 
 /// Full verification. Nothing is downloaded before every field below passes.
 pub fn verify(
+    policy: SourcePolicy,
     release: &Release,
     source: &str,
     current_version: &str,
@@ -235,8 +305,8 @@ pub fn verify(
     if release.ipc_version != IPC_VERSION || release.journal_version != JOURNAL_VERSION {
         bail!("release speaks an incompatible protocol version");
     }
-    if !valid_source(source) {
-        bail!("update source must be a canonical https origin");
+    if !policy.valid_source(source) {
+        bail!("update source must be a canonical http(s) origin");
     }
     let mut seen = std::collections::BTreeSet::new();
     for artifact in &release.artifacts {
@@ -247,7 +317,7 @@ pub fn verify(
         if !valid_sha256(&artifact.sha256) {
             bail!("release artifact is missing a usable digest");
         }
-        if !same_origin(source, &artifact.url) {
+        if !policy.same_origin(source, &artifact.url) {
             bail!("release artifact does not come from the update source");
         }
     }
@@ -271,18 +341,99 @@ pub fn parse_release(bytes: &[u8]) -> Result<Release> {
     Ok(serde_json::from_slice(bytes)?)
 }
 
+/// 一个候选源的探测结论。`error` 为 `None` 表示这个源真的能用（清单下得来）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceProbe {
+    pub source: String,
+    pub error: Option<String>,
+}
+
+impl SourceProbe {
+    pub fn usable(&self) -> bool {
+        self.error.is_none()
+    }
+}
+
+/// 依次探测候选源，返回**第一个能用**的，以及每一项的结论。
+///
+/// 对齐 Go 侧 `install.cmd`：主源（域名）不通就用备用源（直连静态服务的 IP），
+/// 然后把这个「实际可用」的地址写回配置 —— 不然用户装完、第一次升级时才发现主源
+/// 在这台机器上根本不通。全都不通时，`probes` 里会带着每个地址各自的原因原样报给
+/// 用户；只说一句「安装失败」在现场是没用的。
+///
+/// 空串会被跳过，重复的地址只探一次（主备写成同一个地址是常见的配置失误，
+/// 不该因此多等一次超时）。
+pub fn pick_source(
+    policy: SourcePolicy,
+    candidates: &[String],
+) -> (Option<String>, Vec<SourceProbe>) {
+    let mut probe = |source: &str| fetch_manifest_for(policy, source).map(|_| ());
+    pick_source_with(&mut probe, candidates)
+}
+
+/// 探测顺序与网络分离，便于离线测试「先主后备、失败列表」这套选择逻辑。
+pub fn pick_source_with<F>(
+    probe: &mut F,
+    candidates: &[String],
+) -> (Option<String>, Vec<SourceProbe>)
+where
+    F: FnMut(&str) -> Result<()>,
+{
+    let mut probes: Vec<SourceProbe> = Vec::new();
+    for candidate in candidates {
+        let candidate = candidate.trim();
+        if candidate.is_empty() || probes.iter().any(|seen| seen.source == candidate) {
+            continue;
+        }
+        match probe(candidate) {
+            Ok(()) => {
+                probes.push(SourceProbe {
+                    source: candidate.to_string(),
+                    error: None,
+                });
+                return (Some(candidate.to_string()), probes);
+            }
+            Err(error) => probes.push(SourceProbe {
+                source: candidate.to_string(),
+                error: Some(format!("{error:#}")),
+            }),
+        }
+    }
+    (None, probes)
+}
+
+/// 把探测结论拼成给人看的一句话（失败时用）。
+pub fn describe_probes(probes: &[SourceProbe]) -> String {
+    probes
+        .iter()
+        .map(|probe| {
+            format!(
+                "{} -> {}",
+                probe.source,
+                probe.error.as_deref().unwrap_or("可用")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("；")
+}
+
 /// Fixed name under the update origin. No redirects: a re-pointed manifest
 /// would move the trust anchor away from the pinned key.
 pub fn fetch_manifest(source: &str) -> Result<Vec<u8>> {
-    if !valid_source(source) {
-        bail!("update source must be a canonical https origin");
+    fetch_manifest_for(SourcePolicy::STRICT, source)
+}
+
+/// 同上，但按给定策略判定 scheme（http 与 https 都接受）。
+pub fn fetch_manifest_for(policy: SourcePolicy, source: &str) -> Result<Vec<u8>> {
+    if !policy.valid_source(source) {
+        bail!("update source must be a canonical http(s) origin");
     }
     let client = reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
     let response = client
-        .get(format!("{source}/cloudfile-agent2-update.json"))
+        .get(format!("{source}/{}", manifest_file(source)))
         .send()
         .context("update manifest request failed")?;
     if response.status() != 200 {
@@ -479,8 +630,11 @@ pub fn prune(root: &Path, host: &str, dir: &Path, keep: usize) -> Result<Vec<Str
 /// Reads the version a candidate binary reports. Kept separate from the
 /// verification path so a probe failure can never be mistaken for a good build.
 pub fn probe(binary: &Path) -> Result<String> {
-    let output = std::process::Command::new(binary)
-        .arg("--version")
+    let mut command = std::process::Command::new(binary);
+    command.arg("--version");
+    // 被探测的是控制台程序：不隐藏的话，在 GUI 父进程（Tauri 桌面）下会闪一个黑窗口。
+    crate::childproc::hide(&mut command);
+    let output = command
         .output()
         .context("staged binary could not be started")?;
     if !output.status.success() {
@@ -496,8 +650,10 @@ pub fn probe(binary: &Path) -> Result<String> {
 /// Health check a staged build must pass before it is allowed to replace the
 /// running one: it must start, answer, and speak the same local protocol.
 pub fn probe_component(binary: &Path) -> Result<(String, u32, u32)> {
-    let output = std::process::Command::new(binary)
-        .arg("--component")
+    let mut command = std::process::Command::new(binary);
+    command.arg("--component");
+    crate::childproc::hide(&mut command);
+    let output = command
         .output()
         .context("staged binary could not be started")?;
     if !output.status.success() {
@@ -522,6 +678,139 @@ pub fn parse_component(bytes: &[u8]) -> Result<(String, u32, u32)> {
 mod tests {
     use super::*;
     use p256::ecdsa::{signature::Signer, SigningKey};
+
+    #[test]
+    fn the_source_policy_accepts_plain_http_but_widens_nothing_else() {
+        // 内网门户只有 http：两个策略常量都认 http 与 https，行为一致。
+        for policy in [SourcePolicy::STRICT, SourcePolicy::DEV] {
+            assert!(policy.valid_source("http://10.9.8.162:6111/channel"));
+            assert!(policy.valid_source("https://updates.example.com/channel"));
+            for bad in [
+                "http://10.9.8.162:6111/channel/",     // 尾斜杠 = 不是规范 origin
+                "http://user@10.9.8.162:6111/channel", // 带用户信息
+                "http://10.9.8.162:6111/channel#frag", // 带 fragment
+                "ftp://10.9.8.162:6111/channel",       // 别的 scheme
+                "10.9.8.162:6111/channel",             // 没有 scheme
+            ] {
+                assert!(!policy.valid_source(bad), "{bad}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_ip_source_reads_its_own_manifest() {
+        // 域名源与 IP 源必须读**不同**的清单：清单里的 artifact URL 含 host，
+        // 同源校验会把「IP 源 + 域名清单」直接拒掉。所以这条规则不能靠调用方记得传参。
+        assert_eq!(
+            manifest_file("http://etech.stcetech.ad01.sec.com/cloudfile-updates-dev"),
+            MANIFEST_FILE
+        );
+        assert_eq!(
+            manifest_file("http://10.9.8.162:6111/cloudfile-updates-dev"),
+            MANIFEST_FILE_IP
+        );
+        // IPv6 字面量也算 IP 源。
+        assert_eq!(manifest_file("http://[::1]:8080/channel"), MANIFEST_FILE_IP);
+        // 解析不了的源不 panic：回落默认名，真正的拒绝发生在 valid_source 那一步。
+        assert_eq!(manifest_file("not a url"), MANIFEST_FILE);
+    }
+
+    #[test]
+    fn the_source_policy_never_allows_a_scheme_downgrade() {
+        let source = "https://updates.example.com/channel";
+        assert!(SourcePolicy::DEV.same_origin(source, "https://updates.example.com/channel/x.zip"));
+        // 源是 https 时，包不能走明文 —— 放行明文是指「源本来就在明文通道上」，
+        // 不是「允许把 https 通道里的下载降级」。
+        assert!(!SourcePolicy::DEV.same_origin(source, "http://updates.example.com/channel/x.zip"));
+        // 反过来（源是 http）也不行：混用说明清单被改过。
+        let insecure = "http://10.9.8.162:6111/channel";
+        assert!(SourcePolicy::DEV.same_origin(insecure, "http://10.9.8.162:6111/channel/x.zip"));
+        assert!(!SourcePolicy::DEV.same_origin(insecure, "https://10.9.8.162:6111/channel/x.zip"));
+        // 换主机永远不行。
+        assert!(!SourcePolicy::DEV.same_origin(insecure, "http://evil.example.com/x.zip"));
+    }
+
+    #[test]
+    fn the_source_probe_takes_the_first_usable_candidate() {
+        let candidates = vec![
+            "https://primary.example.com/channel".to_string(),
+            "https://mirror.example.com/channel".to_string(),
+        ];
+        // 主源可用：备源**根本不会被碰**（省掉一次超时等待）。
+        let mut tried = Vec::new();
+        let (picked, probes) = pick_source_with(
+            &mut |source: &str| {
+                tried.push(source.to_string());
+                Ok(())
+            },
+            &candidates,
+        );
+        assert_eq!(picked.as_deref(), Some(candidates[0].as_str()));
+        assert_eq!(tried, vec![candidates[0].clone()]);
+        assert!(probes[0].usable());
+
+        // 主源不通：退到备源，而且两条结论都在（现场要看到「试过谁、为什么不行」）。
+        let mut tried = Vec::new();
+        let (picked, probes) = pick_source_with(
+            &mut |source: &str| {
+                tried.push(source.to_string());
+                if source == candidates[0] {
+                    anyhow::bail!("connection refused");
+                }
+                Ok(())
+            },
+            &candidates,
+        );
+        assert_eq!(picked.as_deref(), Some(candidates[1].as_str()));
+        assert_eq!(tried, candidates);
+        assert!(!probes[0].usable());
+        assert!(probes[0]
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("connection refused"));
+        assert!(probes[1].usable());
+        // 失败报告要能看出「谁不行、为什么」：只报「两个源都不通」在现场没有用。
+        let report = describe_probes(&probes);
+        assert!(
+            report.contains(&format!("{} -> connection refused", candidates[0])),
+            "{report}"
+        );
+        assert!(
+            report.contains(&format!("{} -> 可用", candidates[1])),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn the_source_probe_skips_blanks_and_duplicates() {
+        let candidates = vec![
+            String::new(),
+            "https://only.example.com/channel".to_string(),
+            "  ".to_string(),
+            "https://only.example.com/channel".to_string(),
+            "https://other.example.com/channel".to_string(),
+        ];
+        let mut tried = Vec::new();
+        let (picked, probes) = pick_source_with(
+            &mut |source: &str| {
+                tried.push(source.to_string());
+                anyhow::bail!("unreachable")
+            },
+            &candidates,
+        );
+        assert_eq!(picked, None);
+        // 空白被跳过，重复地址只探一次。
+        assert_eq!(
+            tried,
+            vec![
+                "https://only.example.com/channel".to_string(),
+                "https://other.example.com/channel".to_string()
+            ]
+        );
+        assert_eq!(probes.len(), 2);
+        assert!(describe_probes(&probes).contains("https://only.example.com/channel ->"));
+    }
 
     fn key() -> (SigningKey, String) {
         let key = SigningKey::from_slice(&[0x11; 32]).unwrap();
@@ -563,6 +852,76 @@ mod tests {
         release
     }
 
+    /// 签名载荷的字节形状是**跨仓库契约**：通道侧的签名器
+    /// （`cloudfile-release/tools/dev-release/sign-agent22-release.py`）按同一套规则拼字符串。
+    /// 所以这里不写「意思差不多」的断言，而是把整段载荷逐字节钉死 —— Rust 侧一改字段顺序、
+    /// 分隔符或域串，这条测试立刻红，提醒同步改签名器。漏掉同步的后果不是「报错」，
+    /// 而是通道上签出的清单让所有已装 Agent 报「签名与钉住的公钥不符」。
+    #[test]
+    fn the_signing_payload_is_a_fixed_byte_string() {
+        let release = Release {
+            version: "2.2.4".into(),
+            platform: "windows-x86_64".into(),
+            notes: "dev 通道验证".into(),
+            expires_at: 1_760_000_000,
+            ipc_version: 1,
+            journal_version: 1,
+            artifacts: vec![
+                Artifact {
+                    kind: "native-host".into(),
+                    url: "https://updates.example.com/cloudfile-native-host-2.2.4.exe".into(),
+                    sha256: "0".repeat(64),
+                },
+                Artifact {
+                    kind: "desktop".into(),
+                    url: "https://updates.example.com/cloudfile-desktop-2.2.4.exe".into(),
+                    sha256: "1".repeat(64),
+                },
+            ],
+            signature: String::new(),
+        };
+        // 全部用字面量拼出来：一旦有哪个字段被「算出来」，这条测试就不再是契约了。
+        let expected = concat!(
+            "cloudfile.agent2.release.v1\n",
+            "2.2.4\n",
+            "windows-x86_64\n",
+            "dev 通道验证\n",
+            "1760000000\n",
+            "1\n",
+            "1\n",
+            "native-host\thttps://updates.example.com/cloudfile-native-host-2.2.4.exe\t",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "\n",
+            "desktop\thttps://updates.example.com/cloudfile-desktop-2.2.4.exe\t",
+            "1111111111111111111111111111111111111111111111111111111111111111",
+            "\n",
+        );
+        assert_eq!(
+            String::from_utf8(signing_payload(&release)).unwrap(),
+            expected
+        );
+
+        // 签名本身**不进**载荷 —— 否则签名无法先算出来。这条不是形式主义：
+        // 把 signature 混进被签内容，会让「签名变了、内容没变」成为一个非法状态。
+        let mut resigned = release.clone();
+        resigned.signature = "whatever".into();
+        assert_eq!(signing_payload(&resigned), signing_payload(&release));
+
+        // 相邻字段之间只有 `\n`，所以载荷是否可能有歧义完全取决于各字段的取值范围。
+        // 这是安全的，而且理由必须写在这里，免得以后有人「顺手」放宽某个字段：
+        //   * `version` 由 valid_version 限定为数字点号（预发布后缀只允许字母数字 . -），
+        //     不含分隔符；
+        //   * `platform` 在 verify 里必须**等于本机平台**（固定几个取值）；
+        //   * `expires_at` / `ipc_version` / `journal_version` 是数字类型，
+        //     serde 反序列化时就不可能带换行；
+        //   * artifact 的 `kind` 只有两个合法取值、`sha256` 是 64 位小写十六进制、
+        //     `url` 还要过同源与 URL 解析。
+        // 于是唯一能塞进分隔符的只有 `notes`，而它后面紧跟着数字字段，尾巴吸收不掉。
+        let mut tweaked = release.clone();
+        tweaked.notes = "别的说明".into();
+        assert_ne!(signing_payload(&tweaked), signing_payload(&release));
+    }
+
     fn current_platform() -> String {
         platform_id(std::env::consts::OS, std::env::consts::ARCH)
     }
@@ -572,6 +931,7 @@ mod tests {
         let (key, pinned) = key();
         let release = signed(&key, release("2.2.1"));
         verify(
+            SourcePolicy::STRICT,
             &release,
             "https://updates.example.com",
             "2.2.0",
@@ -588,6 +948,7 @@ mod tests {
         let base = signed(&key, release("2.2.1"));
         let check = |candidate: Release| {
             verify(
+                SourcePolicy::STRICT,
                 &candidate,
                 "https://updates.example.com",
                 "2.2.0",

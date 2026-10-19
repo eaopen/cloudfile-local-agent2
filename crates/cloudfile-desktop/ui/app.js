@@ -4,6 +4,9 @@
 // process: nothing is cached across refreshes and nothing decides on its own
 // whether a task is finished. The window only renders state and forwards the
 // user's choice.
+//
+// 安装引导（setup view）也一样：它把 `setup_state` 报出来的事实画成步骤，
+// 「一键完成」只是在同一个进程里依次做那几件事 —— 没有一步是界面自己判断的。
 const invoke = window.__TAURI__.core.invoke;
 const listen = window.__TAURI__.event.listen;
 const taskUX = window.CloudFileTaskUX;
@@ -15,6 +18,9 @@ const exitBanner = document.querySelector('#confirm-exit');
 const exitText = document.querySelector('#confirm-exit-text');
 const updateBanner = document.querySelector('#update-hint');
 const hostState = document.querySelector('#host-state');
+const setupSteps = document.querySelector('#setup-steps');
+const setupLog = document.querySelector('#setup-log');
+const setupHelp = document.querySelector('#setup-extension-help');
 
 let busy = new Set();
 let refreshing = false;
@@ -23,15 +29,18 @@ let lastSummary = null;
 let services = null;
 let component = null;
 let welcomeKey = null;
+let setup = null;
 
 const VIEWS = {
   tasks: ['本地任务', '查看编辑进度，处理需要确认的任务。'],
   services: ['服务连接', '管理 CloudFile 服务，查看设备连接状态。'],
   settings: ['设置', '按你的习惯安排本地工作。'],
+  setup: ['安装引导', '检查本机 Host、工作目录、浏览器扩展与服务连接。'],
 };
 
 function setView(name) {
   if (!VIEWS[name]) return;
+  if (name === 'setup') loadSetup().catch((error) => say(String(error)));
   message.textContent = '';
   for (const key of Object.keys(VIEWS)) {
     document.querySelector(`#view-${key}`).hidden = key !== name;
@@ -97,8 +106,7 @@ function renderWelcome() {
     }));
   } else if (!registered) {
     actions.append(button('检查浏览器连接', () => {
-      setView('settings'); document.querySelector('.advanced').open = true;
-      document.querySelector('#extension-id').focus();
+      setView('setup');
     }));
   } else {
     actions.append(button('查看连接步骤', () => {
@@ -138,6 +146,214 @@ function renderWelcome() {
 function say(text) {
   message.textContent = text;
 }
+
+// ── 安装引导 ────────────────────────────────────────────────────────────────
+
+// 步骤与「完成判据」的唯一来源。判据全部来自 `setup_state`，
+// 界面不自己做「大概装好了吧」的推断。
+const SETUP_STEPS = [
+  {
+    key: 'agent',
+    title: '安装 Agent',
+    hint: '任务中心已经在运行，二进制就位',
+    state: (s) => ({ ok: true, detail: `v${s.version} · ${s.install_root}` }),
+  },
+  {
+    key: 'trusted',
+    title: '受信任的 CloudFile 服务',
+    hint: '请在「服务连接」添加组织提供的服务器地址',
+    state: (s) => ({
+      ok: s.trusted_ready,
+      detail:
+        s.trusted_ready
+          ? `${s.trusted_count} 个服务已配置`
+          : '尚未添加服务，请前往「服务连接」设置',
+    }),
+  },
+  {
+    key: 'workspace',
+    title: '工作目录',
+    hint: '本地副本落在这里，可在设置里改',
+    state: (s) => ({
+      ok: s.workspace_exists,
+      detail: s.workspace_exists ? s.workspace_root : `${s.workspace_root}（尚未创建）`,
+    }),
+  },
+  {
+    key: 'host',
+    title: '注册 Chrome Host',
+    hint: '扩展 ID 固定，注册由 Agent 自动写入',
+    state: (s) => ({
+      ok: s.host_registered,
+      detail: s.host_registered
+        ? `${s.host} 已注册`
+        : s.host_foreign
+          ? `${s.host} 由其他程序注册，一键完成会备份后接管`
+          : `${s.host} 尚未注册`,
+    }),
+  },
+  {
+    key: 'autostart',
+    title: '开机自启',
+    hint: '登录后自动运行，关闭窗口不丢任务',
+    state: (s) => ({
+      ok: s.autostart_enabled,
+      detail: s.autostart_enabled ? '已设为开机自启' : '未设置',
+    }),
+  },
+  {
+    key: 'extension',
+    title: '安装浏览器扩展',
+    hint: '自动下载解包，最后在 Chrome 里点三下',
+    state: (s) => ({
+      ok: Boolean(s.extension_version),
+      detail: s.extension_version
+        ? `已部署 ${s.extension_version} → ${s.extension_dir}`
+        : `尚未部署到 ${s.extension_dir}`,
+    }),
+  },
+];
+
+function renderSetup(state) {
+  setup = state;
+  setupSteps.replaceChildren();
+  let done = 0;
+  for (const step of SETUP_STEPS) {
+    const outcome = step.state(state);
+    if (outcome.ok) done += 1;
+    const item = document.createElement('li');
+    item.className = outcome.ok ? 'step done' : 'step';
+    const mark = document.createElement('span');
+    mark.className = 'mark';
+    mark.textContent = outcome.ok ? '✓' : '○';
+    const body = document.createElement('div');
+    const title = document.createElement('strong');
+    title.textContent = step.title;
+    const detail = document.createElement('span');
+    detail.textContent = outcome.detail;
+    const hint = document.createElement('small');
+    hint.className = 'hint';
+    hint.textContent = step.hint;
+    body.append(title, detail, hint);
+    item.append(mark, body);
+    setupSteps.append(item);
+  }
+  const ratio = document.createElement('div');
+  ratio.className = 'count';
+  const value = document.createElement('b');
+  value.textContent = `${done}/${SETUP_STEPS.length}`;
+  const caption = document.createElement('span');
+  caption.textContent = '已完成';
+  ratio.append(value, caption);
+  document.querySelector('#setup-counts').replaceChildren(ratio);
+
+  setupHelp.hidden = !state.extension_version;
+  document.querySelector('#setup-ext-dir').value = state.extension_dir;
+  document.querySelector('#setup-ext-id').textContent = state.extension_id;
+  document.querySelector('#host-extension-id').textContent = state.extension_id;
+  document.querySelector('#setup-finish').textContent = state.setup_completed
+    ? '进入任务中心'
+    : '完成，进入任务中心';
+}
+
+async function loadSetup() {
+  const state = await invoke('setup_state');
+  renderSetup(state);
+  return state;
+}
+
+function showView(target) {
+  setView(target);
+}
+
+function logSetup(title, lines) {
+  setupLog.hidden = false;
+  const head = document.createElement('div');
+  head.className = 'log-head';
+  head.textContent = title;
+  setupLog.append(head);
+  for (const line of lines) {
+    const row = document.createElement('div');
+    row.className = line.ok ? 'log-row ok' : 'log-row bad';
+    row.textContent = `${line.ok ? '✓' : '✗'} ${line.label}${line.detail ? ' — ' + line.detail : ''}`;
+    setupLog.append(row);
+  }
+}
+
+const STEP_LABELS = {
+  trusted: '受信任服务',
+  workspace: '工作目录',
+  host: '注册 Host',
+  autostart: '开机自启',
+  extension: '部署扩展',
+};
+
+async function runSetup() {
+  const button = document.querySelector('#setup-run');
+  button.disabled = true;
+  say('正在安装，请稍候…');
+  setupLog.hidden = true;
+  setupLog.replaceChildren();
+  try {
+    const result = await invoke('setup_apply');
+    logSetup(
+      '一键完成',
+      result.steps.map((step) => ({
+        ok: step.ok,
+        label: STEP_LABELS[step.key] || step.key,
+        detail: step.detail,
+      })),
+    );
+    const state = await loadSetup();
+    const failed = result.steps.filter((step) => !step.ok);
+    say(
+      failed.length
+        ? `${failed.length} 步没成功，原因见上面的记录；修好后可以再点一次「一键完成」。`
+        : '五步都完成了；最后在 Chrome 里加载扩展，然后点「完成，进入任务中心」。',
+    );
+    if (state.extension_version) setupHelp.hidden = false;
+  } catch (error) {
+    say(String(error));
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function openExtensionPage() {
+  try {
+    const result = await invoke('open_extension_page');
+    setupHelp.hidden = false;
+    document.querySelector('#setup-ext-dir').value = result.directory;
+    say(
+      result.chrome
+        ? `已用 ${result.chrome} 打开扩展管理页；开启开发者模式后选择上面的目录。`
+        : '已把扩展管理页交给默认浏览器；若打不开，请在 Chrome 地址栏输入 chrome://extensions。',
+    );
+  } catch (error) {
+    say(String(error));
+  }
+}
+
+async function openExtensionDir() {
+  try {
+    say(`已打开扩展目录：${await invoke('open_extension_dir')}`);
+  } catch (error) {
+    say(String(error));
+  }
+}
+
+async function finishSetup() {
+  try {
+    await invoke('setup_finish');
+    showView('tasks');
+    await Promise.all([loadSettings(), renderOrigins(), refresh(), renderExitState()]);
+    say('安装引导已完成。之后可以从左侧「安装引导」重新打开做修复。');
+  } catch (error) {
+    say(String(error));
+  }
+}
+
+// ── 任务列表 ────────────────────────────────────────────────────────────────
 
 function stateText(result) {
   if (result.state === 'published') return '云端已确认新版本。';
@@ -420,6 +636,21 @@ function showExitBanner(assessment) {
   exitBanner.hidden = false;
 }
 
+// 自启落在哪条途径上：企业机器上 Run 键常被策略锁死，实际用的是「启动」文件夹，
+// 不说清楚的话用户会以为开关是假的。
+const AUTOSTART_MECHANISMS = {
+  'run-key': '已设为开机自启（当前用户注册表 Run 键）。',
+  'startup-folder': '已设为开机自启，途径是「启动」文件夹（注册表被策略限制时的备用途径）。',
+  'launch-agent': '已设为开机自启（登录项 LaunchAgent）。',
+};
+
+function showAutostartNote(mechanism) {
+  const note = document.querySelector('#autostart_note');
+  const text = mechanism ? (AUTOSTART_MECHANISMS[mechanism] || `已设为开机自启（${mechanism}）。`) : '';
+  note.hidden = !text;
+  note.textContent = text;
+}
+
 async function loadSettings() {
   const current = await invoke('settings_get');
   component = current;
@@ -429,7 +660,9 @@ async function loadSettings() {
   document.querySelector('#float_hidden_when_empty').checked =
     current.settings.float_hidden_when_empty;
   document.querySelector('#autostart').checked = current.autostart_enabled;
+  showAutostartNote(current.autostart_mechanism);
   document.querySelector('#workspace_root').value = current.settings.workspace_root || '';
+  document.querySelector('#host-extension-id').textContent = (setup && setup.extension_id) || '';
   document.querySelector('#version').textContent = `CloudFile Agent · ${current.version}`;
   document.querySelector('#sidebar-version').textContent = `v${current.version}`;
   document.querySelector('#install-path').textContent = `安装目录：${current.install_root}`;
@@ -442,7 +675,7 @@ async function loadSettings() {
   } else if (registration.registered) {
     hostState.textContent = `Host ${registration.host} 已注册（扩展 ${registration.extension_id}）→ ${registration.manifest_path}`;
   } else {
-    hostState.textContent = `Host ${registration.host} 尚未注册；注册由 Agent 完成，不需要 Python。`;
+    hostState.textContent = `Host ${registration.host} 尚未注册；点「重新注册」由 Agent 完成，不需要 Python。`;
   }
   renderWelcome();
   return current;
@@ -487,6 +720,25 @@ async function renderOrigins() {
       };
       item.append(element);
     }
+    // 默认项不给按钮：能不能删由核心层判定，界面上连入口都不留。
+    if (!service.default) {
+      actions.append(
+        button(
+          '移除',
+          async () => {
+            try {
+              await invoke('untrust_origin', { origin: service.origin });
+              say('已移除该服务。');
+              await renderOrigins();
+            } catch (error) {
+              say(String(error));
+            }
+          },
+          { secondary: true },
+        ),
+      );
+    }
+    item.append(actions);
     list.append(item);
   }
   if (!values.length) {
@@ -500,6 +752,12 @@ function wire() {
   for (const item of document.querySelectorAll('[data-view]')) {
     item.onclick = () => setView(item.dataset.view);
   }
+  document.querySelector('#setup-run').onclick = runSetup;
+  document.querySelector('#setup-extension').onclick = openExtensionPage;
+  document.querySelector('#setup-open-dir').onclick = openExtensionDir;
+  document.querySelector('#setup-finish').onclick = finishSetup;
+  document.querySelector('#setup-ext-dir').onclick = (event) => event.target.select();
+
   document.querySelector('#refresh').onclick = () => {
     refresh();
     renderOrigins().catch((error) => say(String(error)));
@@ -522,9 +780,22 @@ function wire() {
         enabled: document.querySelector('#autostart').checked,
       });
       document.querySelector('#autostart').checked = autostart.autostart_enabled;
+      showAutostartNote(autostart.autostart_mechanism);
       say('本机设置已保存。');
       await loadSettings();
       invoke('float_sync').catch(() => {});
+      await loadSettings();
+    } catch (error) {
+      say(String(error));
+    }
+  };
+
+  document.querySelector('#workspace-reset').onclick = async () => {
+    document.querySelector('#workspace_root').value = '';
+    try {
+      await invoke('settings_set', { workspaceRoot: '' });
+      await loadSettings();
+      say('已恢复默认工作目录。');
     } catch (error) {
       say(String(error));
     }
@@ -536,6 +807,7 @@ function wire() {
       await invoke('trust_origin', {
         origin: document.querySelector('#origin').value.trim(),
       });
+      document.querySelector('#origin').value = '';
       say('服务地址已保存；设备连接状态见服务列表。');
       await renderOrigins();
     } catch (error) {
@@ -543,40 +815,24 @@ function wire() {
     }
   };
 
-  document.querySelector('#register').onsubmit = async (event) => {
-    event.preventDefault();
-    const extensionId = document.querySelector('#extension-id').value.trim();
+  document.querySelector('#host-register').onclick = async () => {
     try {
-      const outcome = await invoke('register_host', { extensionId, takeover: false });
+      const outcome = await invoke('register_host', { takeover: true });
       say(
         outcome.backed_up
           ? `Host 已注册，原注册已备份到 ${outcome.previous_manifest_path}。`
           : 'Host 已注册。',
       );
-      await loadSettings();
+      await Promise.all([loadSettings(), loadSetup()]);
     } catch (error) {
-      // A host owned by another program is replaced on purpose, never silently.
-      const replace = window.confirm(
-        `注册未完成：${error}\n\n是否备份并接管现有注册？接管会保留原 Manifest 以便回退。`,
-      );
-      if (!replace) {
-        say('已取消；原 Host 注册未被改动。');
-        return;
-      }
-      try {
-        const outcome = await invoke('register_host', { extensionId, takeover: true });
-        say(`Host 已接管；原注册备份在 ${outcome.previous_manifest_path}。`);
-        await loadSettings();
-      } catch (retryError) {
-        say(String(retryError));
-      }
+      say(String(error));
     }
   };
 
   document.querySelector('#host-rollback').onclick = async () => {
     try {
       say(`已回退到原注册：${await invoke('rollback_host')}`);
-      await loadSettings();
+      await Promise.all([loadSettings(), loadSetup()]);
     } catch (error) {
       say(String(error));
     }
@@ -586,7 +842,16 @@ function wire() {
     try {
       await invoke('unregister_host');
       say('本机 Host 已卸载；不会删除本地工作副本。');
-      await loadSettings();
+      await Promise.all([loadSettings(), loadSetup()]);
+    } catch (error) {
+      say(String(error));
+    }
+  };
+
+  document.querySelector('#update-extension').onclick = async () => {
+    try {
+      say(await invoke('update_extension'));
+      await loadSetup();
     } catch (error) {
       say(String(error));
     }
@@ -674,13 +939,29 @@ function wire() {
   });
 }
 
-wire();
-refresh();
-loadSettings().catch((error) => say(String(error)));
-renderOrigins().catch((error) => say(String(error)));
-renderExitState();
-setInterval(() => {
-  refresh();
+async function start() {
+  wire();
+  try {
+    const state = await invoke('setup_state');
+    renderSetup(state);
+    // 首次运行（没走完引导）直接停在引导页；之后进任务中心，
+    // 引导仍可从左侧打开做修复。
+    showView(state.setup_completed ? 'tasks' : 'setup');
+  } catch (error) {
+    say(String(error));
+    showView('tasks');
+  }
+  await Promise.all([
+    loadSettings().catch((error) => say(String(error))),
+    renderOrigins().catch((error) => say(String(error))),
+    refresh(),
+  ]);
   renderExitState();
-  renderOrigins().catch(() => {});
-}, 10000);
+  setInterval(() => {
+    refresh();
+    renderExitState();
+    renderOrigins().catch(() => {});
+  }, 10000);
+}
+
+start();

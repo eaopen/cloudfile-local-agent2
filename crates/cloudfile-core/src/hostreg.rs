@@ -6,9 +6,12 @@
 //! whatever it replaced, and refuses to overwrite a host owned by another
 //! program.
 //!
-//! Development and production identities stay separate on purpose: the dev
-//! build registers `com.cloudfile.agent22.dev` and never touches the hosts the
-//! shipped Windows and macOS agents use.
+//! Development and production identities stay separate on POSIX: the dev build
+//! registers `com.cloudfile.agent22.dev` and never touches the hosts the
+//! shipped macOS agent uses. **Windows 是例外**，因为扩展在 Windows 上只分给控制器
+//! 一个槽位 `com.cloudfile.current_agent`（见 [`HOST`]）。占这个槽位必须是显式动作：
+//! `install` 不会静默替换别的程序的 manifest，要 `--takeover`，而它会先备份成
+//! `<host>.previous.json`、可用 `--rollback-host` 还原。
 use crate::storage;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -18,8 +21,29 @@ use std::path::{Path, PathBuf};
 
 /// Isolated development host. Registered by this agent only.
 pub const DEV_HOST: &str = "com.cloudfile.agent22.dev";
+
+/// **本平台**上真正注册的 Host ID。
+///
+/// Windows 上必须是 `com.cloudfile.current_agent` —— 这是扩展的契约，不是偏好：
+/// `cloudfile-chrome-extension/background.js` 的 `preferredNative()` 在 Windows 上**只**向这一个
+/// Host 发消息，且 `tests/agent2-routing.cjs` 用两条用例把它钉死了
+/// （`Windows never probes Go Hosts when its fixed Host is missing`、
+/// `a future Windows Go controller uses the same Host ID`）。也就是说 Windows 上的控制器
+/// 只分到一个槽位，谁当控制器谁就得占它 —— 否则扩展直接回「本机 Agent 未就绪」。
+///
+/// 非 Windows 仍用开发身份 [`DEV_HOST`]：macOS 上扩展找的是 `com.cloudfile.agent2`（Go 的 Host），
+/// Rust MVP 不去抢它。
+pub const HOST: &str = if cfg!(windows) {
+    "com.cloudfile.current_agent"
+} else {
+    DEV_HOST
+};
+
 /// Hosts the shipped agents own. Listed so takeover can be explicit and
 /// reversible; never rewritten during development.
+///
+/// 注意：Windows 上 [`HOST`] 就在这个列表里（控制器槽位只有那一个）。这不矛盾 ——
+/// 列表的用途是「替换别人的注册必须显式」，而 `install` + `--takeover` 正是那条显式路径。
 pub const LEGACY_HOSTS: &[&str] = &[
     "com.cloudfile.agent2",
     "com.cloudfile.current_agent",
@@ -27,6 +51,17 @@ pub const LEGACY_HOSTS: &[&str] = &[
 ];
 
 pub const DESCRIPTION: &str = "CloudFile Agent 2.2 Native Host";
+
+/// 本产品对应的 Chrome 扩展 ID：**固定值**，不是每台机器一个。
+///
+/// 扩展的 `manifest.json` 里钉了 `key`（RSA 公钥），Chrome 由它推导 ID —— 所以
+/// ID 与解压到哪个目录无关，也不用用户去 `chrome://extensions` 里抄一串字符再回来粘贴。
+/// 「谁能调用本机 Agent」这件事仍然由 manifest 的 `allowed_origins` 决定，只是这个值
+/// 现在来自产品常量，而不是一次手输。
+///
+/// 换扩展公钥（重新打包 `key`）时必须同步改这里，否则注册出来的 Host 会拒绝
+/// 真正的扩展 —— `hostreg::install` 只校验 32 位 a-p 的形状，认不出「ID 是另一把钥匙的」。
+pub const EXTENSION_ID: &str = "gocnpbhnbikcpnlafmodflddgnmfcjoc";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Registration {
@@ -57,6 +92,33 @@ pub fn validate_host(value: &str) -> Result<()> {
     Ok(())
 }
 
+/// 写进 manifest、以及判断注册归属时使用的路径文本。
+///
+/// Windows 的 `canonicalize()` 会给出 `\\?\D:\...` 这种 verbatim 前缀。Chrome 的 native
+/// messaging 清单里放的是**普通绝对路径**（Go 侧一直如此、现场跑通过），而 verbatim 前缀
+/// 在 Chrome 内部（`base::CommandLine::FromString` → `CreateProcess`）怎么被处理没有明确
+/// 保证。这条路径是「扩展能不能连上 Agent」的关键路径，不该留一个无法确认的变量。
+/// 剥前缀只影响这个字符串：文件操作仍然用原来的 `PathBuf`。
+fn manifest_path_text(path: &Path) -> String {
+    let text = path.to_string_lossy().into_owned();
+    #[cfg(windows)]
+    {
+        // 只剥裸的 `\\?\`。`\\?\UNC\server\share` 剥了会变成非法的 `UNC\...`，必须保留。
+        if let Some(rest) = text.strip_prefix(r"\\?\") {
+            if !rest.to_ascii_uppercase().starts_with("UNC\\") {
+                return rest.to_string();
+            }
+        }
+    }
+    text
+}
+
+/// 两条路径是否指向同一个可执行文件：比较前统一成 manifest 里的写法，
+/// 否则「自己注册的」会因为在一边 canonicalize 过而被判成 foreign。
+fn same_binary(left: &Path, right: &Path) -> bool {
+    manifest_path_text(left) == manifest_path_text(right)
+}
+
 /// The exact manifest Chrome requires. Field order is fixed so a takeover diff
 /// stays readable.
 pub fn manifest(name: &str, binary: &Path, extension_id: &str) -> Result<Value> {
@@ -68,7 +130,7 @@ pub fn manifest(name: &str, binary: &Path, extension_id: &str) -> Result<Value> 
     Ok(json!({
         "name": name,
         "description": DESCRIPTION,
-        "path": binary.to_string_lossy(),
+        "path": manifest_path_text(binary),
         "type": "stdio",
         "allowed_origins": [format!("chrome-extension://{extension_id}/")],
     }))
@@ -105,15 +167,16 @@ pub fn previous_manifest_path(dir: &Path, host: &str) -> PathBuf {
     dir.join(format!("{host}.previous.json"))
 }
 
-/// `reg.exe` arguments for the current-user Chrome NativeMessagingHosts key.
-/// Pure so the exact command line is covered by the cross-platform test run.
-/// The per-user Chrome native messaging key. Pure, so the existence probe and
-/// the arguments handed to `reg.exe` cannot drift apart.
+/// 当前用户的 Chrome NativeMessagingHosts 键（带 hive 前缀的完整路径）。
+/// 纯函数，所以「查存在」和「写/删」用的一定是同一个键，不会漂移。
 pub fn registry_key(host: &str) -> String {
     format!("HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\{host}")
 }
 
-pub fn registry_arguments(host: &str, manifest: Option<&Path>) -> Result<Vec<String>> {
+/// 这次注册要在注册表里落下的终态：`Some(path)` = 默认值写成 manifest 路径，
+/// `None` = 整个键删掉。拆成纯函数是为了让「写什么」在跨平台测试里被钉住，
+/// 真正的落盘由 [`winreg`]（Windows，进程内）完成。
+pub fn registry_update(host: &str, manifest: Option<&Path>) -> Result<(String, Option<String>)> {
     validate_host(host)?;
     let key = registry_key(host);
     match manifest {
@@ -121,54 +184,29 @@ pub fn registry_arguments(host: &str, manifest: Option<&Path>) -> Result<Vec<Str
             if !path.is_absolute() {
                 bail!("native host manifest path must be absolute");
             }
-            Ok(vec![
-                "add".into(),
-                key,
-                "/ve".into(),
-                "/t".into(),
-                "REG_SZ".into(),
-                "/d".into(),
-                path.to_string_lossy().into_owned(),
-                "/f".into(),
-            ])
+            Ok((key, Some(path.to_string_lossy().into_owned())))
         }
-        None => Ok(vec!["delete".into(), key, "/f".into()]),
+        None => Ok((key, None)),
     }
-}
-
-#[cfg(windows)]
-fn registry_key_exists(host: &str) -> Result<bool> {
-    let output = std::process::Command::new("reg")
-        .args(["query", &registry_key(host)])
-        .output()
-        .context("could not run reg.exe")?;
-    Ok(output.status.success())
 }
 
 #[cfg(windows)]
 fn apply_registry(host: &str, manifest: Option<&Path>) -> Result<()> {
-    // `reg delete` fails on a key that is not there, and its message is
-    // localised, so its exit code cannot be interpreted. Removing an absent key
-    // is the intended end state, so the delete is skipped instead of reported
-    // as a failure: unregistering a host that was never registered succeeds.
-    if manifest.is_none() && !registry_key_exists(host)? {
-        return Ok(());
+    // 进程内读写：以前每注册一次要起两个 `reg.exe`（先 query 探存在、再 add/delete），
+    // 在 GUI 父进程下就是两次黑窗口，且机器禁用 reg.exe 时直接失败。
+    let (key, value) = registry_update(host, manifest)?;
+    match value {
+        Some(path) => crate::winreg::write_string(&key, "", &path),
+        // 删掉整个键（含子键）。键本来就不在也算成功：「删完不存在」是调用方要的终态。
+        None => crate::winreg::delete_key(&key),
     }
-    let arguments = registry_arguments(host, manifest)?;
-    let output = std::process::Command::new("reg")
-        .args(&arguments)
-        .output()
-        .context("could not run reg.exe")?;
-    if !output.status.success() {
-        bail!("native host registry update failed");
-    }
-    Ok(())
 }
 
 #[cfg(not(windows))]
 fn apply_registry(host: &str, manifest: Option<&Path>) -> Result<()> {
-    // Registration on Unix is a plain file in a fixed directory.
-    registry_arguments(host, manifest).map(|_| ())
+    // Unix 侧注册就是固定目录里的一个文件，没有注册表可写；
+    // 这里只保留 host/manifest 的校验（与 Windows 口径一致），然后什么都不做。
+    registry_update(host, manifest).map(|_| ())
 }
 
 pub fn state(dir: &Path, host: &str, expected_binary: Option<&Path>) -> Result<Registration> {
@@ -193,7 +231,7 @@ pub fn state(dir: &Path, host: &str, expected_binary: Option<&Path>) -> Result<R
         .and_then(|origin| origin.strip_prefix("chrome-extension://"))
         .map(|origin| origin.trim_end_matches('/').to_string());
     registration.foreign = match (expected_binary, &binary) {
-        (Some(expected), Some(found)) => found != expected,
+        (Some(expected), Some(found)) => !same_binary(expected, found),
         _ => false,
     };
     registration.binary = binary;
@@ -322,7 +360,7 @@ mod tests {
     const ID: &str = "abcdefghijklmnopabcdefghijklmnop";
 
     /// An absolute directory for the host OS. `Path::is_absolute` is false for
-    /// `/cloudfile` on Windows, and `registry_arguments` refuses a manifest
+    /// `/cloudfile` on Windows, and `registry_update` refuses a manifest
     /// path that is not absolute, so a Unix literal would fail there.
     #[cfg(windows)]
     const BASE: &str = "C:/cloudfile";
@@ -347,7 +385,15 @@ mod tests {
         let value = manifest(DEV_HOST, &path, ID).unwrap();
         assert_eq!(value["name"], DEV_HOST);
         assert_eq!(value["type"], "stdio");
-        assert_eq!(value["path"], path.to_string_lossy().as_ref());
+        // 写进清单的是**普通绝对路径**（`canonicalize()` 的 `\\?\` 前缀会被剥掉）：
+        // 这一条与 Go 侧写出的形状一致，也是 Chrome 现场跑通过的那种写法。
+        assert_eq!(value["path"], manifest_path_text(&path).as_str());
+        #[cfg(windows)]
+        assert!(
+            !value["path"].as_str().unwrap().starts_with(r"\\?\"),
+            "manifest path must not carry a verbatim prefix: {}",
+            value["path"]
+        );
         assert_eq!(
             value["allowed_origins"][0],
             format!("chrome-extension://{ID}/")
@@ -374,6 +420,79 @@ mod tests {
     }
 
     #[test]
+    fn the_registered_host_follows_the_extension_contract() {
+        validate_host(HOST).unwrap();
+        #[cfg(windows)]
+        {
+            // Windows 上扩展**只**向这个 Host 发消息，且不允许回落其它 Host
+            // （cloudfile-chrome-extension/tests/agent2-routing.cjs）。名字写错就等于
+            // 扩展永远报「本机 Agent 未就绪」—— 所以这里钉住，不靠注释。
+            assert_eq!(HOST, "com.cloudfile.current_agent");
+        }
+        #[cfg(not(windows))]
+        {
+            // macOS 上扩展找的是 Go 的 `com.cloudfile.agent2`；Rust MVP 用开发身份，不去抢。
+            assert_eq!(HOST, DEV_HOST);
+            assert_ne!(HOST, "com.cloudfile.agent2");
+        }
+        // 自检与注册必须查同一个名字（lib.rs 的 HOST 只是转出）。
+        assert_eq!(crate::HOST, HOST);
+    }
+
+    #[test]
+    fn the_product_extension_id_is_a_canonical_chrome_id() {
+        // Chrome 只发 [a-p]{32}；写错一个字符，注册出来的 Host 就只认一个不存在的扩展。
+        assert_eq!(EXTENSION_ID.len(), 32, "{EXTENSION_ID}");
+        assert!(
+            EXTENSION_ID.chars().all(|c| ('a'..='p').contains(&c)),
+            "{EXTENSION_ID}"
+        );
+        // 与 1.0 的注册脚本（`register-agent2-windows.ps1 -ExtensionId` 默认值）同一个 ID：
+        // 换 ID 等于让已经装好扩展的机器全部失联，必须是一次显式决定。
+        assert_eq!(EXTENSION_ID, "gocnpbhnbikcpnlafmodflddgnmfcjoc");
+        // 与注册时写进 manifest 的写法一致（界面与安装都引用同一个常量）。
+        assert_eq!(crate::EXTENSION_ID, EXTENSION_ID);
+    }
+
+    #[test]
+    fn the_manifest_never_carries_a_windows_verbatim_prefix() {
+        #[cfg(windows)]
+        {
+            // canonicalize() 在 Windows 上给 `\\?\D:\...`，而清单里必须是普通绝对路径
+            // （与 Go 侧写的形状一致）。
+            assert_eq!(
+                manifest_path_text(Path::new(r"\\?\D:\apps\CloudFile\native-host\host.exe")),
+                r"D:\apps\CloudFile\native-host\host.exe"
+            );
+            // UNC 的 verbatim 形式剥掉前缀会变成非法的 `UNC\server\share`，必须原样保留。
+            assert_eq!(
+                manifest_path_text(Path::new(r"\\?\UNC\server\share\host.exe")),
+                r"\\?\UNC\server\share\host.exe"
+            );
+            // 同一文件两种写法不能判成 foreign —— 否则自己的注册会被当成别人的。
+            assert!(same_binary(
+                Path::new(r"\\?\D:\apps\host.exe"),
+                Path::new(r"D:\apps\host.exe")
+            ));
+            assert!(!same_binary(
+                Path::new(r"\\?\D:\apps\host.exe"),
+                Path::new(r"D:\other\host.exe")
+            ));
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(
+                manifest_path_text(Path::new("/opt/cloudfile/host")),
+                "/opt/cloudfile/host"
+            );
+            assert!(same_binary(
+                Path::new("/opt/cloudfile/host"),
+                Path::new("/opt/cloudfile/host")
+            ));
+        }
+    }
+
+    #[test]
     fn the_registry_key_is_fixed_for_the_current_user() {
         assert_eq!(
             registry_key(DEV_HOST),
@@ -386,38 +505,23 @@ mod tests {
     }
 
     #[test]
-    fn registry_arguments_are_exact_and_reversible() {
+    fn registry_update_is_exact_and_reversible() {
         let manifest = Path::new(BASE).join("native-host/com.cloudfile.agent22.dev.json");
-        let add = registry_arguments(DEV_HOST, Some(&manifest)).unwrap();
+        // 写：键 + 要落到默认值里的 manifest 绝对路径。
+        let (key, value) = registry_update(DEV_HOST, Some(&manifest)).unwrap();
         assert_eq!(
-            add,
-            vec![
-                "add",
-                "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.cloudfile.agent22.dev",
-                "/ve",
-                "/t",
-                "REG_SZ",
-                "/d",
-                manifest.to_string_lossy().as_ref(),
-                "/f"
-            ]
-            .into_iter()
-            .map(String::from)
-            .collect::<Vec<_>>()
+            key,
+            "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.cloudfile.agent22.dev"
         );
-        let remove = registry_arguments(DEV_HOST, None).unwrap();
+        assert_eq!(value.as_deref(), Some(manifest.to_string_lossy().as_ref()));
+        // 删：同一个键，值为 None —— 整个键摘掉，Chrome 就再也找不到这个 Host。
+        let (key, value) = registry_update(DEV_HOST, None).unwrap();
         assert_eq!(
-            remove,
-            vec![
-                "delete",
-                "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.cloudfile.agent22.dev",
-                "/f"
-            ]
-            .into_iter()
-            .map(String::from)
-            .collect::<Vec<_>>()
+            key,
+            "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.cloudfile.agent22.dev"
         );
-        assert!(registry_arguments(DEV_HOST, Some(Path::new("relative.json"))).is_err());
+        assert_eq!(value, None);
+        assert!(registry_update(DEV_HOST, Some(Path::new("relative.json"))).is_err());
     }
 
     #[test]

@@ -77,6 +77,7 @@ pub fn open_with(root: &Path, open: &Open, client: &Client) -> Result<Task> {
         "{:x}",
         Sha256::digest(format!("{}\0{}", client.server, client.session_id))
     );
+    // 马上要往工作区写新任务了：先把这个根位置可能变过的已有任务搬过来。
     let dir = session::task_dir(root, &id)?;
     storage::private_dir(&dir)?;
     // Hold the session lock only while local state changes. The Checkout
