@@ -108,7 +108,22 @@ impl Observer {
                     continue;
                 }
             };
-            if std::fs::metadata(&path)?.len() > crate::device::MAX_FILE {
+            // Office may replace its work copy between the local_path check
+            // and this metadata read. A temporary missing/locked file must not
+            // abort the entire observer loop or pause another open document.
+            let metadata = match std::fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.is_file() => metadata,
+                Ok(_) => {
+                    pause(root, id, "工作副本不再是普通文件；自动上传已暂停，请检查本地文件")?;
+                    self.observations.remove(id);
+                    continue;
+                }
+                Err(_) => {
+                    self.observations.remove(id);
+                    continue;
+                }
+            };
+            if metadata.len() > crate::device::MAX_FILE {
                 pause(root, id, "文件超过 128 MiB，自动上传已暂停；本地文件已保留")?;
                 self.observations.remove(id);
                 continue;
