@@ -494,12 +494,21 @@ pub fn save(root: &Path, id: &str, observed: Option<&str>) -> Result<Value> {
     }
 }
 pub fn commit(root: &Path, id: &str, checkin: bool) -> Result<Value> {
-    issue(root, id, None, if checkin { Action::Checkin } else { Action::Commit })
+    issue(
+        root,
+        id,
+        None,
+        if checkin {
+            Action::Checkin
+        } else {
+            Action::Commit
+        },
+    )
 }
 /// Retry only the original immutable exclusive-edit intent, including Checkin.
 pub fn retry(root: &Path, id: &str) -> Result<Value> {
-    let pending = journal::pending(root, id)?
-        .ok_or_else(|| anyhow::anyhow!("没有待确认的独占提交"))?;
+    let pending =
+        journal::pending(root, id)?.ok_or_else(|| anyhow::anyhow!("没有待确认的独占提交"))?;
     match pending.action {
         Action::Commit => commit(root, id, false),
         Action::Checkin => commit(root, id, true),
@@ -603,7 +612,15 @@ mod tests {
         };
         storage::write(&dir.join("task.json"), &task).unwrap();
         fs::write(dir.join("edit.txt"), b"x").unwrap();
-        store(&root, &id, &State { ticket: "no-network".into(), guard: None }).unwrap();
+        store(
+            &root,
+            &id,
+            &State {
+                ticket: "no-network".into(),
+                guard: None,
+            },
+        )
+        .unwrap();
         let changed = save(&root, &id, Some(&"0".repeat(64))).unwrap();
         assert_eq!(changed["state"], "changing");
         assert!(journal::pending(&root, &id).unwrap().is_none());
