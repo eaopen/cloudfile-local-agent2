@@ -114,7 +114,11 @@ impl Observer {
             let metadata = match std::fs::symlink_metadata(&path) {
                 Ok(metadata) if metadata.is_file() => metadata,
                 Ok(_) => {
-                    pause(root, id, "工作副本不再是普通文件；自动上传已暂停，请检查本地文件")?;
+                    pause(
+                        root,
+                        id,
+                        "工作副本不再是普通文件；自动上传已暂停，请检查本地文件",
+                    )?;
                     self.observations.remove(id);
                     continue;
                 }
@@ -205,28 +209,36 @@ mod tests {
         std::fs::write(&working, b"first edit").unwrap();
         let mut observer = Observer::default();
         let mut calls = 0;
-        observer.scan_with(&root, 0, |_, _| {
-            calls += 1;
-            Ok(json!({"state":"published"}))
-        }).unwrap();
+        observer
+            .scan_with(&root, 0, |_, _| {
+                calls += 1;
+                Ok(json!({"state":"published"}))
+            })
+            .unwrap();
 
         let temporary = dir.join("office.tmp");
         std::fs::rename(&working, &temporary).unwrap();
-        observer.scan_with(&root, 1000, |_, _| {
-            calls += 1;
-            Ok(json!({"state":"published"}))
-        }).unwrap();
+        observer
+            .scan_with(&root, 1000, |_, _| {
+                calls += 1;
+                Ok(json!({"state":"published"}))
+            })
+            .unwrap();
         std::fs::rename(&temporary, &working).unwrap();
 
-        observer.scan_with(&root, 2500, |_, _| {
-            calls += 1;
-            Ok(json!({"state":"published"}))
-        }).unwrap();
+        observer
+            .scan_with(&root, 2500, |_, _| {
+                calls += 1;
+                Ok(json!({"state":"published"}))
+            })
+            .unwrap();
         assert_eq!(calls, 0, "settle period restarts after a replacement");
-        observer.scan_with(&root, 5600, |_, _| {
-            calls += 1;
-            Ok(json!({"state":"changing"}))
-        }).unwrap();
+        observer
+            .scan_with(&root, 5600, |_, _| {
+                calls += 1;
+                Ok(json!({"state":"changing"}))
+            })
+            .unwrap();
         assert_eq!(calls, 1);
         assert!(settings(&root, &id).unwrap().pause_reason.is_none());
     }
@@ -257,10 +269,12 @@ mod tests {
             assert!(set_enabled(&root, &id, true).is_err());
         }
         let mut calls = 0;
-        Observer::default().scan_with(&root, 5000, |_, _| {
-            calls += 1;
-            Ok(json!({"state":"published"}))
-        }).unwrap();
+        Observer::default()
+            .scan_with(&root, 5000, |_, _| {
+                calls += 1;
+                Ok(json!({"state":"published"}))
+            })
+            .unwrap();
         assert_eq!(calls, 0);
     }
 }
