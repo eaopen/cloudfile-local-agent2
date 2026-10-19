@@ -372,7 +372,7 @@ pub fn recover_with(root: &Path, id: &str, client: &Client) -> Result<Value> {
 /// snapshot or a new Intent. Always query first for an existing receipt.
 pub fn retry(root: &Path, id: &str) -> Result<Value> {
     if crate::v2_edit::is_v2(root, id) {
-        return crate::v2_edit::commit(root, id, false);
+        return crate::v2_edit::retry(root, id);
     }
 
     let (_, client, _) = exclusive(root, id)?;
