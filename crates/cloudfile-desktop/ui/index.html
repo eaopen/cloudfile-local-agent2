@@ -14,6 +14,7 @@
     <button class="nav-item selected" data-view="tasks" aria-current="page"><span aria-hidden="true">▤</span>本地任务<span id="attention-count" class="nav-count" hidden></span></button>
     <button class="nav-item" data-view="services"><span aria-hidden="true">◇</span>服务连接<span id="service-dot" class="connection-dot" hidden></span></button>
     <button class="nav-item" data-view="settings"><span aria-hidden="true">⚙</span>设置</button>
+    <button class="nav-item" data-view="setup"><span aria-hidden="true">↗</span>安装引导</button>
   </nav>
   <div class="sidebar-footer">
     <div id="connection-state" class="connection-state">正在读取连接状态…</div>
@@ -63,18 +64,38 @@
     <section class="panel"><h2>偏好设置</h2><p class="hint">管理提醒、悬浮入口和工作副本位置。</p>
       <form id="settings" class="settings-form">
         <div class="settings-group"><h3>通知提醒</h3><label class="check"><span>保存后显示轻提示</span><input type="checkbox" id="notify_on_saved"></label><label class="check"><span>需要检查时显示警告提示</span><input type="checkbox" id="notify_on_review"></label></div>
-        <div class="settings-group"><h3>常驻与启动</h3><label class="check"><span>显示可拖动悬浮入口</span><input type="checkbox" id="float_enabled"></label><label class="check"><span>没有任务时隐藏悬浮入口</span><input type="checkbox" id="float_hidden_when_empty"></label><label class="check"><span>登录时启动 Agent</span><input type="checkbox" id="autostart"></label></div>
+        <div class="settings-group"><h3>常驻与启动</h3><label class="check"><span>显示可拖动悬浮入口</span><input type="checkbox" id="float_enabled"></label><label class="check"><span>没有任务时隐藏悬浮入口</span><input type="checkbox" id="float_hidden_when_empty"></label><label class="check"><span>登录时启动 Agent</span><input type="checkbox" id="autostart"></label><p class="hint" id="autostart_note" hidden></p></div>
         <div class="settings-group"><h3>工作副本目录</h3><label class="field"><span class="hint">修改仅影响新任务；留空恢复默认目录。</span><input id="workspace_root" type="text" aria-label="工作副本目录" placeholder="默认：用户主目录 / CloudFile-Dev / Workspace"></label></div>
-        <div class="form-footer"><button>保存设置</button><span class="hint">已有文件和编辑任务会保留在原位置。</span></div>
+        <div class="form-footer"><button>保存设置</button><button type="button" id="workspace-reset" class="secondary">恢复默认目录</button><span class="hint">已有文件和编辑任务会保留在原位置。</span></div>
       </form>
     </section>
     <section class="panel"><div class="section-heading"><div><h2>关于与更新</h2><p id="version" class="hint"></p></div><button id="check-update" class="secondary">检查更新</button></div>
       <details class="advanced"><summary>浏览器连接与诊断</summary><div class="advanced-content">
         <p id="install-path" class="technical"></p><p id="host-state" class="technical"></p>
         <p class="hint">仅在开发安装或排查浏览器连接时使用。更换注册前会保留回退副本。</p>
-        <form id="register" class="inline-form"><input id="extension-id" type="text" placeholder="Chrome 扩展 ID（32 位 a-p）" aria-label="扩展 ID"><button>注册 Host</button></form>
+        <p class="hint">固定扩展 ID：<code id="host-extension-id"></code></p><button id="host-register" class="secondary">重新注册 Host</button><button id="update-extension" class="secondary">更新扩展</button>
         <div class="row"><button id="host-rollback" class="secondary">回退 Host 注册</button><button id="host-unregister" class="secondary">卸载本机 Host</button></div>
       </div></details>
+    </section>
+  </div>
+  <div id="view-setup" class="page-view" hidden>
+    <section class="panel">
+      <div class="section-heading"><div><h2>首次安装与连接检查</h2><p class="hint">此页只协助安装；服务授权与配对由用户操作，不会静默信任未知服务器。</p></div>
+      <div id="setup-counts"></div></div>
+      <ol class="setup-steps" id="setup-steps"></ol>
+      <div class="row">
+        <button id="setup-run">安装或修复本机组件</button>
+        <button class="secondary" id="setup-extension">打开 Chrome 扩展管理页</button>
+        <button class="secondary" id="setup-open-dir">打开扩展目录</button>
+        <button class="secondary" id="setup-finish">完成，进入任务中心</button>
+      </div>
+      <div id="setup-log" class="technical" hidden></div>
+      <section class="panel" id="setup-extension-help" hidden>
+        <h3>安装扩展（需要你在 Chrome 中确认）</h3>
+        <p class="hint">打开 chrome://extensions，启用开发者模式并选择“加载已解压的扩展程序”。</p>
+        <label class="field">扩展目录 <input id="setup-ext-dir" readonly aria-label="扩展目录"></label>
+        <p>扩展 ID：<code id="setup-ext-id"></code></p>
+      </section>
     </section>
   </div>
   <div id="message" role="status" aria-live="polite"></div>

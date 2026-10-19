@@ -5,12 +5,20 @@
 //! process over the file mailbox. With arguments it is a plain CLI, which is
 //! how registration, login items, upgrades and reverts are performed without
 //! a scripting runtime on the target machine.
+use anyhow::Context;
 use cloudfile_core::{
-    apps, autostart, device, guard, hostreg, ipc, native, paired_session, session, storage, update,
-    wire,
+    apps, autostart, device, guard, hostreg, ipc, native, paired_session, selftest, session,
+    storage, update, wire,
 };
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+
+/// 桌面进程的文件名：安装时与 native host 同级，自检与更新都按它找。
+const DESKTOP_NAME: &str = if cfg!(windows) {
+    "cloudfile-desktop.exe"
+} else {
+    "cloudfile-desktop"
+};
 
 const USAGE: &str = "\
 CloudFile Agent 2.2
@@ -26,19 +34,37 @@ Usage: cloudfile-native-host [command]
   --host-state                   print the current Chrome host registration
   --enable-autostart             start the agent at login
   --disable-autostart            stop starting the agent at login
+  --install                      install or repair this machine from the update channel
+  --set-update-source <url>      configure the update channel (with --public-key)
+  --clear-update-source          remove the configured update channel
   --check-update                 report the available signed release, if any
+  --self-test                    check the local installation and exit (JSON, non-zero when broken)
   --update                       download, verify, stage and activate an update
   --update-from <manifest>       run an update from a local signed manifest
+  --update-extension             install the newest browser extension and let it reload
   --rollback                     point the host back at the previous version
   --prune                        keep the active version plus one revert point
 
+Install options:
+  --source <url>                 primary update origin (probed first)
+  --source-fallback <url>        mirror used when the primary is unreachable; the one
+                                 that actually works is written back into the config
+  --skip-registration            do not register the Chrome host
+  --skip-autostart               do not add the login item
+  --skip-launch                  do not start the task centre afterwards
+
+Update options:
+  --public-key <base64url>       pinned P-256 release key (required by https channels)
+  --extension-dir <path>         local unpacked extension copy, for --update-extension
+  --allow-insecure-source        legacy switch; plain-http channels are allowed by default
+                                 (kept so existing install scripts keep working)
+
 Registration options:
-  --extension-id <id>            Chrome extension ID to allow (32 chars, a-p)
-  --host-name <name>             host name (defaults to the development host)
+  --extension-id <id>            Chrome extension ID to allow (defaults to the product ID;
+                                 only pass this for a different build of the extension)
+  --host-name <name>             host name (defaults to this platform's host)
   --takeover                     back up and replace a host another program owns
 ";
-
-const DEV_USAGE: &str = "cloudfile-native-host --register-host --extension-id <id>";
 
 fn flag(args: &[String], name: &str) -> Option<String> {
     let index = args.iter().position(|value| value == name)?;
@@ -82,7 +108,9 @@ fn main() {
 
 fn run_command(args: &[String]) -> anyhow::Result<()> {
     let root = root()?;
-    let host = flag(args, "--host-name").unwrap_or_else(|| hostreg::DEV_HOST.to_string());
+    // 默认就是本平台的 Host（Windows 上是 `com.cloudfile.current_agent`，见 hostreg::HOST）。
+    // `--host-name` 只用于显式覆盖（例如按开发身份另注册一份、或清理旧的 dev host）。
+    let host = flag(args, "--host-name").unwrap_or_else(|| hostreg::HOST.to_string());
     let command = args[0].as_str();
     match command {
         "--open-uri" => {
@@ -146,6 +174,7 @@ fn run_command(args: &[String]) -> anyhow::Result<()> {
                 "active_version": update::active_version(&dir, &host)?,
                 "installed_versions": update::installed_versions(&update::install_root(&binary))?,
                 "autostart": autostart::enabled(),
+                "autostart_mechanism": autostart::mechanism().map(|item| item.id()),
                 "applications": apps::names(),
                 "runtime": {
                     // The desktop shell needs WebView2 on Windows; on macOS the
@@ -158,8 +187,10 @@ fn run_command(args: &[String]) -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&value)?);
         }
         "--register-host" => {
-            let extension_id = flag(args, "--extension-id")
-                .ok_or_else(|| anyhow::anyhow!("--extension-id is required\n\n{DEV_USAGE}"))?;
+            // 扩展 ID 是产品常量：正常路径不需要传，传了也只是同一组字符
+            // （`hostreg::install` 仍会校验 32 位 a-p 的形状）。
+            let extension_id =
+                flag(args, "--extension-id").unwrap_or_else(|| hostreg::EXTENSION_ID.to_string());
             let takeover = args.iter().any(|value| value == "--takeover");
             let binary = host_binary()?;
             let dir = hostreg::manifest_dir()?;
@@ -209,10 +240,48 @@ fn run_command(args: &[String]) -> anyhow::Result<()> {
                 }))?
             );
         }
+        "--install" => run_install(&root, &host, args)?,
+        "--set-update-source" => {
+            let source = flag(args, "--set-update-source")
+                .ok_or_else(|| anyhow::anyhow!("--set-update-source requires a url"))?;
+            let public_key = flag(args, "--public-key");
+            let extension_dir = flag(args, "--extension-dir");
+            // 明文 http 现在默认就支持（内网门户只有 http），这个开关只是为了兼容
+            // 旧脚本，取值会被记进 config.json 当审计位，但不再影响源是否被接受。
+            let policy = if args.iter().any(|value| value == "--allow-insecure-source") {
+                update::SourcePolicy::DEV
+            } else {
+                update::SourcePolicy::STRICT
+            };
+            session::set_update_with_policy(
+                &root,
+                Some(source),
+                public_key,
+                extension_dir,
+                policy,
+            )?;
+            let config = session::config(&root)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "update_source": config.update_source,
+                    "update_public_key_set": config.update_public_key.is_some(),
+                    "allow_insecure_update_source": config.allow_insecure_update_source,
+                    "extension_dir": config.extension_dir,
+                }))?
+            );
+        }
+        "--clear-update-source" => {
+            session::set_update(&root, None, None, None)?;
+            println!("update source cleared");
+        }
         "--enable-autostart" => {
             let binary = desktop_binary()?;
-            autostart::install(&root, &binary)?;
+            // 说清落在哪条途径上：企业机器上 Run 键常被锁，实际生效的是
+            // 「启动」文件夹 —— 不报出来就没法解释「为什么任务管理器里看不到」。
+            let item = autostart::install(&root, &binary)?;
             println!("{}", binary.to_string_lossy());
+            println!("{}", item.id());
         }
         "--disable-autostart" => {
             autostart::remove(&root)?;
@@ -224,7 +293,31 @@ fn run_command(args: &[String]) -> anyhow::Result<()> {
                 serde_json::to_string_pretty(&native::check_update(&root))?
             );
         }
+        "--self-test" => {
+            // 「搭档」是桌面进程：Agent 能跑，但用户没有入口。装的时候两个一起装，
+            // 所以缺了就该报出来（读不到路径时用文件名占位，报告里会指出找不到）。
+            let peer = desktop_binary().unwrap_or_else(|_| PathBuf::from(DESKTOP_NAME));
+            let report = selftest::run(&root, &peer);
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if report["ok"] != json!(true) {
+                // 退出码要能被脚本判：0 = 全绿，1 = 有项确实不工作。
+                std::process::exit(1);
+            }
+        }
         "--update" => run_update(&root, &host, None)?,
+        "--update-extension" => {
+            native::record_update_result(&root, "extension", "running");
+            match native::update_extension(&root) {
+                Ok(message) => {
+                    native::record_update_result(&root, "extension", "completed");
+                    println!("{message}");
+                }
+                Err(error) => {
+                    native::record_update_result(&root, "extension", "failed");
+                    return Err(error);
+                }
+            }
+        }
         "--update-from" => {
             let path = flag(args, "--update-from")
                 .ok_or_else(|| anyhow::anyhow!("--update-from requires a manifest path"))?;
@@ -256,11 +349,7 @@ fn host_binary() -> anyhow::Result<PathBuf> {
 /// protocol depends on that, and so does the login item.
 fn desktop_binary() -> anyhow::Result<PathBuf> {
     let host = host_binary()?;
-    let name = if cfg!(windows) {
-        "cloudfile-desktop.exe"
-    } else {
-        "cloudfile-desktop"
-    };
+    let name = DESKTOP_NAME;
     let directory = host
         .parent()
         .ok_or_else(|| anyhow::anyhow!("native host has no install directory"))?;
@@ -295,6 +384,15 @@ fn run_update(root: &Path, host: &str, manifest: Option<PathBuf>) -> anyhow::Res
 }
 
 fn apply_update(root: &Path, host: &str, manifest: Option<PathBuf>) -> anyhow::Result<()> {
+    let (release, _, _) = fetch_verified_release(root, manifest.as_deref())?;
+    apply_release(host, &release)
+}
+
+/// 取清单并验签，返回 (清单, 策略, 源)。`--install` 复用这一段，所以它不碰安装目录。
+fn fetch_verified_release(
+    root: &Path,
+    manifest: Option<&Path>,
+) -> anyhow::Result<(update::Release, update::SourcePolicy, String)> {
     let config = session::config(root)?;
     let (source, public_key) = match (&config.update_source, &config.update_public_key) {
         (Some(source), Some(key)) => (source.clone(), key.clone()),
@@ -302,12 +400,14 @@ fn apply_update(root: &Path, host: &str, manifest: Option<PathBuf>) -> anyhow::R
             "尚未配置签名更新源；请提供 --update-from <manifest> 或先设置更新源与公钥"
         ),
     };
-    let bytes = match &manifest {
+    let policy = config.update_policy();
+    let bytes = match manifest {
         Some(path) => std::fs::read(path)?,
-        None => update::fetch_manifest(&source)?,
+        None => update::fetch_manifest_for(policy, &source)?,
     };
     let release = update::parse_release(&bytes)?;
     update::verify(
+        policy,
         &release,
         &source,
         cloudfile_core::VERSION,
@@ -315,6 +415,271 @@ fn apply_update(root: &Path, host: &str, manifest: Option<PathBuf>) -> anyhow::R
         &update::platform_id(std::env::consts::OS, std::env::consts::ARCH),
         &public_key,
     )?;
+    Ok((release, policy, source))
+}
+
+/// 一键安装 / 修复。等价于 Go 的 `install.cmd`，区别只是目标机器**不需要任何脚本运行时**。
+///
+/// 步骤与顺序：安装目录可写 → 定源并写回（主源不通退备源）→ 有更新才换二进制 →
+/// 注册 Host → 设开机自启 → 启动任务中心。幂等：已经装好的机器重跑一遍等于修复
+/// （注册与自启重做、二进制不动）。
+fn run_install(root: &Path, host: &str, args: &[String]) -> anyhow::Result<()> {
+    // 先判「装得进去」再下载：别下完几 MB 才发现目录不可写（Go 的 :usable 也是这个顺序）。
+    let install = update::install_root(&std::env::current_exe()?);
+    ensure_install_root(&install)?;
+
+    let (source, policy, probes) = resolve_source(root, args)?;
+    let dir = hostreg::manifest_dir()?;
+
+    // 二进制：清单里有更新才暂存。暂存只写版本目录、**不碰注册** —— 「健康检查通过之前
+    // 什么都不替换」这条安全顺序仍然成立；而全新安装这边没有旧注册可以接管
+    // （`update::activate` 是「接管既有注册」专用的），所以注册必须能和激活分开做。
+    let (binaries, staged) = stage_binaries(root)?;
+
+    // 注册 Host 是安装的实质产物：没有它扩展就找不到 Agent。
+    let (registration, registered_dir) = if args.iter().any(|value| value == "--skip-registration")
+    {
+        (
+            json!({"skipped": true}),
+            host_binary()?.parent().map(Path::to_path_buf),
+        )
+    } else {
+        let (target, extension_id, takeover) =
+            registration_target(&dir, host, staged.as_ref(), args)?;
+        let outcome = hostreg::install(&dir, host, &extension_id, &target, takeover).map_err(
+            |error| {
+                anyhow::anyhow!(
+                    "{error}\n\n如果确认这属于本机 Agent，请加 --takeover 重新注册；原注册会先备份并可用 --rollback-host 还原"
+                )
+            },
+        )?;
+        let directory = target.parent().map(Path::to_path_buf);
+        (serde_json::to_value(outcome)?, directory)
+    };
+
+    // 自启与启动都用**注册真正指向的那个目录**：全新安装时正在跑的可能只是引导下载的临时
+    // 副本，它旁边没有桌面进程。失败都只警告 —— 二进制已经就位，用户能自己双击。
+    let desktop = registered_dir
+        .as_deref()
+        .map(|directory| directory.join(DESKTOP_NAME));
+    let login_item = if args.iter().any(|value| value == "--skip-autostart") {
+        None
+    } else {
+        match desktop.as_deref().filter(|path| path.is_file()) {
+            Some(desktop) => match autostart::install(root, desktop) {
+                Ok(item) => Some(item.id().to_string()),
+                Err(error) => {
+                    eprintln!("警告：开机自启没设上（{error:#}）；重启后手动双击任务中心即可。");
+                    None
+                }
+            },
+            None => {
+                eprintln!("警告：注册目录里没有 {DESKTOP_NAME}，开机自启跳过。");
+                None
+            }
+        }
+    };
+
+    let launched = if args.iter().any(|value| value == "--skip-launch") {
+        false
+    } else {
+        launch_desktop(desktop.as_deref())?
+    };
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({
+            "version": cloudfile_core::VERSION,
+            "install_root": install.to_string_lossy(),
+            "update_source": source,
+            "allow_insecure_update_source": policy.allow_insecure,
+            "source_probes": probes.iter().map(|probe| json!({
+                "source": probe.source,
+                "error": probe.error,
+            })).collect::<Vec<_>>(),
+            "binaries": binaries,
+            "staged_version": staged.as_ref().map(|(version, _)| version.clone()),
+            "registered_directory": registered_dir
+                .as_deref()
+                .map(|dir| dir.to_string_lossy().into_owned()),
+            "registration": registration,
+            "login_item": login_item,
+            "desktop_started": launched,
+        }))?
+    );
+    Ok(())
+}
+
+/// 安装目录能不能真写进去：建目录 + 写一个探针文件再删掉。
+fn ensure_install_root(install: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(install)
+        .with_context(|| format!("创建安装目录失败：{}", install.display()))?;
+    let probe = install.join(".cf-write-test");
+    std::fs::write(&probe, b"ok")
+        .with_context(|| format!("安装目录不可写：{}", install.display()))?;
+    let _ = std::fs::remove_file(&probe);
+    Ok(())
+}
+
+/// 定源并**把它写回配置**。
+///
+/// 给了 `--source` 就依次探测（`--source-fallback` 是备用、通常是直连静态服务的 IP），
+/// 写回的是这台机器**真的能访问**的那个 —— 否则用户装完、第一次升级时才发现主源
+/// 在这台机器上根本不通。两个都不通时，报错里带着每个地址各自的原因。
+fn resolve_source(
+    root: &Path,
+    args: &[String],
+) -> anyhow::Result<(String, update::SourcePolicy, Vec<update::SourceProbe>)> {
+    let policy = if args.iter().any(|value| value == "--allow-insecure-source") {
+        // 兼容位：http 早已默认支持，这里只影响写进 config 的审计字段。
+        update::SourcePolicy::DEV
+    } else {
+        update::SourcePolicy::STRICT
+    };
+    let mut candidates = Vec::new();
+    if let Some(primary) = flag(args, "--source") {
+        candidates.push(primary);
+    }
+    if let Some(fallback) = flag(args, "--source-fallback") {
+        candidates.push(fallback);
+    }
+    if candidates.is_empty() {
+        // 没给地址：用这台机器上已经配好的（策略也以配置为准，见 --set-update-source）。
+        let config = session::config(root)?;
+        // 先算策略：下面的 ok_or_else 会把 update_source 移走。
+        let policy = config.update_policy();
+        let source = config.update_source.ok_or_else(|| {
+            anyhow::anyhow!(
+                "--install 需要 --source <url>，或先用 --set-update-source 配置更新通道"
+            )
+        })?;
+        return Ok((source, policy, Vec::new()));
+    }
+
+    let (picked, probes) = update::pick_source(policy, &candidates);
+    let Some(source) = picked else {
+        anyhow::bail!(
+            "两个更新源都不可用：{}\n请检查本机能否访问上面的地址（DNS/代理/防火墙）后重试。",
+            update::describe_probes(&probes)
+        );
+    };
+    session::set_update_with_policy(
+        root,
+        Some(source.clone()),
+        flag(args, "--public-key"),
+        flag(args, "--extension-dir"),
+        policy,
+    )?;
+    Ok((source, policy, probes))
+}
+
+/// 二进制：清单里有更新才暂存，已是最新就跳过（`--install` 同时是修复命令）。
+/// 返回 (结论, 暂存好的 (版本, host 路径))。
+fn stage_binaries(root: &Path) -> anyhow::Result<(&'static str, Option<(String, PathBuf)>)> {
+    let config = session::config(root)?;
+    let (Some(source), Some(_)) = (
+        config.update_source.clone(),
+        config.update_public_key.as_ref(),
+    ) else {
+        // 只有扩展通道（开发通道常见）：二进制不升级，但安装照样可以完成。
+        return Ok(("skipped", None));
+    };
+    let policy = config.update_policy();
+    // 先**不验签**地读一眼版本号：验签本身会拒绝「不比当前新」的清单，而安装器必须先知道
+    // 有没有更新才能走幂等（修复）那条路。签名通过之前不会下载任何字节。
+    let advertised = update::parse_release(&update::fetch_manifest_for(policy, &source)?)?;
+    if update::compare(&advertised.version, cloudfile_core::VERSION) != std::cmp::Ordering::Greater
+    {
+        return Ok(("current", None));
+    }
+    // 同一份清单再取一次并完整验签。清单只有几十 KB、一台机器只跑一次安装，
+    // 不值得为了省这一次请求把「验签」拆到两个地方。
+    let (release, _, _) = fetch_verified_release(root, None)?;
+    let (_, staged_host) = stage_release(&release)?;
+    Ok(("staged", Some((release.version.clone(), staged_host))))
+}
+
+/// 注册该指向哪个二进制、用哪个扩展 ID、要不要接管。顺序就是优先级：
+///
+/// 1. 这次刚暂存了新版本 → 指它（升级与全新安装都指它）
+/// 2. 否则已有注册 → 沿用它（不无缘无故改别人的注册；`--extension-id` 显式给了才换）
+/// 3. 都没有 → 就地修复：指当前正在跑的这份
+fn registration_target(
+    dir: &Path,
+    host: &str,
+    staged: Option<&(String, PathBuf)>,
+    args: &[String],
+) -> anyhow::Result<(PathBuf, String, bool)> {
+    let existing = hostreg::state(dir, host, None)?;
+    let target = match staged {
+        // 暂存那一步返回的就是 host 的最终路径（版本目录里的那个），直接注册它。
+        Some((_, staged_host)) => staged_host.clone(),
+        None => match &existing.binary {
+            Some(binary) => binary.clone(),
+            None => host_binary()?,
+        },
+    };
+    // 已有注册时沿用它的扩展 ID：白名单不该因为重跑一次安装就被改掉。
+    // 都没有就用产品常量 —— 扩展 ID 固定，安装不该要求用户抄一串字符。
+    let extension_id = flag(args, "--extension-id")
+        .or_else(|| existing.extension_id.clone())
+        .unwrap_or_else(|| hostreg::EXTENSION_ID.to_string());
+    // 有旧注册、或这次换了版本，都要显式接管：`hostreg::install` 会先把原 manifest
+    // 备份成 `<host>.previous.json`，可用 `--rollback-host` 还原。
+    let takeover = staged.is_some()
+        || existing.binary.is_some()
+        || args.iter().any(|value| value == "--takeover");
+    Ok((target, extension_id, takeover))
+}
+
+/// 装完立刻启动任务中心：否则用户重启之前右下角什么都没有。
+/// 桌面是 GUI 子系统程序，读写的都是自己的私有目录，启动它不会弹控制台。
+fn launch_desktop(desktop: Option<&Path>) -> anyhow::Result<bool> {
+    let Some(desktop) = desktop.filter(|path| path.is_file()) else {
+        eprintln!("警告：找不到 {DESKTOP_NAME}，任务中心没能自动启动；装好后手动双击即可。");
+        return Ok(false);
+    };
+    let mut command = std::process::Command::new(desktop);
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    cloudfile_core::childproc::hide(&mut command);
+    match command.spawn() {
+        Ok(_) => Ok(true),
+        Err(error) => {
+            // 启动失败不算安装失败：二进制已经就位，用户可以自己双击。
+            eprintln!(
+                "警告：任务中心没能自动启动（{error}）；请手动双击 {}",
+                desktop.display()
+            );
+            Ok(false)
+        }
+    }
+}
+
+/// 下载、暂存、健康检查、激活。顺序就是安全属性：在暂存的构建起来并回答本地协议之前，
+/// 什么都替换不了正在运行的那份。
+fn apply_release(host: &str, release: &update::Release) -> anyhow::Result<()> {
+    let (install, staged_host) = stage_release(release)?;
+    // `activate` 是「接管既有注册」专用的：它从当前注册取扩展 ID、把注册指到新版本目录，
+    // 并备份原 manifest。全新安装没有旧注册可接管（会明确报错），那条路走 `--install`。
+    let dir = hostreg::manifest_dir()?;
+    update::activate(&install, &dir, host, &release.version)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({
+            "version": release.version,
+            "install_root": install.to_string_lossy(),
+            "native_host": staged_host.to_string_lossy(),
+        }))?
+    );
+    Ok(())
+}
+
+/// 下载 + 暂存 + 健康检查，返回 (安装根, 暂存好的 host 路径)。**不碰注册** ——
+/// 全新安装这边没有旧注册可以接管，所以这一步必须能单独用。
+fn stage_release(release: &update::Release) -> anyhow::Result<(PathBuf, PathBuf)> {
     let os = std::env::consts::OS;
     let mut files = Vec::new();
     for artifact in &release.artifacts {
@@ -331,6 +696,7 @@ fn apply_update(root: &Path, host: &str, manifest: Option<PathBuf>) -> anyhow::R
     let staged = update::stage(&install, &release.version, os, &files)?;
     let staged_host = staged.join(update::Binary::NativeHost.file_name(os, &release.version));
     let staged_desktop = staged.join(update::Binary::Desktop.file_name(os, &release.version));
+    // 健康检查：新构建必须能起来并回答本地协议，否则一律不许留在版本目录里。
     let healthy = update::probe(&staged_host)
         .and_then(|reported| {
             anyhow::ensure!(
@@ -345,17 +711,7 @@ fn apply_update(root: &Path, host: &str, manifest: Option<PathBuf>) -> anyhow::R
         let _ = std::fs::remove_dir_all(&staged);
         return Err(error);
     }
-    let dir = hostreg::manifest_dir()?;
-    update::activate(&install, &dir, host, &release.version)?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&json!({
-            "version": release.version,
-            "install_root": install.to_string_lossy(),
-            "native_host": staged_host.to_string_lossy(),
-        }))?
-    );
-    Ok(())
+    Ok((install, staged_host))
 }
 
 fn run_stdio() -> anyhow::Result<()> {
@@ -367,9 +723,9 @@ fn run_stdio() -> anyhow::Result<()> {
             Ok(wire::Request::Status {}) => native::status(&root),
             Ok(wire::Request::Tasks {}) => native::task_summary(&root),
             Ok(wire::Request::CheckUpdate {}) => native::check_update(&root),
-            Ok(wire::Request::Update {}) => start_detached("--update", &root),
+            Ok(wire::Request::Update {}) => start_detached("--update", &root, "agent"),
             Ok(wire::Request::UpdateExtension {}) => {
-                wire::error("扩展更新尚未实现；请在扩展管理页手动重新加载开发副本")
+                start_detached("--update-extension", &root, "extension")
             }
             Ok(wire::Request::QueryLocalFile {
                 repo_id,
@@ -442,9 +798,15 @@ fn forward(root: &Path, request: wire::Request) -> Value {
 
 /// Upgrades must outlive this process: Chrome terminates the host as soon as
 /// the response is written.
-fn start_detached(argument: &str, root: &Path) -> Value {
-    if update_configured(root).is_none() {
-        return wire::error("尚未配置签名更新源，无法从浏览器更新 Agent");
+/// 把升级交给一个脱离宿主的自己。`kind` 决定需要什么配置：
+/// Agent 自身升级要「源 + 公钥」二者齐备（否则无法验签），扩展升级只要源
+/// （信任锚是同源 https + sha256），缺什么就在这里如实拒绝，别让扩展点了没反应。
+fn start_detached(argument: &str, root: &Path, kind: &str) -> Value {
+    if update_configured(root, kind).is_none() {
+        return match kind {
+            "extension" => wire::error("尚未配置更新源，无法更新扩展"),
+            _ => wire::error("尚未配置签名更新源，无法从浏览器更新 Agent"),
+        };
     }
     let Ok(exe) = std::env::current_exe() else {
         return wire::error("无法定位 Agent 程序");
@@ -458,24 +820,33 @@ fn start_detached(argument: &str, root: &Path) -> Value {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
+        // DETACHED_PROCESS：这个子进程必须活过宿主进程（Chrome 写完应答就把宿主干掉），
+        // 顺带也让它没有控制台，所以不需要 `childproc::hide`。
         command.creation_flags(0x0000_0008);
     }
     match command.spawn() {
         Ok(_) => {
-            native::record_update_result(root, "agent", "running");
-            json!({"ok":true,"state":"running","last_update_state":"running","last_update_kind":"agent"})
+            native::record_update_result(root, kind, "running");
+            json!({"ok":true,"state":"running","last_update_state":"running","last_update_kind":kind})
         }
         Err(_) => {
-            native::record_update_result(root, "agent", "failed");
+            native::record_update_result(root, kind, "failed");
             json!({"ok":false,"error":"无法启动更新进程；当前版本保持不变"})
         }
     }
 }
 
-fn update_configured(root: &Path) -> Option<()> {
+fn update_configured(root: &Path, kind: &str) -> Option<()> {
     let config = session::config(root).ok()?;
-    match (config.update_source, config.update_public_key) {
-        (Some(_), Some(_)) => Some(()),
-        _ => None,
+    // 先算策略：`update_source?` 会把该字段移走。
+    let policy = config.update_policy();
+    let source = config.update_source?;
+    if kind == "extension" {
+        // 扩展升级不需要签名公钥，但它需要一个能解析出 archive 的相对源 ——
+        // scheme 的判定走这台机器上已记录的策略（正式通道 https，开发通道也许放行了 http）。
+        return policy.valid_source(&source).then_some(());
     }
+    // Agent 自身升级要公钥（验签用），扩展不需要。
+    config.update_public_key.as_ref()?;
+    policy.valid_source(&source).then_some(())
 }

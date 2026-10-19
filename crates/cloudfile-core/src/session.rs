@@ -25,6 +25,23 @@ pub struct Config {
     /// Local unpacked extension copy, used only to report its version.
     #[serde(default)]
     pub extension_dir: Option<String>,
+    /// 历史审计位：早期只有显式打开它才允许明文 http 更新源。
+    ///
+    /// 现在 http 是**默认支持**的（内网门户只有 http，测试与正式通道同域名只差路径），
+    /// 这个位只在 config.json 里保留「这台机器当初显式开过」的记录，
+    /// 读回来不影响任何判定。手写 true/false 都不会改变源能否被接受。
+    #[serde(default)]
+    pub allow_insecure_update_source: bool,
+}
+
+impl Config {
+    /// 这台机器上更新源的信任策略。http 与 https 都接受，其余规则（规范 origin、
+    /// 同源、sha256、签名）照旧。
+    pub fn update_policy(&self) -> crate::update::SourcePolicy {
+        crate::update::SourcePolicy {
+            allow_insecure: self.allow_insecure_update_source,
+        }
+    }
 }
 #[derive(Deserialize)]
 pub struct Claimed {
@@ -123,6 +140,17 @@ pub fn trust(root: &Path, raw: String) -> Result<()> {
     }
     storage::write(&root.join("config.json"), &cfg)
 }
+/// Remove an explicitly trusted origin. Product defaults belong to deployment
+/// configuration, not hard-coded addresses in this reusable desktop client.
+pub fn untrust(root: &Path, raw: String) -> Result<()> {
+    let (server, _) = address(&raw)?;
+    let _lock = storage::lock(&root.join("config.lock"))?;
+    let mut cfg = config(root)?;
+    cfg.allowed_origins.retain(|item| item != &server);
+    cfg.service_paths.remove(&server);
+    storage::write(&root.join("config.json"), &cfg)
+}
+
 pub fn config(root: &Path) -> Result<Config> {
     let p = root.join("config.json");
     if !p.exists() {
@@ -138,20 +166,45 @@ pub fn set_update(
     public_key: Option<String>,
     extension_dir: Option<String>,
 ) -> Result<()> {
+    set_update_with_policy(
+        root,
+        source,
+        public_key,
+        extension_dir,
+        crate::update::SourcePolicy::STRICT,
+    )
+}
+
+/// 同上，但按给定策略校验源。开发通道（明文 http）由调用方显式传入
+/// [`crate::update::SourcePolicy::DEV`]；策略同时被**记进配置**，
+/// 这样以后每次升级用的都是同一套规则，而不是「设置时宽松、升级时严格」。
+pub fn set_update_with_policy(
+    root: &Path,
+    source: Option<String>,
+    public_key: Option<String>,
+    extension_dir: Option<String>,
+    policy: crate::update::SourcePolicy,
+) -> Result<()> {
     for value in [&source, &public_key, &extension_dir].into_iter().flatten() {
         if value.len() > 4096 || value.contains('\0') {
             bail!("invalid update configuration");
         }
     }
     if let Some(value) = &source {
-        crate::update::valid_source(value)
+        policy
+            .valid_source(value)
             .then_some(())
-            .ok_or_else(|| anyhow::anyhow!("update source must be a canonical https origin"))?;
-        crate::update::verifying_key(
-            public_key
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("a pinned release key is required"))?,
-        )?;
+            .ok_or_else(|| anyhow::anyhow!("update source must be a canonical http(s) origin"))?;
+        match &public_key {
+            Some(key) => {
+                crate::update::verifying_key(key)?;
+            }
+            // 只有开发通道允许「有源、没有签名公钥」：那种通道服务的是**扩展更新**
+            // （扩展不签名，信任锚是同源 + sha256），Agent 自身则明确报「不可升级」。
+            // 正式通道仍然要求两条都在，免得出现一个看着配好了、其实验不了签的通道。
+            None if policy.allow_insecure => {}
+            None => bail!("a pinned release key is required"),
+        }
     } else if public_key.is_some() {
         // A key that can never be used would only hide a caller mistake: say so
         // instead of storing a half-configured update channel.
@@ -162,6 +215,8 @@ pub fn set_update(
     cfg.update_source = source;
     cfg.update_public_key = public_key;
     cfg.extension_dir = extension_dir;
+    // 策略跟着源一起存：升级时读回来的是「当初同意的那套规则」。
+    cfg.allow_insecure_update_source = policy.allow_insecure && cfg.update_source.is_some();
     // Reaching here the pair is either both set or both clear, so a bare write
     // is enough — there is no half-configured state to normalise away.
     storage::write(&root.join("config.json"), &cfg)
@@ -179,7 +234,12 @@ pub fn task_dir(root: &Path, id: &str) -> Result<PathBuf> {
     Ok(root.join("tasks").join(id))
 }
 pub fn load(root: &Path, id: &str) -> Result<Task> {
-    let task: Task = storage::read(&task_dir(root, id)?.join("task.json"))?;
+    // 读前加固：任务记录必须是**私有的普通文件**。与 Go 的 store 同一处判断
+    // （`internal/taskcenter/store.go`: 非私有 = ErrCorrupt），语义是 **fail closed** ——
+    // 一份权限松掉的状态文件不能被当成可信输入去授权退出、上传或续租。
+    // Windows 上这一条无从判断（见 fsaccess::private），其余加固照旧。
+    let path = task_dir(root, id)?.join("task.json");
+    let task: Task = storage::read(&path)?;
     if task.task_id != id {
         bail!("task identity mismatch");
     }
@@ -244,14 +304,18 @@ pub fn tasks(root: &Path) -> Result<Vec<Task>> {
     if !dir.exists() {
         return Ok(vec![]);
     }
+    // 任务根必须私有：对应 Go 的 `store.go`「非私有任务目录 = 硬错」。
+    // 这里**不是**跳过，而是报错 —— 悄悄少列一个任务会让用户以为工作副本丢了，
+    // 而真实原因是权限被人改松了，那正是需要说出来的事。
     let mut result = Vec::new();
-    for entry in fs::read_dir(dir)? {
+    for entry in fs::read_dir(&dir)? {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {
             continue;
         }
         let id = entry.file_name().to_string_lossy().into_owned();
         if task_id(&id) && entry.path().join("task.json").exists() {
+            // 单个任务目录也各自要求私有：任务根是 0700 不代表里面的目录没被改过。
             result.push(load(root, &id)?);
         }
     }
@@ -491,5 +555,77 @@ mod tests {
             assert!(origin(x).is_err());
         }
         assert!(origin("https://example.com").is_ok());
+    }
+
+    const DEV_SOURCE: &str = "http://127.0.0.1:6111/cloudfile-updates-dev";
+
+    #[test]
+    fn trusted_origins_can_be_removed_without_bundled_enterprise_defaults() {
+        let (_dir, root) = storage::test_root();
+        trust(&root, "https://files.example.com/seafile".into()).unwrap();
+        assert_eq!(config(&root).unwrap().allowed_origins.len(), 1);
+        untrust(&root, "https://files.example.com".into()).unwrap();
+        assert!(config(&root).unwrap().allowed_origins.is_empty());
+        assert!(config(&root).unwrap().service_paths.is_empty());
+    }
+
+    #[test]
+    fn a_plain_http_source_is_accepted_without_any_extra_switch() {
+        let (_dir, root) = storage::test_root();
+        // 明文源本身已经不构成拒绝理由（内网通道全是 http，见 update::SourcePolicy）。
+        // 这里失败的真正原因是「有源、没公钥」那条规则，而且**什么都没写进去**
+        // （不留半配置状态）。
+        assert!(set_update(&root, Some(DEV_SOURCE.into()), None, None).is_err());
+        assert!(config(&root).unwrap().update_source.is_none());
+
+        // 扩展更新通道（扩展不签名）走显式策略：允许有源无公钥，并把这条决定记进配置。
+        set_update_with_policy(
+            &root,
+            Some(DEV_SOURCE.into()),
+            None,
+            None,
+            crate::update::SourcePolicy::DEV,
+        )
+        .unwrap();
+        let saved = config(&root).unwrap();
+        assert_eq!(saved.update_source.as_deref(), Some(DEV_SOURCE));
+        assert!(saved.allow_insecure_update_source);
+        assert_eq!(saved.update_policy(), crate::update::SourcePolicy::DEV);
+
+        // 清空时开关一并归零：不留一个「开着口子却没有源」的状态。
+        set_update(&root, None, None, None).unwrap();
+        let cleared = config(&root).unwrap();
+        assert!(!cleared.allow_insecure_update_source);
+        assert_eq!(cleared.update_policy(), crate::update::SourcePolicy::STRICT);
+    }
+
+    #[test]
+    fn the_strict_policy_still_requires_a_pinned_key() {
+        let (_dir, root) = storage::test_root();
+        // 正式通道：只给源不给公钥 = 一个验不了签的通道，拒绝。
+        assert!(set_update(
+            &root,
+            Some("https://updates.example.com".into()),
+            None,
+            None
+        )
+        .is_err());
+        // 开发通道允许：那种通道只服务扩展更新（扩展不签名），Agent 自身会明确报「不可升级」。
+        set_update_with_policy(
+            &root,
+            Some("https://updates.example.com".into()),
+            None,
+            None,
+            crate::update::SourcePolicy::DEV,
+        )
+        .unwrap();
+        let saved = config(&root).unwrap();
+        assert!(saved.update_public_key.is_none());
+        assert_eq!(
+            saved.update_source.as_deref(),
+            Some("https://updates.example.com")
+        );
+        // 「有公钥没源」永远拒绝（保持原契约）。
+        assert!(set_update(&root, None, Some("x".into()), None).is_err());
     }
 }

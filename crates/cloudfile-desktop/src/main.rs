@@ -9,8 +9,8 @@
 //! user is asked from the same window they already use.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 use cloudfile_core::{
-    apps, auto_upload, autostart, device, exclusive, guard, hostreg, ipc, journal, native,
-    paired_session, session, settings, storage, update, upload, wire,
+    apps, auto_upload, autostart, browser, device, exclusive, extension, guard, hostreg, ipc,
+    journal, native, paired_session, session, settings, storage, update, upload, wire,
 };
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -45,14 +45,16 @@ fn desktop_binary() -> PathBuf {
     std::env::current_exe().unwrap_or_else(|_| PathBuf::from("cloudfile-desktop"))
 }
 
+/// native host 的文件名：安装时与桌面进程同级（注册、更新、自检都按它找）。
+const HOST_NAME: &str = if cfg!(windows) {
+    "cloudfile-native-host.exe"
+} else {
+    "cloudfile-native-host"
+};
+
 fn host_binary() -> Option<PathBuf> {
     let directory = std::env::current_exe().ok()?.parent()?.to_path_buf();
-    let name = if cfg!(windows) {
-        "cloudfile-native-host.exe"
-    } else {
-        "cloudfile-native-host"
-    };
-    let candidate = directory.join(name);
+    let candidate = directory.join(HOST_NAME);
     candidate.is_file().then_some(candidate)
 }
 
@@ -141,13 +143,15 @@ fn settings_get(state: tauri::State<'_, State>) -> Result<Value, String> {
     let current = settings::load(root).map_err(|error| error.to_string())?;
     Ok(json!({
         "settings": current,
-        "workspace_root": settings::workspace_root(root).to_string_lossy(),
+        "workspace_root": cloudfile_core::workspace::resolve(root).to_string_lossy(),
+        "workspace_tasks": cloudfile_core::workspace::tasks_root(root).to_string_lossy(),
         "autostart_enabled": autostart::enabled(),
+        "autostart_mechanism": autostart::mechanism().map(|item| item.id()),
         "install_root": update::install_root(&desktop_binary()).to_string_lossy(),
         "version": cloudfile_core::VERSION,
         "registered_host": hostreg::manifest_dir()
             .ok()
-            .and_then(|dir| hostreg::state(&dir, hostreg::DEV_HOST, host_binary().as_deref()).ok())
+            .and_then(|dir| hostreg::state(&dir, hostreg::HOST, host_binary().as_deref()).ok())
             .map(|registration| json!({
                 "host": registration.host,
                 "registered": registration.binary.is_some(),
@@ -387,16 +391,29 @@ fn quit_app(app: tauri::AppHandle, state: tauri::State<'_, State>, force: bool) 
     json!({"state": "exiting"})
 }
 
+/// 扩展解压到哪个目录：配置里有就用配置的，否则 agent 根目录下的 `extension\`。
+fn extension_dir(root: &Path) -> PathBuf {
+    session::config(root)
+        .ok()
+        .and_then(|config| config.extension_dir)
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join(extension::DIR_NAME))
+}
+
 #[tauri::command]
-async fn register_host(
-    state: tauri::State<'_, State>,
-    extension_id: String,
-    takeover: bool,
-) -> Result<Value, String> {
+async fn register_host(state: tauri::State<'_, State>, takeover: bool) -> Result<Value, String> {
     let binary = host_binary().ok_or_else(|| "本机未找到 cloudfile-native-host".to_string())?;
     let dir = hostreg::manifest_dir().map_err(|error| error.to_string())?;
-    let outcome = hostreg::install(&dir, hostreg::DEV_HOST, &extension_id, &binary, takeover)
-        .map_err(|error| error.to_string())?;
+    // 扩展 ID 是产品常量：界面上没有「手输 ID」这条路，所以这里也不需要参数。
+    let outcome = hostreg::install(
+        &dir,
+        hostreg::HOST,
+        hostreg::EXTENSION_ID,
+        &binary,
+        takeover,
+    )
+    .map_err(|error| error.to_string())?;
     let _ = state.root;
     serde_json::to_value(outcome).map_err(|error| error.to_string())
 }
@@ -404,7 +421,7 @@ async fn register_host(
 #[tauri::command]
 fn unregister_host() -> Result<(), String> {
     let dir = hostreg::manifest_dir().map_err(|error| error.to_string())?;
-    hostreg::unregister(&dir, hostreg::DEV_HOST)
+    hostreg::unregister(&dir, hostreg::HOST)
         .map(|_| ())
         .map_err(|error| error.to_string())
 }
@@ -412,9 +429,166 @@ fn unregister_host() -> Result<(), String> {
 #[tauri::command]
 fn rollback_host() -> Result<String, String> {
     let dir = hostreg::manifest_dir().map_err(|error| error.to_string())?;
-    hostreg::rollback(&dir, hostreg::DEV_HOST)
+    hostreg::rollback(&dir, hostreg::HOST)
         .map(|path| path.to_string_lossy().into_owned())
         .map_err(|error| error.to_string())
+}
+
+/// 引导页要看到的全部事实。**只报状态，不做决定** ——
+/// 「装没装好」由 [`setup_apply`] 去改，这里给出的是改之前的样子。
+#[tauri::command]
+fn setup_state(state: tauri::State<'_, State>) -> Result<Value, String> {
+    let root = &state.root;
+    let current = settings::load(root).map_err(|error| error.to_string())?;
+    let config = session::config(root).unwrap_or_default();
+    let registration = hostreg::manifest_dir()
+        .ok()
+        .and_then(|dir| hostreg::state(&dir, hostreg::HOST, host_binary().as_deref()).ok());
+    let dir = extension_dir(root);
+    let workspace = cloudfile_core::workspace::resolve(root);
+    let registered = registration
+        .as_ref()
+        .map(|item| item.binary.is_some())
+        .unwrap_or(false);
+    // A reusable Agent has no embedded enterprise trust origins.
+    // Administrators or users configure actual services in the Services view.
+    let trusted = config.allowed_origins.len();
+    Ok(json!({
+        "version": cloudfile_core::VERSION,
+        "install_root": update::install_root(&desktop_binary()).to_string_lossy(),
+        "host": hostreg::HOST,
+        "host_known": registration.is_some(),
+        "host_registered": registered,
+        "host_foreign": registration.as_ref().map(|item| item.foreign).unwrap_or(false),
+        "host_manifest": registration
+            .as_ref()
+            .map(|item| item.manifest_path.to_string_lossy().into_owned()),
+        "extension_id": hostreg::EXTENSION_ID,
+        "extension_dir": dir.to_string_lossy(),
+        "extension_version": extension::installed_version(&dir),
+        "workspace_root": workspace.to_string_lossy(),
+        "workspace_tasks": cloudfile_core::workspace::tasks_root(root).to_string_lossy(),
+        "workspace_default": cloudfile_core::workspace::default_root_hint(),
+        "workspace_exists": workspace.is_dir(),
+        "autostart_enabled": autostart::enabled(),
+        "trusted_count": trusted,
+        "trusted_ready": trusted > 0,
+        "update_source": config.update_source,
+        "setup_completed": current.setup_completed,
+        "chrome_found": browser::chrome_path().is_some(),
+    }))
+}
+
+/// 一键完成：受信任服务 → 工作目录 → 注册 Host → 开机自启 → 部署扩展。
+///
+/// 每一步都**独立成败**：注册失败不该让已经建好的目录或已经写入的服务回滚，
+/// 那是三件互不依赖的事。返回的 `steps` 直接渲染在引导页上，失败项带着原因，
+/// 用户可以只重试那一步（再点一次「一键完成」是幂等的）。
+#[tauri::command]
+async fn setup_apply(state: tauri::State<'_, State>) -> Result<Value, String> {
+    let root = state.root.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<Value, String> {
+        let mut steps = Vec::new();
+
+        // 1) Trust remains an explicit user/admin action, never silently
+        // seed enterprise URLs into a public reusable client.
+        let trusted_count = session::config(&root)
+            .map(|config| config.allowed_origins.len())
+            .unwrap_or_default();
+        steps.push(json!({"key":"trusted","ok":trusted_count > 0,
+        "detail": if trusted_count > 0 {
+            format!("{trusted_count} 个受信任服务已配置")
+        } else {
+            "请先在「服务连接」中添加组织提供的网盘地址".to_string()
+        }}));
+
+        // 2) 工作目录：默认地址在 D:\CloudFileAgent2\workspace（可在设置里改）。
+        let workspace = cloudfile_core::workspace::resolve(&root);
+        steps.push(
+            match std::fs::create_dir_all(cloudfile_core::workspace::tasks_root(&root)) {
+                Ok(()) => json!({"key":"workspace","ok":true,
+                    "detail":workspace.to_string_lossy()}),
+                Err(error) => json!({"key":"workspace","ok":false,
+                    "detail":format!("{}：{error}", workspace.display())}),
+            },
+        );
+
+        // 3) 注册 Host。扩展 ID 固定；接管的旧注册会先备份，可用「回退」还原。
+        let registration = (|| -> anyhow::Result<hostreg::InstallOutcome> {
+            let binary =
+                host_binary().ok_or_else(|| anyhow::anyhow!("本机未找到 cloudfile-native-host"))?;
+            let dir = hostreg::manifest_dir()?;
+            hostreg::install(&dir, hostreg::HOST, hostreg::EXTENSION_ID, &binary, true)
+        })();
+        steps.push(match registration {
+            Ok(outcome) => json!({"key":"host","ok":true,"detail":outcome.manifest_path,
+                "backed_up":outcome.backed_up,
+                "previous":outcome.previous_manifest_path}),
+            Err(error) => json!({"key":"host","ok":false,"detail":format!("{error:#}")}),
+        });
+
+        // 4) 开机自启：企业机器上 Run 键可能被策略锁死，失败只报告，不阻断安装。
+        steps.push(match autostart::install(&root, &desktop_binary()) {
+            Ok(item) => json!({"key":"autostart","ok":true,"detail":item.id()}),
+            Err(error) => json!({"key":"autostart","ok":false,"detail":format!("{error:#}")}),
+        });
+
+        // 5) 部署扩展：从通道下载并解包到 <agent 根>\extension。
+        //    没有更新源时这一步会失败 —— 那也不阻塞其余四步，用户可手动解压。
+        steps.push(match native::update_extension(&root) {
+            Ok(detail) => json!({"key":"extension","ok":true,"detail":detail}),
+            Err(error) => json!({"key":"extension","ok":false,"detail":format!("{error:#}")}),
+        });
+
+        Ok(json!({"steps": steps}))
+    })
+    .await
+    .map_err(|_| "安装步骤执行失败".to_string())?
+}
+
+/// 引导页的「完成」：只记一个界面状态，不改任何安装事实。
+#[tauri::command]
+fn setup_finish(state: tauri::State<'_, State>) -> Result<Value, String> {
+    settings::update(&state.root, |current| current.setup_completed = true)
+        .map(|updated| json!(updated))
+        .map_err(|error| error.to_string())
+}
+
+/// 打开扩展管理页，并把要选的目录一起返回（界面上显示成可复制的只读文本）。
+#[tauri::command]
+fn open_extension_page(state: tauri::State<'_, State>) -> Result<Value, String> {
+    let dir = extension_dir(&state.root);
+    if extension::installed_version(&dir).is_none() {
+        return Err(format!(
+            "扩展还没部署到 {}；请先点「一键完成」，或手动把扩展包解压到该目录",
+            dir.display()
+        ));
+    }
+    let chrome = browser::open_extensions_page().map_err(|error| format!("{error:#}"))?;
+    Ok(json!({
+        "directory": dir.to_string_lossy(),
+        "extension_id": hostreg::EXTENSION_ID,
+        "chrome": chrome.map(|path| path.to_string_lossy().into_owned()),
+    }))
+}
+
+/// 在资源管理器里打开扩展目录（比手抄路径可靠）。
+#[tauri::command]
+fn open_extension_dir(state: tauri::State<'_, State>) -> Result<String, String> {
+    let dir = extension_dir(&state.root);
+    std::fs::create_dir_all(&dir).map_err(|error| format!("{}：{error}", dir.display()))?;
+    browser::open_directory(&dir).map_err(|error| format!("{error:#}"))?;
+    Ok(dir.to_string_lossy().into_owned())
+}
+
+/// 手动更新扩展（「Chrome 注册与升级」面板里的那个按钮）。
+#[tauri::command]
+async fn update_extension(state: tauri::State<'_, State>) -> Result<String, String> {
+    let root = state.root.clone();
+    tauri::async_runtime::spawn_blocking(move || native::update_extension(&root))
+        .await
+        .map_err(|_| "扩展更新失败".to_string())?
+        .map_err(|error| format!("{error:#}"))
 }
 
 #[tauri::command]
@@ -424,7 +598,12 @@ fn autostart_set(state: tauri::State<'_, State>, enabled: bool) -> Result<Value,
     } else {
         autostart::remove(&state.root).map_err(|error| error.to_string())?;
     }
-    Ok(json!({"autostart_enabled": autostart::enabled()}))
+    // 开关状态读操作系统（不是刚写进去的意图），途径一并返回：Run 键被策略锁住的
+    // 机器上实际用的是「启动」文件夹，界面得能把这件事说清楚。
+    Ok(json!({
+        "autostart_enabled": autostart::enabled(),
+        "autostart_mechanism": autostart::mechanism().map(|item| item.id()),
+    }))
 }
 
 #[tauri::command]
@@ -463,6 +642,8 @@ fn run_update(state: tauri::State<'_, State>, force: bool) -> Result<Value, Stri
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
+        // 同 native-host：DETACHED_PROCESS 让升级进程脱离本窗口活下来，并且没有控制台
+        // （所以这里不需要 `childproc::hide`）。
         command.creation_flags(0x0000_0008);
     }
     command
@@ -525,10 +706,21 @@ fn service_status(state: tauri::State<'_, State>) -> Result<Value, String> {
         .allowed_origins;
     Ok(json!(origins
         .into_iter()
-        .map(|origin| json!({"state":device::pairing_state(&state.root,&origin),
+        .map(|origin| json!({
+            "state":device::pairing_state(&state.root,&origin),
             "service_url":format!("{}{}",origin,session::service_path(&state.root,&origin).unwrap_or_default()),
-            "origin":origin}))
+            // 默认项只用于界面标注「不可删除」，判定权威在 session::untrust。
+            "default":false,
+            "origin":origin,
+        }))
         .collect::<Vec<_>>()))
+}
+
+/// 移除一条受信任服务，
+/// 这里只是把拒绝原因原样带回界面。
+#[tauri::command]
+fn untrust_origin(state: tauri::State<'_, State>, origin: String) -> Result<(), String> {
+    session::untrust(&state.root, origin).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -650,10 +842,12 @@ fn refresh_tray(state: &State, app: &tauri::AppHandle) {
 const USAGE: &str = "\
 CloudFile Agent 2.2 desktop
 
-Usage: cloudfile-desktop [--autostart]
+Usage: cloudfile-desktop [--self-test] [--autostart]
 
   --version     print the build version
   --component   print the local component contract as JSON
+  --self-test   check the local installation and exit (JSON, non-zero when broken);
+                never opens a window, so it is safe in automation
   --help, -h    print this message
   --autostart   start resident in the tray without opening the window; the login
                 item passes this so logging in never steals focus
@@ -702,6 +896,10 @@ fn main() {
             );
             return;
         }
+        Some("--self-test") => {
+            // 自检必须在**建窗口之前**结束：它要在装坏了的机器上也能给出结论。
+            std::process::exit(self_test());
+        }
         Some("--help") | Some("-h") => {
             print!("{USAGE}");
             return;
@@ -717,6 +915,31 @@ fn main() {
     if let Err(error) = run(autostart) {
         eprintln!("CloudFile desktop: {error}");
     }
+}
+
+/// 打印自检报告并给出退出码（0 = 全绿，1 = 有项确实不工作，2 = 连自己的目录都定位不到）。
+fn self_test() -> i32 {
+    let root = match cloudfile_core::storage::root() {
+        Ok(root) => root,
+        Err(error) => {
+            eprintln!("CloudFile desktop: 无法定位本机私有目录：{error:#}");
+            return 2;
+        }
+    };
+    // 搭档是 native host：桌面进程缺了它就注册不上 Chrome，等于半个安装。
+    let peer = host_binary().unwrap_or_else(|| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(Path::to_path_buf))
+            .unwrap_or_default()
+            .join(HOST_NAME)
+    });
+    let report = cloudfile_core::selftest::run(&root, &peer);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report).unwrap_or_default()
+    );
+    i32::from(report["ok"] != json!(true))
 }
 
 fn run(autostart: bool) -> anyhow::Result<()> {
@@ -752,6 +975,13 @@ fn run(autostart: bool) -> anyhow::Result<()> {
             register_host,
             unregister_host,
             rollback_host,
+            setup_state,
+            setup_apply,
+            setup_finish,
+            open_extension_page,
+            open_extension_dir,
+            update_extension,
+            untrust_origin,
             autostart_set,
             check_update,
             run_update,
@@ -1035,7 +1265,7 @@ fn run(autostart: bool) -> anyhow::Result<()> {
                         }
                     }
                     wire::Request::Update {} | wire::Request::UpdateExtension {} => {
-                        wire::error("请在任务中心或命令行执行更新")
+                        wire::error("请在命令行执行 cloudfile-native-host --update 或 --update-extension")
                     }
                     request @ wire::Request::Open { .. } => match session::open_session(&root, request) {
                         Ok(task) => {

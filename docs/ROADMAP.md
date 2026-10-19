@@ -1,11 +1,12 @@
 # Agent 2.2 开发顺序与验收
 
-## 阶段 0：独立仓库迁移（当前任务）
+## 阶段 0：独立仓库迁移（仓库拆分已完成）
 
 - 用保留历史的子目录提取方式创建 `eaopen/cloudfile-local-agent2`，默认分支 `dev`。
 - 新仓库根目录放 Cargo、crates、scripts、CI、AGENTS.md、LICENSE/NOTICE；不包含历史 Go/.NET/Swift。
 - 修复 Chrome 扩展源码路径，Windows/macOS CI 全绿、开发 ZIP 可用；`git diff --check` 和测试/构建结果记录。
-- 源仓库不改变；Rust 代码后续只在新仓库开发。**本阶段不声称正式替代旧客户端**。
+- 旧仓 `agent-rust` 已写入停止开发声明；Rust 后续只在本仓 `dev` / feature PR 开发。**本阶段不声称正式替代旧客户端**。
+- 旧仓 10/16–10/19 的增量移植在 [PR #7](https://github.com/eaopen/cloudfile-local-agent2/pull/7)，CI 通过不代表已合并或实机验收。
 
 ## P0：任务中心（最高优先级）
 
@@ -38,6 +39,7 @@
 
 - 开发 Host 独立；Windows/macOS 普通用户绿色运行，无 Go/.NET/Python 目标机运行依赖。
 - Rust→Rust 更新：签名清单、SHA-256、分版本目录、健康检查、活动任务阻断、原地安全切换与回退。
+- Windows 引导执行前必须可信：随发行包提供 bootstrap EXE，或部署方固定 EXE 的 SHA-256；不能仅检查下载字节数就执行。
 - Windows .NET 一次性替换：用户确认、旧 Host Manifest 备份、工作文件不覆盖、验证新版、允许回退；不做 Go→Rust 迁移。
 - macOS 无签名/公证必须说明标准系统授权限制，不能绕过 Gatekeeper；企业策略禁止时友好报错。
 

@@ -5,7 +5,7 @@
 //! browser-side code already checks. Everything here is derived from the
 //! durable store on each call; nothing is cached between requests.
 use crate::{apps, device, guard, journal, session, settings, update, wire};
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use sha2::Digest as _;
 use std::path::Path;
@@ -76,6 +76,8 @@ pub fn capabilities(root: &Path) -> Vec<String> {
 }
 
 pub fn status(root: &Path) -> Value {
+    // 解析出来的工作区根可能和上次不同（首选盘回来/掉线，或用户改了配置）：
+    // 先把已有任务搬过去一次。标记一致时这里只是一次很小的文件读取。
     let mut value = json!({
         "ok": true,
         "version": FAMILY_VERSION,
@@ -85,7 +87,7 @@ pub fn status(root: &Path) -> Value {
         "capabilities": capabilities(root),
         "applications": apps::names(),
         "release_channel": "development",
-        "workspace_root": settings::workspace_root(root).to_string_lossy(),
+        "workspace_root": crate::settings::workspace_root(root).to_string_lossy(),
         "can_open_workspace": configured(root),
     });
     if let Ok(executable) = std::env::current_exe() {
@@ -98,6 +100,8 @@ pub fn status(root: &Path) -> Value {
     let probe = check_update(root);
     for key in [
         "update_source_set",
+        // 让 --status 也能看到「这台机器允许明文更新源」——审计第一眼要看的就是它。
+        "update_source_insecure_allowed",
         "update_available",
         "latest_version",
         "latest_notes",
@@ -113,6 +117,9 @@ pub fn status(root: &Path) -> Value {
 }
 
 /// Maps an internal mode onto the two values the extension understands.
+/// 回报给浏览器的模式名。**直接复用 `apps::mode_family`**，不再各写一份：以前这里把
+/// `local-view` 也说成 `local-edit`，与 `apps` 里「只读副本不得进编辑规则」的映射自相矛盾
+/// —— 一句「这是可编辑的」就可能让网页把只读的查看副本当成工作副本。
 pub fn mode_label(mode: &str) -> &'static str {
     match mode {
         "exclusive-edit" => "exclusive-edit",
@@ -140,27 +147,36 @@ fn find(root: &Path, repo_id: &str, path: &str, mode: &str) -> Result<Option<ses
     if !matches!(mode, "" | "local-view" | "local-edit" | "exclusive-edit") {
         bail!("unsupported session mode");
     }
-    for task in session::tasks(root)? {
-        if task.repo_id != repo_id || !matches_mode(&task.mode, mode) {
-            continue;
-        }
-        if path.is_empty() || task.remote_path == path {
-            return Ok(Some(task));
+    let mut matches: Vec<session::Task> = session::tasks(root)?
+        .into_iter()
+        .filter(|task| task.repo_id == repo_id && matches_mode(&task.mode, mode))
+        .filter(|task| path.is_empty() || task.remote_path == path)
+        .collect();
+    // 挑选顺序固定下来：请求写明了模式名就优先精确命中，否则偏好规范名 `local-edit`，
+    // 再否则取第一个。**不能依赖目录枚举顺序** —— 同一份文件在可编辑子树里可能同时有
+    // `local-edit` 与 `optimistic-edit` 两份任务，结果飘忽是很难查的那类 bug。
+    if !mode.is_empty() {
+        if let Some(position) = matches.iter().position(|task| task.mode == mode) {
+            return Ok(Some(matches.swap_remove(position)));
         }
     }
-    Ok(None)
+    if let Some(position) = matches.iter().position(|task| task.mode == "local-edit") {
+        return Ok(Some(matches.swap_remove(position)));
+    }
+    Ok(matches.into_iter().next())
 }
 
 /// Public task list. Field names follow the extension contract; local paths and
 /// credentials are never included.
 pub fn task_summary(root: &Path) -> Value {
+    let mut rows = Vec::new();
+    // 任务根不可信时**不能**报成「没有任务」：扩展据此判断要不要提示，
+    // 把「状态文件权限被改松了」说成「一切正常、没有任务」是误导，用户会以为工作副本没了。
+    // Go 侧同一处是 fail closed（非私有任务目录直接报错），这里保持同义。
     let tasks = match session::tasks(root) {
         Ok(tasks) => tasks,
-        Err(_) => {
-            return json!({"ok":false, "error":"本地任务存储无法读取；请保留工作副本并检查任务中心"})
-        }
+        Err(error) => return json!({"ok": false, "error": error.to_string()}),
     };
-    let mut rows = Vec::new();
     for task in tasks {
         let changed = session::local_path(root, &task)
             .and_then(|path| session::digest(&path))
@@ -283,7 +299,7 @@ pub fn open_workspace(root: &Path, repo_id: &str, path: &str, mode: &str) -> Val
     };
     match apps::open_directory(&directory) {
         Ok(()) => json!({"ok":true,"mode":mode_label(&task.mode),
-            "workspace_root":settings::workspace_root(root).to_string_lossy(),
+            "workspace_root":crate::workspace::tasks_root(root).to_string_lossy(),
             "local_path":directory.to_string_lossy()}),
         Err(error) => json!({"ok":false,"error":error.to_string()}),
     }
@@ -352,13 +368,7 @@ fn update_result_path(root: &Path) -> std::path::PathBuf {
 /// Only a version string is exposed; the directory never leaves the agent.
 fn extension_installed_version(config: &session::Config) -> Option<String> {
     let directory = config.extension_dir.as_ref()?;
-    let manifest = Path::new(directory).join("manifest.json");
-    let value: Value = crate::storage::read(&manifest).ok()?;
-    let version = value["version"].as_str()?.to_string();
-    if version.is_empty() || version.len() > 32 || version.chars().any(char::is_control) {
-        return None;
-    }
-    Some(version)
+    crate::extension::installed_version(Path::new(directory))
 }
 
 pub fn record_update_result(root: &Path, kind: &str, state: &str) {
@@ -383,21 +393,35 @@ pub fn load_update_result(root: &Path) -> Option<Value> {
 /// extension only uses the answer to show an update hint.
 pub fn check_update(root: &Path) -> Value {
     let config = session::config(root).unwrap_or_default();
-    let (Some(source), Some(public_key)) = (
-        config.update_source.clone(),
-        config.update_public_key.clone(),
-    ) else {
-        return json!({"update_source_set": false, "update_available": false});
+    let policy = config.update_policy();
+    // 历史审计位：早期只有显式打开才允许明文更新源。现在 http 是默认支持的，
+    // 这个字段只保留「这台机器当初显式开过」的记录，读的人不该据此判断源是否可用。
+    let mut value = json!({
+        "update_source_set": false,
+        "update_available": false,
+        "update_source_insecure_allowed": policy.allow_insecure,
+    });
+    let Some(source) = config.update_source.clone() else {
+        return value;
     };
-    let mut value = json!({"update_source_set": true, "update_available": false});
+    value["update_source_set"] = json!(true);
     if let Some(version) = extension_installed_version(&config) {
         value["extension_installed_version"] = json!(version);
     }
-    match update::fetch_manifest(&source) {
+    // 扩展清单与 Agent 清单同级、同一个源，而且**不需要签名**（信任锚是同源 https
+    // + sha256）：扩展不是可执行文件，装错版本不会在用户机器上执行代码。所以这一节
+    // 只看更新源，公钥缺失不该让扩展升级变成「不可用」。
+    describe_extension_update(policy, &source, &mut value);
+
+    let Some(public_key) = config.update_public_key.clone() else {
+        return value;
+    };
+    match update::fetch_manifest_for(policy, &source) {
         Ok(bytes) => match update::parse_release(&bytes) {
             Ok(release) => {
                 let platform = update::platform_id(std::env::consts::OS, std::env::consts::ARCH);
                 match update::verify(
+                    policy,
                     &release,
                     &source,
                     crate::VERSION,
@@ -418,6 +442,64 @@ pub fn check_update(root: &Path) -> Value {
         Err(error) => value["update_error"] = json!(error.to_string()),
     }
     value
+}
+
+/// 扩展一侧的版本信息。扩展等的是
+/// `extension_latest_version == extension_installed_version`，两个都给不出来它就无法
+/// 自己重载；取不到清单只是没提示，不是错误。
+fn describe_extension_update(policy: update::SourcePolicy, source: &str, value: &mut Value) {
+    let Ok(release) = crate::extension::fetch_release(policy, source) else {
+        return;
+    };
+    value["extension_latest_version"] = json!(release.version);
+    value["extension_notes"] = json!(release.notes);
+    if let Some(installed) = value["extension_installed_version"].as_str() {
+        // 已安装版本比源上还新（或相等）时不算「有更新」—— 版本号只用来提示。
+        value["extension_update_available"] =
+            json!(update::compare(&release.version, installed).is_gt());
+    }
+}
+
+/// 下载并安装扩展的新版本，返回给人看的一句话。
+///
+/// 装的是**磁盘上的扩展目录**（Chrome 以 `--load-extension` 加载的那份）。装完还需要
+/// 扩展自己调用 `chrome.runtime.reload()`：Chrome 不允许外部进程替换已加载的扩展，
+/// 所以这里结束在「文件已就位」，与 Go 侧 `--update-extension` 一致。
+pub fn update_extension(root: &Path) -> Result<String> {
+    let config = session::config(root)?;
+    // 先算策略：下面两个 `.context()` 会把 Option<String> 字段移走，之后再借 config 就晚了。
+    let policy = config.update_policy();
+    let source = config
+        .update_source
+        .context("尚未配置更新源；请先在 config.json 里设置 update_source")?;
+    let directory = config.extension_dir.clone().unwrap_or_else(|| {
+        // 没配置就用 agent 根目录下的 `extension\`：引导页一键部署扩展时
+        // 不能让用户先去 config.json 里手写一个目录。
+        root.join(crate::extension::DIR_NAME)
+            .to_string_lossy()
+            .into_owned()
+    });
+    let dir = Path::new(&directory);
+    let release = crate::extension::fetch_release(policy, &source)?;
+    let installed = crate::extension::installed_version(dir);
+    if let Some(current) = installed.as_deref() {
+        if !update::compare(&release.version, current).is_gt() {
+            return Ok(format!(
+                "扩展已是 {current}（源上 {}），无需更新",
+                release.version
+            ));
+        }
+    }
+    let installed_dir = crate::extension::apply(policy, &source, &release, dir)?;
+    Ok(format!(
+        "扩展已更新到 {}{}；在 chrome://extensions 里重载后生效（目录 {}）",
+        release.version,
+        match installed.as_deref() {
+            Some(previous) => format!("（原 {previous}）"),
+            None => String::new(),
+        },
+        installed_dir.display()
+    ))
 }
 
 /// Delegates the process-lifetime question to the same assessment the tray
@@ -523,6 +605,87 @@ mod tests {
         assert_eq!(value["update_available"], false);
         assert_eq!(value["update_source_set"], false);
         assert!(value["ok"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn a_read_only_view_copy_is_never_handed_out_as_an_editable_one() {
+        let (_dir, base) = crate::storage::test_root();
+        let root = base.as_path();
+        // 查看副本（只读）与编辑副本是两份不同的任务，目录也不同。
+        let view = store(root, "local-view", "a.txt");
+        assert!(view.task_id != store(root, "local-edit", "a.txt").task_id);
+
+        // 查看请求必须查得到它 —— 以前这里直接报「unsupported session mode」，
+        // 网页就没法判断「这个资料库的查看副本在不在」。
+        let found = query_local_file(root, &view.repo_id, &view.remote_path, "local-view");
+        assert_eq!(found.get("ok"), Some(&json!(true)), "{found}");
+        assert_eq!(found["local_exists"], true, "{found}");
+        assert_eq!(found["mode"], "local-view", "{found}");
+
+        // 反过来才是会伤人的：缺省请求与 local-edit 请求都**不能**命中只读的查看副本。
+        for requested in ["", "local-edit"] {
+            let answer = query_local_file(root, &view.repo_id, "/folder/only-view.txt", requested);
+            assert_eq!(answer["local_exists"], false, "{requested}: {answer}");
+        }
+        // 让查看子树单独存在一份文件，确认上面那个 false 不是因为「查不到任何东西」。
+        store(root, "local-view", "only-view.txt");
+        let answer = query_local_file(root, &view.repo_id, "/folder/only-view.txt", "local-edit");
+        assert_eq!(answer["local_exists"], false, "{answer}");
+        assert_eq!(
+            query_local_file(root, &view.repo_id, "/folder/only-view.txt", "local-view")
+                ["local_exists"],
+            true
+        );
+        // 目录查询同样不许把查看子树当成编辑子树。
+        assert_eq!(
+            query_local_folder(root, &view.repo_id, "local-edit")["mode"],
+            "local-edit"
+        );
+    }
+
+    #[test]
+    fn the_same_library_path_in_two_editable_names_picks_deterministically() {
+        let (_dir, base) = crate::storage::test_root();
+        let root = base.as_path();
+        // 可编辑子树里 `local-edit` 与 `optimistic-edit` 是**同族两个名字**，
+        // 所以缺省请求同时命中两者；结果必须确定，不能取决于目录枚举顺序。
+        let optimistic = store(root, "optimistic-edit", "a.txt");
+        store(root, "local-edit", "a.txt");
+
+        for _ in 0..4 {
+            let answer = query_local_file(root, &optimistic.repo_id, &optimistic.remote_path, "");
+            assert_eq!(answer["local_exists"], true);
+            // 缺省命中规范名 `local-edit`。
+            assert_eq!(answer["baseline_file_id"], "e".repeat(40));
+            assert_eq!(answer["local_digest"], optimistic.baseline_digest);
+        }
+        // 写明模式名时精确命中优先。
+        let explicit = query_local_file(
+            root,
+            &optimistic.repo_id,
+            &optimistic.remote_path,
+            "local-edit",
+        );
+        assert_eq!(explicit["local_exists"], true);
+        // 同族的另一个名字仍然查得到（不是字面比较）。
+        assert_eq!(
+            query_local_file(
+                root,
+                &optimistic.repo_id,
+                &optimistic.remote_path,
+                "local-edit"
+            )["mode"],
+            "local-edit"
+        );
+    }
+
+    #[test]
+    fn the_mode_vocabulary_is_reported_without_flattening_view_copies() {
+        assert_eq!(mode_label("local-view"), "local-view");
+        assert_eq!(mode_label("exclusive-edit"), "exclusive-edit");
+        assert_eq!(mode_label("optimistic-edit"), "local-edit");
+        assert_eq!(mode_label("local-edit"), "local-edit");
+        assert_eq!(mode_label(""), "local-edit");
     }
 
     #[test]
