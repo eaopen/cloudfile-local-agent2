@@ -73,6 +73,9 @@ fn client() -> Result<Client> {
 fn endpoint(_root: &Path, task: &Task, op: &str) -> Result<String> {
     Ok(format!("{}/seafhttp/cf-edit/v1/{op}", task.server))
 }
+fn supported_open_mode(mode: &str) -> bool {
+    matches!(mode, "local-view" | "optimistic-edit" | "exclusive-edit")
+}
 fn valid_id(s: &str) -> bool {
     s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
@@ -211,7 +214,7 @@ pub fn open(root: &Path, uri: &str) -> Result<Task> {
         || uuid::Uuid::parse_str(&repo_id).is_err()
         || !remote.starts_with('/')
         || remote.contains("..")
-        || !matches!(mode.as_str(), "optimistic-edit" | "exclusive-edit")
+        || !supported_open_mode(&mode)
         || size > crate::device::MAX_FILE
     {
         bail!("服务端文件元数据无效")
@@ -235,6 +238,13 @@ pub fn open(root: &Path, uri: &str) -> Result<Task> {
     }
     file.flush()?;
     file.as_file().sync_all()?;
+    if mode == "local-view" {
+        // Defense in depth only. The native Fileserver is the authority:
+        // this ticket is valid for READ alone, never publish or Checkout.
+        let mut permissions = file.as_file().metadata()?.permissions();
+        permissions.set_readonly(true);
+        file.as_file().set_permissions(permissions)?;
+    }
     let mut state = state;
     let task = Task {
         task_id: id.clone(),
@@ -351,10 +361,29 @@ fn status(root: &Path, task: &Task, st: &State) -> Result<Value> {
         .send()?;
     read_response(res)
 }
-fn issue(root: &Path, id: &str, observed: Option<&str>, checkin: bool) -> Result<Value> {
+/// Business mode is enforced here, not only by the task-center button.
+fn valid_action(mode: &str, action: &Action) -> bool {
+    matches!(
+        (mode, action),
+        ("optimistic-edit", Action::OptimisticUpdate)
+            | ("exclusive-edit", Action::Commit | Action::Checkin)
+    )
+}
+fn issue(root: &Path, id: &str, observed: Option<&str>, action: Action) -> Result<Value> {
     let task = session::load(root, id)?;
+    if !valid_action(&task.mode, &action) {
+        bail!("当前编辑模式不允许此提交操作；请从任务中心选择正确的操作")
+    }
+    let checkin = action == Action::Checkin;
     let dir = session::task_dir(root, id)?;
-    let _lock = storage::lock(&dir.join("upload.lock"))?;
+    let _lock = match storage::lock(&dir.join("upload.lock")) {
+        Ok(lock) => lock,
+        Err(_) if observed.is_some() => return Ok(json!({"state":"busy"})),
+        Err(error) => return Err(error),
+    };
+    if journal::closed(root, id)? {
+        bail!("编辑任务已结束，不能重复提交")
+    }
     let mut st = load(root, id)?;
     if task.mode == "exclusive-edit" && st.guard.is_none() {
         bail!("Checkout 不存在")
@@ -366,6 +395,9 @@ fn issue(root: &Path, id: &str, observed: Option<&str>, checkin: bool) -> Result
             if observed.is_some() {
                 return Ok(json!({"state":"pending"}));
             }
+            if i.action != action {
+                bail!("存在不同操作类型的待确认提交，先查询原提交结果")
+            }
             i
         }
         None => {
@@ -374,18 +406,7 @@ fn issue(root: &Path, id: &str, observed: Option<&str>, checkin: bool) -> Result
             {
                 return Ok(json!({"state":"unchanged"}));
             }
-            journal::capture_observed(
-                root,
-                id,
-                if checkin {
-                    Action::Checkin
-                } else if task.mode == "exclusive-edit" {
-                    Action::Commit
-                } else {
-                    Action::OptimisticUpdate
-                },
-                observed,
-            )?
+            journal::capture_observed(root, id, action, observed)?
         }
     };
     // A caller-triggered retry MUST first check its original remote state.
@@ -475,10 +496,34 @@ fn accept(root: &Path, id: &str, st: &mut State, intent: &Intent, remote: &Value
     Ok(json!({"state":"published","checked_in":checked_in}))
 }
 pub fn save(root: &Path, id: &str, observed: Option<&str>) -> Result<Value> {
-    issue(root, id, observed, false)
+    match issue(root, id, observed, Action::OptimisticUpdate) {
+        Err(error) if observed.is_some() && error.is::<journal::WorkingCopyChanged>() => {
+            Ok(json!({"state":"changing"}))
+        }
+        result => result,
+    }
 }
 pub fn commit(root: &Path, id: &str, checkin: bool) -> Result<Value> {
-    issue(root, id, None, checkin)
+    issue(
+        root,
+        id,
+        None,
+        if checkin {
+            Action::Checkin
+        } else {
+            Action::Commit
+        },
+    )
+}
+/// Retry only the original immutable exclusive-edit intent, including Checkin.
+pub fn retry(root: &Path, id: &str) -> Result<Value> {
+    let pending =
+        journal::pending(root, id)?.ok_or_else(|| anyhow::anyhow!("没有待确认的独占提交"))?;
+    match pending.action {
+        Action::Commit => commit(root, id, false),
+        Action::Checkin => commit(root, id, true),
+        Action::OptimisticUpdate => bail!("此任务不是独占提交"),
+    }
 }
 pub fn recover(root: &Path, id: &str) -> Result<Value> {
     let task = session::load(root, id)?;
@@ -543,6 +588,72 @@ mod tests {
         assert!(!is_open_uri("cloudfile-open://v1/open?instance=x"));
         assert!(uri_parts("cloudfile-open://v2/open?instance=https%3A%2F%2Ffiles.example.com&session=11111111-1111-4111-8111-111111111111&ticket=x.y.z").is_ok());
         assert!(uri_parts("cloudfile-open://v2/open?instance=https%3A%2F%2Ffiles.example.com&session=11111111-1111-4111-8111-111111111111&ticket=nope").is_err());
+    }
+    #[test]
+    fn v2_readonly_mode_is_explicit_and_never_implicitly_editable() {
+        assert!(supported_open_mode("local-view"));
+        assert!(supported_open_mode("optimistic-edit"));
+        assert!(supported_open_mode("exclusive-edit"));
+        assert!(!supported_open_mode("local-edit"));
+        assert!(!supported_open_mode("download"));
+        for action in [Action::OptimisticUpdate, Action::Commit, Action::Checkin] {
+            assert!(!valid_action("local-view", &action));
+        }
+    }
+    #[test]
+    fn write_operations_never_cross_view_optimistic_or_exclusive_modes() {
+        assert!(!valid_action("local-view", &Action::OptimisticUpdate));
+        assert!(!valid_action("local-view", &Action::Commit));
+        assert!(!valid_action("local-view", &Action::Checkin));
+        assert!(valid_action("optimistic-edit", &Action::OptimisticUpdate));
+        assert!(!valid_action("optimistic-edit", &Action::Commit));
+        assert!(!valid_action("optimistic-edit", &Action::Checkin));
+        assert!(valid_action("exclusive-edit", &Action::Commit));
+        assert!(valid_action("exclusive-edit", &Action::Checkin));
+        assert!(!valid_action("exclusive-edit", &Action::OptimisticUpdate));
+    }
+    #[test]
+    fn optimistic_observed_save_reports_transient_change_and_busy_without_network() {
+        let (_dir, root) = storage::test_root();
+        let id = "a".repeat(64);
+        let dir = session::task_dir(&root, &id).unwrap();
+        storage::private_dir(&dir).unwrap();
+        let task = Task {
+            task_id: id.clone(),
+            device_id: None,
+            file_name: "edit.txt".into(),
+            mode: "optimistic-edit".into(),
+            server: "https://example.com".into(),
+            repo_id: "11111111-1111-4111-8111-111111111111".into(),
+            remote_path: "/edit.txt".into(),
+            session_id: "22222222-2222-4222-8222-222222222222".into(),
+            baseline_file_id: "a".repeat(40),
+            baseline_digest: "b".repeat(64),
+            size: 1,
+        };
+        storage::write(&dir.join("task.json"), &task).unwrap();
+        fs::write(dir.join("edit.txt"), b"x").unwrap();
+        store(
+            &root,
+            &id,
+            &State {
+                ticket: "no-network".into(),
+                guard: None,
+            },
+        )
+        .unwrap();
+        let changed = save(&root, &id, Some(&"0".repeat(64))).unwrap();
+        assert_eq!(changed["state"], "changing");
+        assert!(journal::pending(&root, &id).unwrap().is_none());
+
+        let _held = storage::lock(&dir.join("upload.lock")).unwrap();
+        let busy = save(&root, &id, Some(&"0".repeat(64))).unwrap();
+        assert_eq!(busy["state"], "busy");
+        assert!(journal::pending(&root, &id).unwrap().is_none());
+
+        // Cross-mode misuse must fail before any provider request or journal.
+        assert!(commit(&root, &id, true).is_err());
+        assert!(commit(&root, &id, false).is_err());
     }
     #[test]
     fn ticket_claims_route_reopen_without_trusting_signature() {
