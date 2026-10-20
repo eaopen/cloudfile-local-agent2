@@ -384,14 +384,19 @@ fn run_update(root: &Path, host: &str, manifest: Option<PathBuf>) -> anyhow::Res
 }
 
 fn apply_update(root: &Path, host: &str, manifest: Option<PathBuf>) -> anyhow::Result<()> {
-    let (release, _, _) = fetch_verified_release(root, manifest.as_deref())?;
+    let (release, _, _) = fetch_verified_release(root, manifest.as_deref(), cloudfile_core::VERSION)?;
     apply_release(host, &release)
 }
 
 /// 取清单并验签，返回 (清单, 策略, 源)。`--install` 复用这一段，所以它不碰安装目录。
+///
+/// `baseline` 是「拿什么版本和清单比」：升级用 `cloudfile_core::VERSION`（必须更新才装），
+/// 全新安装用 `update::NO_INSTALLED_VERSION`（空白机器上清单版本就等于本机这份构建，
+/// 否则会被判成「不比当前新」而什么都不装）。
 fn fetch_verified_release(
     root: &Path,
     manifest: Option<&Path>,
+    baseline: &str,
 ) -> anyhow::Result<(update::Release, update::SourcePolicy, String)> {
     let config = session::config(root)?;
     let (source, public_key) = match (&config.update_source, &config.update_public_key) {
@@ -410,7 +415,7 @@ fn fetch_verified_release(
         policy,
         &release,
         &source,
-        cloudfile_core::VERSION,
+        baseline,
         cloudfile_core::now(),
         &update::platform_id(std::env::consts::OS, std::env::consts::ARCH),
         &public_key,
@@ -434,7 +439,7 @@ fn run_install(root: &Path, host: &str, args: &[String]) -> anyhow::Result<()> {
     // 二进制：清单里有更新才暂存。暂存只写版本目录、**不碰注册** —— 「健康检查通过之前
     // 什么都不替换」这条安全顺序仍然成立；而全新安装这边没有旧注册可以接管
     // （`update::activate` 是「接管既有注册」专用的），所以注册必须能和激活分开做。
-    let (binaries, staged) = stage_binaries(root)?;
+    let (binaries, staged) = stage_binaries(root, &install, &dir, host)?;
 
     // 注册 Host 是安装的实质产物：没有它扩展就找不到 Agent。
     let (registration, registered_dir) = if args.iter().any(|value| value == "--skip-registration")
@@ -573,9 +578,19 @@ fn resolve_source(
     Ok((source, policy, probes))
 }
 
-/// 二进制：清单里有更新才暂存，已是最新就跳过（`--install` 同时是修复命令）。
+/// 二进制：这台机器上还没有一份完整的同版本安装才暂存（`--install` 同时是修复命令）。
 /// 返回 (结论, 暂存好的 (版本, host 路径))。
-fn stage_binaries(root: &Path) -> anyhow::Result<(&'static str, Option<(String, PathBuf)>)> {
+///
+/// 「要不要装」的判据是**磁盘上那份安装完不完整**，不是「版本号和当前这个构建一样」：
+/// 全新安装时正在跑的这份只是引导体刚下载到安装根里的临时副本，它旁边没有任务中心，
+/// 拿版本号自比会让空白机器报「已是最新」然后什么都不装，引导体随后还会把那份副本删掉，
+/// 留下一份指向空目录的注册（2026-10-19 现场就是这个状态）。
+fn stage_binaries(
+    root: &Path,
+    install: &Path,
+    dir: &Path,
+    host: &str,
+) -> anyhow::Result<(&'static str, Option<(String, PathBuf)>)> {
     let config = session::config(root)?;
     let (Some(source), Some(_)) = (
         config.update_source.clone(),
@@ -585,17 +600,26 @@ fn stage_binaries(root: &Path) -> anyhow::Result<(&'static str, Option<(String, 
         return Ok(("skipped", None));
     };
     let policy = config.update_policy();
-    // 先**不验签**地读一眼版本号：验签本身会拒绝「不比当前新」的清单，而安装器必须先知道
-    // 有没有更新才能走幂等（修复）那条路。签名通过之前不会下载任何字节。
+    // 先**不验签**地读一眼版本号：安装要能在「通道上的版本与本地一样」时装（空白机器就是
+    // 这种情况），而完整验签会拒绝「不比当前新」的清单。签名通过之前不会下载任何字节。
     let advertised = update::parse_release(&update::fetch_manifest_for(policy, &source)?)?;
-    if update::compare(&advertised.version, cloudfile_core::VERSION) != std::cmp::Ordering::Greater
-    {
-        return Ok(("current", None));
+
+    // 这个版本已经完整地装在这台机器上：重跑安装等于修复注册与自启，二进制不动。
+    if update::is_complete(install, &advertised.version) {
+        return Ok(("installed", None));
+    }
+    // 已经装着一个**更新的**版本（通道回退）：别用「安装」去降级。
+    if let Some(active) = update::active_version(dir, host)? {
+        if update::compare(&advertised.version, &active) == std::cmp::Ordering::Less
+            && update::is_complete(install, &active)
+        {
+            return Ok(("current", None));
+        }
     }
     // 同一份清单再取一次并完整验签。清单只有几十 KB、一台机器只跑一次安装，
     // 不值得为了省这一次请求把「验签」拆到两个地方。
-    let (release, _, _) = fetch_verified_release(root, None)?;
-    let (_, staged_host) = stage_release(&release)?;
+    let (release, _, _) = fetch_verified_release(root, None, update::NO_INSTALLED_VERSION)?;
+    let (_, staged_host) = stage_release(&release, install)?;
     Ok(("staged", Some((release.version.clone(), staged_host))))
 }
 
@@ -616,7 +640,21 @@ fn registration_target(
         Some((_, staged_host)) => staged_host.clone(),
         None => match &existing.binary {
             Some(binary) => binary.clone(),
-            None => host_binary()?,
+            None => {
+                // 没有暂存也没有旧注册：只能就地指正在跑的这份。它旁边**必须**有任务中心，
+                // 否则注册出来的东西 Chrome 拉起来也起不了任务中心（引导体下载到安装根里的
+                // 临时副本就是这种情况，它随后还会被删掉）。
+                let binary = host_binary()?;
+                let desktop = binary
+                    .parent()
+                    .map(|dir| dir.join(DESKTOP_NAME))
+                    .filter(|path| path.is_file());
+                anyhow::ensure!(
+                    desktop.is_some(),
+                    "安装根里没有 {DESKTOP_NAME}，无法就地注册；请用 --source 重新安装"
+                );
+                binary
+            }
         },
     };
     // 已有注册时沿用它的扩展 ID：白名单不该因为重跑一次安装就被改掉。
@@ -661,7 +699,8 @@ fn launch_desktop(desktop: Option<&Path>) -> anyhow::Result<bool> {
 /// 下载、暂存、健康检查、激活。顺序就是安全属性：在暂存的构建起来并回答本地协议之前，
 /// 什么都替换不了正在运行的那份。
 fn apply_release(host: &str, release: &update::Release) -> anyhow::Result<()> {
-    let (install, staged_host) = stage_release(release)?;
+    let install = update::install_root(&std::env::current_exe()?);
+    let (install, staged_host) = stage_release(release, &install)?;
     // `activate` 是「接管既有注册」专用的：它从当前注册取扩展 ID、把注册指到新版本目录，
     // 并备份原 manifest。全新安装没有旧注册可接管（会明确报错），那条路走 `--install`。
     let dir = hostreg::manifest_dir()?;
@@ -679,7 +718,10 @@ fn apply_release(host: &str, release: &update::Release) -> anyhow::Result<()> {
 
 /// 下载 + 暂存 + 健康检查，返回 (安装根, 暂存好的 host 路径)。**不碰注册** ——
 /// 全新安装这边没有旧注册可以接管，所以这一步必须能单独用。
-fn stage_release(release: &update::Release) -> anyhow::Result<(PathBuf, PathBuf)> {
+fn stage_release(
+    release: &update::Release,
+    install: &Path,
+) -> anyhow::Result<(PathBuf, PathBuf)> {
     let os = std::env::consts::OS;
     let mut files = Vec::new();
     for artifact in &release.artifacts {
@@ -692,10 +734,12 @@ fn stage_release(release: &update::Release) -> anyhow::Result<(PathBuf, PathBuf)
         };
         files.push((kind, update::download(artifact)?));
     }
-    let install = update::install_root(&std::env::current_exe()?);
-    let staged = update::stage(&install, &release.version, os, &files)?;
-    let staged_host = staged.join(update::Binary::NativeHost.file_name(os, &release.version));
-    let staged_desktop = staged.join(update::Binary::Desktop.file_name(os, &release.version));
+    // 这个版本目录是不是这次才建出来的：只有新建的才允许在健康检查失败时删掉。
+    // 就地补齐既有目录时删掉它等于毁掉这台机器上唯一能用的安装。
+    let existed = update::version_dir(install, &release.version)?.exists();
+    let staged = update::stage(install, &release.version, os, &files)?;
+    let staged_host = staged.join(update::Binary::NativeHost.installed_name(os));
+    let staged_desktop = staged.join(update::Binary::Desktop.installed_name(os));
     // 健康检查：新构建必须能起来并回答本地协议，否则一律不许留在版本目录里。
     let healthy = update::probe(&staged_host)
         .and_then(|reported| {
@@ -707,11 +751,13 @@ fn stage_release(release: &update::Release) -> anyhow::Result<(PathBuf, PathBuf)
         })
         .and_then(|()| update::probe(&staged_desktop).map(|_| ()));
     if let Err(error) = healthy {
-        // A staging directory that never activated is not installed state.
-        let _ = std::fs::remove_dir_all(&staged);
+        // 只有这次新建的暂存目录才删：就地补齐的既有版本目录是这台机器上唯一的安装。
+        if !existed {
+            let _ = std::fs::remove_dir_all(&staged);
+        }
         return Err(error);
     }
-    Ok((install, staged_host))
+    Ok((install.to_path_buf(), staged_host))
 }
 
 fn run_stdio() -> anyhow::Result<()> {

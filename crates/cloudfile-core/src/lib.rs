@@ -13,6 +13,8 @@ pub mod session;
 pub mod settings;
 pub mod storage;
 pub mod update;
+/// 桌面端在 GNU 工具链下必需的外部加载器（`WebView2Loader.dll`）。
+pub mod webview2;
 pub mod wire;
 
 /// 子进程控制台窗口控制（其它平台是空操作）。
