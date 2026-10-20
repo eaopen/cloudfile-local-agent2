@@ -173,7 +173,7 @@ fn settings_set(
 ) -> Result<Value, String> {
     let workspace_root = match workspace_root {
         Some(value) if value.trim().is_empty() => Some(
-            settings::default_workspace()
+            settings::default_workspace(&state.root)
                 .map_err(|error| error.to_string())?
                 .to_string_lossy()
                 .into_owned(),
@@ -468,7 +468,7 @@ fn setup_state(state: tauri::State<'_, State>) -> Result<Value, String> {
         "extension_version": extension::installed_version(&dir),
         "workspace_root": workspace.to_string_lossy(),
         "workspace_tasks": cloudfile_core::workspace::tasks_root(root).to_string_lossy(),
-        "workspace_default": cloudfile_core::workspace::default_root_hint(),
+        "workspace_default": cloudfile_core::workspace::default_root_hint(&state.root),
         "workspace_exists": workspace.is_dir(),
         "autostart_enabled": autostart::enabled(),
         "trusted_count": trusted,

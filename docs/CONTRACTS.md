@@ -20,7 +20,7 @@ Go Agent2 没有正式发行，因此不要求 Go 数据升级、Go Journal 读�
 
 设备配对沿用 `pair_enrollment`/`pair_sign`/`pair_confirm`，另加受控的 `pair_prepare`：由已登录页面的首次本地编辑触发，先由 Agent 探测该地址确为启用 `local.open-edit` 的 CloudFile 实例，再复用 `device::begin()` 建立短时待配对密钥。配对仍由页面的 `pair-start`/`pair-confirm` 完成，Agent 不单独完成注册；Cookie/token/sessionid 不进入 Native Host。
 
-开发工作副本默认位于用户主目录 `CloudFile-Dev/Workspace/<task_id>/`。私有数据目录及既有 Journal 格式不变；新任务在私有任务目录写入 `working-copy.json` 记录绝对工作目录，已有无该记录的任务继续使用原私有目录。修改工作区仅影响新任务，不移动、覆盖或重新绑定现有工作副本；浏览器不能提供本地文件路径。开发打包不再注入独立手动配对按钮。
+开发工作副本默认位于 `D:\CloudFileAgent\workspace\<task_id>\`（Windows；没有可用 D 盘时退回用户主目录 `~\CloudFileAgent\workspace\<task_id>\`，macOS 仍是用主目录）。私有数据目录及既有 Journal 格式不变；新任务在私有任务目录写入 `working-copy.json` 记录绝对工作目录，已有无该记录的任务继续使用原私有目录。修改工作区仅影响新任务，不移动、覆盖或重新绑定现有工作副本；浏览器不能提供本地文件路径。开发打包不再注入独立手动配对按钮。
 
 不需要为未发布 Go 的私有 CLI/Journal 或从未启用的实验消息制作兼容适配。正式已用旧版页面操作不应因 Rust 替代而消失。
 

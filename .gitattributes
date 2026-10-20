@@ -1,3 +1,7 @@
 # 随包携带的 WebView2Loader.dll（见 crates/cloudfile-core/src/webview2.rs）：
 # 二进制资源，不能被当成文本处理（换行转换会直接把它弄坏）。
 *.dll binary
+
+# 安装入口脚本必须是 GBK + CRLF + 无 BOM（cmd 的解析与中文提示都依赖这一点），
+# 禁止 git 做换行转换。
+*.cmd -text

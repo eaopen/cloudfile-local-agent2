@@ -22,9 +22,9 @@ use crate::storage;
 use anyhow::Context;
 
 pub const MACOS_LABEL: &str = "com.cloudfile.agent22.autostart";
-pub const WINDOWS_VALUE: &str = "CloudFileAgent22";
+pub const WINDOWS_VALUE: &str = "CloudFileAgent";
 /// 兜底途径：「启动」文件夹里的快捷方式名。名字只属于本安装，删除时据此认领。
-pub const WINDOWS_LINK: &str = "CloudFileAgent22.lnk";
+pub const WINDOWS_LINK: &str = "CloudFileAgent.lnk";
 /// 快捷方式描述（资源管理器里鼠标划过时显示）。
 pub const WINDOWS_DESCRIPTION: &str = "CloudFile 任务中心（托盘）";
 /// 登录项传给桌面进程的参数。两个平台共用：macOS 写进 LaunchAgent 的
@@ -227,6 +227,9 @@ fn other_platform_login_item() -> Result<LoginItem> {
 /// 只报最后一条会让人以为「启动文件夹写不了」，而真正的原因常在 Run 键那边。
 #[cfg(windows)]
 fn install_windows(program: &Path, arguments: &[String]) -> Result<LoginItem> {
+    // 旧名字（`CloudFileAgent22`）的登录项先撤掉：留着的话每次登录会起两个进程
+    // （第二个通常被单实例锁挡掉，但不该赌）。
+    remove_legacy_item();
     let (key, command) = run_key_update(WINDOWS_VALUE, Some(program), arguments)?;
     let command = command.expect("a program was supplied");
     match crate::winreg::write_string(&key, WINDOWS_VALUE, &command) {
@@ -250,6 +253,19 @@ fn install_windows(program: &Path, arguments: &[String]) -> Result<LoginItem> {
 #[cfg(windows)]
 pub fn startup_link_path() -> Option<PathBuf> {
     crate::shortcut::startup_dir().map(|directory| directory.join(WINDOWS_LINK))
+}
+
+/// 旧名字（`CloudFileAgent22`）写下的登录项：能删就删，删不掉也不影响本次安装。
+#[cfg(windows)]
+fn remove_legacy_item() {
+    const LEGACY_VALUE: &str = "CloudFileAgent22";
+    const LEGACY_LINK: &str = "CloudFileAgent22.lnk";
+    if let Ok((key, _)) = run_key_update(LEGACY_VALUE, None, &[]) {
+        let _ = crate::winreg::delete_value(&key, LEGACY_VALUE);
+    }
+    if let Some(directory) = crate::shortcut::startup_dir() {
+        let _ = crate::shortcut::remove(&directory.join(LEGACY_LINK));
+    }
 }
 
 #[cfg(windows)]
@@ -304,10 +320,12 @@ pub fn remove(root: &Path) -> Result<()> {
         let (key, _) = run_key_update(WINDOWS_VALUE, None, &[])?;
         crate::winreg::delete_value(&key, WINDOWS_VALUE)?;
         // 两条途径都要撤：装的时候可能走的是兜底那条，也可能两条都留下过。
-        // 快捷方式名只属于本安装（`CloudFileAgent22.lnk`），与 Go 侧卸载一致。
+        // 快捷方式名只属于本安装（`CloudFileAgent.lnk`），与 Go 侧卸载一致。
         if let Some(link) = startup_link_path() {
             crate::shortcut::remove(&link)?;
         }
+        // 旧名字的那两条也一并收走：卸载要把这台机器还原干净。
+        remove_legacy_item();
     }
     settings::update(root, |current| current.autostart = false)?;
     Ok(())
