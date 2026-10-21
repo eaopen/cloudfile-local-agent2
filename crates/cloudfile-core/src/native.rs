@@ -15,8 +15,6 @@ use std::path::Path;
 /// agent instead of falling back to a legacy host.
 pub const FAMILY_VERSION: &str = "2.2.0";
 
-const CAP_OPEN_SESSION: &str = "open_session";
-const CAP_OPEN_SESSION_FILE: &str = "open_session_file";
 const CAP_OPEN_URI: &str = "open_uri";
 const CAP_TASK_SUMMARY: &str = "task_summary";
 const CAP_FOCUS_TASK: &str = "focus_task";
@@ -63,8 +61,6 @@ pub fn capabilities(root: &Path) -> Vec<String> {
     }
     if configured(root) {
         for capability in [
-            CAP_OPEN_SESSION,
-            CAP_OPEN_SESSION_FILE,
             CAP_OPEN_WORKSPACE,
             CAP_QUERY_LOCAL_FILE,
             CAP_QUERY_LOCAL_FOLDER,
@@ -305,67 +301,6 @@ pub fn open_workspace(root: &Path, repo_id: &str, path: &str, mode: &str) -> Val
     }
 }
 
-/// Chrome may pass a downloaded short-lived JSON session descriptor.
-#[derive(serde::Deserialize)]
-struct Handoff {
-    protocol: String,
-    server: String,
-    ticket: String,
-    expires_at: u64,
-    #[serde(default)]
-    local_action: String,
-}
-
-fn parse_handoff(path: &str) -> Result<wire::Request> {
-    let candidate = Path::new(path);
-    if !candidate.is_absolute()
-        || candidate.extension().and_then(|v| v.to_str()) != Some("cloudfile")
-    {
-        bail!("invalid CloudFile handoff path");
-    }
-    let metadata = std::fs::symlink_metadata(candidate)?;
-    if !metadata.file_type().is_file() || metadata.len() == 0 || metadata.len() > wire::LIMIT as u64
-    {
-        bail!("invalid CloudFile handoff file");
-    }
-    let content = std::fs::read(candidate)?;
-    let value: Handoff = serde_json::from_slice(&content)?;
-    if value.protocol != "cloudfile-local/v2"
-        || value.expires_at <= crate::now()
-        || value.server.is_empty()
-        || value.ticket.is_empty()
-    {
-        bail!("invalid or expired CloudFile handoff");
-    }
-    Ok(wire::Request::Open {
-        protocol: value.protocol,
-        server: value.server,
-        ticket: value.ticket,
-        expires_at: value.expires_at,
-        local_action: value.local_action,
-    })
-}
-
-/// Use the normal trusted server claim; never launch an arbitrary .cloudfile
-/// OS association and pretend the file was actually downloaded.
-pub fn open_session_file(root: &Path, path: &str) -> Value {
-    let result = (|| -> Result<()> {
-        let request = parse_handoff(path)?;
-        let task = session::open_session(root, request)?;
-        session::launch(root, &task.task_id)
-    })();
-    match result {
-        Ok(()) => json!({"ok":true}),
-        Err(_) => json!({"ok":false,"error":"会话领取或本地打开失败；请检查服务信任及任务中心"}),
-    }
-}
-
-fn update_result_path(root: &Path) -> std::path::PathBuf {
-    root.join("update-result.json")
-}
-
-/// Reads the installed extension version from the configured extension copy.
-/// Only a version string is exposed; the directory never leaves the agent.
 fn extension_installed_version(config: &session::Config) -> Option<String> {
     let directory = config.extension_dir.as_ref()?;
     crate::extension::installed_version(Path::new(directory))
@@ -558,8 +493,6 @@ mod tests {
         session::trust(root, "https://example.com".into()).unwrap();
         let trusted = capabilities(root);
         for expected in [
-            "open_session",
-            "open_session_file",
             "open_workspace",
             "query_local_file",
             "query_local_folder",
@@ -788,24 +721,6 @@ mod tests {
     }
 
     #[test]
-    fn handoff_files_must_be_absolute_cloudfile_paths() {
-        let (_dir, base) = crate::storage::test_root();
-        assert_eq!(
-            open_session_file(base.as_path(), "relative.cloudfile")["ok"],
-            false
-        );
-        // An absolute path that simply does not exist. Built from the host's
-        // temporary directory so the case is genuinely exercised on Windows
-        // too, where a Unix literal like `/tmp/x` is not absolute.
-        let missing = std::env::temp_dir().join("cloudfile-missing-handoff.cloudfile");
-        assert_eq!(
-            open_session_file(base.as_path(), &missing.to_string_lossy())["ok"],
-            false,
-            "{missing:?}"
-        );
-    }
-
-    #[test]
     fn readonly_queries_are_distinct_from_editable_copies() {
         let (_dir, base) = crate::storage::test_root();
         let root = base.as_path();
@@ -841,47 +756,6 @@ mod tests {
         std::fs::write(dir.join("task.json"), b"{invalid-json").unwrap();
         assert_eq!(task_summary(root)["ok"], false);
         assert!(task_summary(root)["tasks"].is_null());
-    }
-
-    #[test]
-    fn downloaded_handoff_is_parsed_not_launched_as_an_untrusted_file() {
-        let (_dir, base) = crate::storage::test_root();
-        let root = base.as_path();
-        let file = root.join("document.cloudfile");
-        std::fs::write(
-            &file,
-            serde_json::to_vec(&json!({
-                "protocol":"cloudfile-local/v2","server":"https://example.com",
-                "ticket":"one-time-ticket","expires_at":crate::now()+60
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        match parse_handoff(&file.to_string_lossy()).unwrap() {
-            wire::Request::Open {
-                protocol, ticket, ..
-            } => {
-                assert_eq!(protocol, "cloudfile-local/v2");
-                assert_eq!(ticket, "one-time-ticket");
-            }
-            _ => panic!("not an inline session"),
-        }
-        assert_eq!(
-            open_session_file(root, &file.to_string_lossy())["ok"],
-            false
-        );
-        std::fs::write(&file, b"not-json").unwrap();
-        assert!(parse_handoff(&file.to_string_lossy()).is_err());
-        std::fs::write(
-            &file,
-            serde_json::to_vec(&json!({
-                "protocol":"cloudfile-local/v2","server":"https://example.com",
-                "ticket":"one-time-ticket","expires_at":crate::now()-1
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        assert!(parse_handoff(&file.to_string_lossy()).is_err());
     }
 
     #[test]

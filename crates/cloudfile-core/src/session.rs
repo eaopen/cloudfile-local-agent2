@@ -1,4 +1,4 @@
-use crate::{storage, wire::Request};
+use crate::storage;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -42,23 +42,6 @@ impl Config {
             allow_insecure: self.allow_insecure_update_source,
         }
     }
-}
-#[derive(Deserialize)]
-pub struct Claimed {
-    pub session_id: String,
-    pub mode: String,
-    pub expires_at: u64,
-    pub repo_id: String,
-    pub path: String,
-    pub file: RemoteFile,
-    pub file_id: String,
-    pub size: u64,
-    pub writeback: Option<serde_json::Value>,
-}
-#[derive(Deserialize)]
-pub struct RemoteFile {
-    pub name: String,
-    pub content_url: String,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Task {
@@ -353,128 +336,6 @@ pub fn digest(path: &Path) -> Result<String> {
         hash.update(&buffer[..n]);
     }
     Ok(format!("{:x}", hash.finalize()))
-}
-pub fn open_session(root: &Path, request: Request) -> Result<Task> {
-    let Request::Open {
-        protocol,
-        server,
-        ticket,
-        expires_at,
-        local_action,
-    } = request
-    else {
-        bail!("session required")
-    };
-    if protocol != "cloudfile-local/v2"
-        || expires_at <= crate::now()
-        || ticket.is_empty()
-        || ticket.len() > 16384
-        || !matches!(local_action.as_str(), "" | "keep" | "open" | "overwrite")
-    {
-        bail!("invalid or expired session");
-    }
-    let base = origin(&server)?;
-    if !config(root)?.allowed_origins.contains(&server) {
-        bail!("origin is not trusted; add it in the desktop app");
-    }
-    let client = reqwest::blocking::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(300))
-        .build()?;
-    let response = client
-        .post(format!(
-            "{server}{}/api/v2.1/cloudfile/agent-sessions/claim/",
-            service_path(root, &server)?
-        ))
-        .json(&serde_json::json!({"ticket":ticket}))
-        .send()
-        .context("session claim failed")?;
-    if response.status() != 200 {
-        bail!("session claim rejected");
-    }
-    let mut data = Vec::new();
-    response.take(1024 * 1024 + 1).read_to_end(&mut data)?;
-    if data.len() > 1024 * 1024 {
-        bail!("claim response too large");
-    }
-    let c: Claimed = serde_json::from_slice(&data)?;
-    filename(&c.file.name)?;
-    if c.expires_at <= crate::now()
-        || !matches!(c.mode.as_str(), "local-view" | "local-edit")
-        || c.writeback.is_some()
-        || c.size > 4 * 1024 * 1024 * 1024
-        || uuid::Uuid::parse_str(&c.repo_id).is_err()
-        || uuid::Uuid::parse_str(&c.session_id).is_err()
-        || !c.path.starts_with('/')
-        || c.path
-            .split('/')
-            .skip(1)
-            .any(|x| x.is_empty() || x == "." || x == "..")
-        || c.path.contains(['\\', '\0'])
-        || c.file_id.len() != 40
-        || !c.file_id.bytes().all(|b| b.is_ascii_hexdigit())
-    {
-        bail!("invalid session response");
-    }
-    let content = Url::parse(&c.file.content_url)?;
-    if content.origin() != base.origin()
-        || !content.username().is_empty()
-        || content.password().is_some()
-        || content.fragment().is_some()
-    {
-        bail!("untrusted content URL");
-    }
-    let id = format!(
-        "{:x}",
-        Sha256::digest(format!("{server}\0{}\0{}\0{}", c.repo_id, c.mode, c.path))
-    );
-    let dir = task_dir(root, &id)?;
-    storage::private_dir(&dir)?;
-    let _lock = storage::lock(&dir.join("operation.lock"))?;
-    if dir.join("task.json").exists() {
-        // Reopening never replaces an existing working copy, including overwrite requests.
-        let task = load(root, &id)?;
-        local_path(root, &task)?;
-        return Ok(task);
-    }
-    let working = prepare_working_dir(root, &id)?;
-    let target = working.join(&c.file.name);
-    if target.exists() {
-        bail!("untracked working copy retained; review the task directory");
-    }
-    let mut response = client.get(content).send().context("download failed")?;
-    if response.status() != 200 {
-        bail!("download rejected");
-    }
-    let mut tmp = tempfile::NamedTempFile::new_in(&working)?;
-    let written = std::io::copy(&mut (&mut response).take(c.size + 1), &mut tmp)?;
-    if written != c.size {
-        bail!("download size mismatch");
-    }
-    tmp.flush()?;
-    tmp.as_file().sync_all()?;
-    let hash = digest(tmp.path())?;
-    if c.mode == "local-view" {
-        let mut permissions = tmp.as_file().metadata()?.permissions();
-        permissions.set_readonly(true);
-        tmp.as_file().set_permissions(permissions)?;
-    }
-    tmp.persist_noclobber(&target)?;
-    let task = Task {
-        device_id: None,
-        task_id: id,
-        file_name: c.file.name,
-        mode: c.mode,
-        server,
-        repo_id: c.repo_id,
-        remote_path: c.path,
-        session_id: c.session_id,
-        baseline_file_id: c.file_id,
-        baseline_digest: hash,
-        size: written,
-    };
-    storage::write(&dir.join("task.json"), &task)?;
-    Ok(task)
 }
 /// Hands the working copy to a local application. Precedence is an explicit
 /// user rule, then a detected application, then the OS default for known

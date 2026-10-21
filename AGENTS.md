@@ -32,3 +32,10 @@ P0 任务中心；P1 Windows .NET 现有功能覆盖；P2 独占编辑与 CDC �
 - Agent must negotiate runtime capability with Hub/Server and select full upload versus native CDC using actual size/reuse and supported endpoints. Local user preferences (auto-start, tray/floating UI, per-task pause) remain preferences and are not product feature flags.
 - Historic `CLOUDFILE_EDITING_ENABLED`, `CLOUDFILE_AGENT2_OPTIMISTIC_UPLOAD_ENABLED`, `CLOUDFILE_AGENT2_CDC_ENABLED` and exclusive-enable switches may describe incomplete older server contracts; do not introduce or keep them as requirements for a finalized V2 API. Preserve fail-closed behavior until server capability negotiation is proved in real end-to-end tests; never silently skip safe-write checks.
 - External dependencies and missing Checkout capabilities degrade only their dependent operations. No unapproved server endpoint, DB table or agent protocol change. Record and verify any legacy contract cleanup before deleting live compatibility logic.
+
+## CloudFile 当前 V2 编辑协议（强制）
+
+- 本地查看、普通编辑、独占编辑从已登录 Hub 的 `/api/v2.1/cloudfile/edit/v1/open/` 得到有时效的、绑定用户/库/路径/模式的 scoped JWT；Chrome 扩展仅传递 `cloudfile-open://v2/open`，Agent2 的 `v2_edit` 调用 Go `/cf-edit/v1/*`。
+- 文件编辑历史来自 Seafile CE Commit，独占锁只由 `cf_edit_guard` 保存，操作补充审计由 `cf_audit_event` 保存。Agent2 只能持久化自己的本地 Journal，不能要求 Server/Hub 恢复 `cf_edit_session`、`cf_resource`、`cf_commit_intent` 或任何第五表之外的 SQL。
+- 未正式发布的 V1 server session claim 与 .cloudfile handoff 已退出；`seafile://openfile` 仅用于打开已持有的本地副本，或跳到正常登录的文件页，不能自行发起旧的服务器会话。
+- 不为旧版本创建产品升级路径。变更应对齐 Server/Hub/Docker 当前 `dev`，只做必要的定向验证。

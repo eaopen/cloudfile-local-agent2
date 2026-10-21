@@ -1205,7 +1205,6 @@ fn run(autostart: bool) -> anyhow::Result<()> {
                     wire::Request::OpenWorkspace { repo_id, path, mode } => {
                         native::open_workspace(&root, &repo_id, &path, &mode)
                     }
-                    wire::Request::OpenSessionFile { path } => native::open_session_file(&root, &path),
                     wire::Request::PairEnrollment { server } => match device::enrollment(&root, &server) {
                         Ok(value) => json!({"ok":true,"enrollment":value,
                             "service_path":session::service_path(&root,&server).unwrap_or_default()}),
@@ -1267,16 +1266,6 @@ fn run(autostart: bool) -> anyhow::Result<()> {
                     wire::Request::Update {} | wire::Request::UpdateExtension {} => {
                         wire::error("请在命令行执行 cloudfile-native-host --update 或 --update-extension")
                     }
-                    request @ wire::Request::Open { .. } => match session::open_session(&root, request) {
-                        Ok(task) => {
-                            show(&handle);
-                            match session::launch(&root, &task.task_id) {
-                                Ok(()) => json!({"ok":true}),
-                                Err(_) => wire::error("download retained; local application could not open file"),
-                            }
-                        }
-                        Err(_) => wire::error("session rejected or download failed; inspect trusted origin and server session"),
-                    },
                 });
                 if result.is_err() {
                     eprintln!("CloudFile mailbox operation failed");
