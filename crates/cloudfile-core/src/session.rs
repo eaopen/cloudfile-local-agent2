@@ -1,12 +1,11 @@
 use crate::storage;
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     fs,
-    io::{Read, Write},
+    io::Read,
     path::{Path, PathBuf},
-    time::Duration,
 };
 use url::Url;
 #[derive(Default, Serialize, Deserialize)]

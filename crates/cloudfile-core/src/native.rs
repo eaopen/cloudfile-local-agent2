@@ -4,7 +4,7 @@
 //! interface: names, types and the `capabilities` list must match what the
 //! browser-side code already checks. Everything here is derived from the
 //! durable store on each call; nothing is cached between requests.
-use crate::{apps, device, guard, journal, session, settings, update, wire};
+use crate::{apps, device, guard, journal, session, settings, update};
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use sha2::Digest as _;
@@ -309,6 +309,11 @@ fn extension_installed_version(config: &session::Config) -> Option<String> {
 pub fn record_update_result(root: &Path, kind: &str, state: &str) {
     let value = json!({"kind": kind, "state": state, "at": crate::now()});
     let _ = crate::storage::write(&update_result_path(root), &value);
+}
+
+/// 上次更新/扩展安装的结果文件（任务中心「关于与更新」读它）。
+fn update_result_path(root: &Path) -> std::path::PathBuf {
+    root.join("update-result.json")
 }
 
 pub fn load_update_result(root: &Path) -> Option<Value> {
