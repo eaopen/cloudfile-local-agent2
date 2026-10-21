@@ -39,3 +39,8 @@ P0 任务中心；P1 Windows .NET 现有功能覆盖；P2 独占编辑与 CDC �
 - 文件编辑历史来自 Seafile CE Commit，独占锁只由 `cf_edit_guard` 保存，操作补充审计由 `cf_audit_event` 保存。Agent2 只能持久化自己的本地 Journal，不能要求 Server/Hub 恢复 `cf_edit_session`、`cf_resource`、`cf_commit_intent` 或任何第五表之外的 SQL。
 - 未正式发布的 V1 server session claim 与 .cloudfile handoff 已退出；`seafile://openfile` 仅用于打开已持有的本地副本，或跳到正常登录的文件页，不能自行发起旧的服务器会话。
 - 不为旧版本创建产品升级路径。变更应对齐 Server/Hub/Docker 当前 `dev`，只做必要的定向验证。
+
+## V2 开发期数据初始化
+
+- Agent2 只读取当前 V2 JWT、Go 文件接口和 `cf_edit_guard` 所代表的独占状态；`cf_audit_event` 由 Server 写入，Agent2 不使用任何旧 CloudFile SQL 表。
+- 服务端扩展数据不会从历史开发版本迁移。当前库绑定从 Seafile 原生事实重新登记，Etech 重新下发权限与身份组映射。Agent2 本地未提交文件由 Journal 管理，不因服务端开发库重建而自动丢弃；实际 DEV 重建前应停止未完成的独占任务。
