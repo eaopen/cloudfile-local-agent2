@@ -538,6 +538,35 @@ function renderTask(task) {
     buttons.append(hint);
   }
 
+  if (task.conflict) {
+    // 同一文件再次「本地编辑」且云端已向前走：线上版本已旁挂成副本，等用户选一份。
+    const warn = document.createElement('p');
+    warn.className = 'upload-error';
+    warn.textContent = '云端已有新版本。请选择用线上版本覆盖本地，或保留本地版本（仍是一条任务）。';
+    info.append(warn);
+    buttons.append(
+      button('用线上覆盖本地', () => action(task, 'resolve_conflict', { choice: 'remote' })),
+      button('保留本地版本', () => action(task, 'resolve_conflict', { choice: 'local' }), {
+        secondary: true,
+        disabled: working,
+      }),
+    );
+  }
+
+  if (task.group === 'done' && !working) {
+    buttons.append(
+      button(
+        '删除',
+        async () => {
+          if (!window.confirm(`删除任务「${task.file_name}」？\n本地已下载的文件会一并删除，空目录也会清理。`)) return;
+          await action(task, 'delete_task');
+          say('任务已删除，本地文件也已清理。');
+        },
+        { secondary: true },
+      ),
+    );
+  }
+
   row.append(info, buttons);
   return row;
 }

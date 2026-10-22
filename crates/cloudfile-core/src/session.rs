@@ -304,6 +304,69 @@ pub fn tasks(root: &Path) -> Result<Vec<Task>> {
     result.sort_by(|a, b| a.file_name.cmp(&b.file_name));
     Ok(result)
 }
+
+/// 同一文件在同一子树里只保留一条任务：`local-view` 与可编辑子树各自独立。
+///
+/// 修改逻辑（2026-10-22）：网页每次「本地查看 / 本地编辑」都会拿到新的 session，
+/// 旧逻辑用 `sha256(server + session)` 当任务 ID，于是同一个文件每点一次就多一条任务。
+/// 现在按 **仓库 + 库内路径 + 模式族** 找回已有任务再做合并。
+/// 目录枚举顺序不可依赖（编辑子树里可能同时有历史的 `local-edit` 与 `optimistic-edit`），
+/// 命中多条时按 task_id 排序取第一条，保证同一输入永远得到同一个结果。
+pub fn find_task(root: &Path, repo_id: &str, remote_path: &str, mode: &str) -> Result<Option<Task>> {
+    let view = mode == "local-view";
+    let mut hits: Vec<Task> = tasks(root)?
+        .into_iter()
+        .filter(|task| task.repo_id == repo_id && task.remote_path == remote_path)
+        .filter(|task| (task.mode == "local-view") == view)
+        .collect();
+    hits.sort_by(|left, right| left.task_id.cmp(&right.task_id));
+    Ok(hits.into_iter().next())
+}
+
+/// 删除任务：任务目录（含 journal / v2 状态）+ 工作副本，并向上清理空目录。
+///
+/// 修改原因（2026-10-22）：任务中心只有「打开」，已完成的任务永远留在列表里，
+/// 本地下载的那份也一直占着地方。清理范围严格限制在 workspace 根以下：
+/// 绝不越过 workspace 根去删用户自己的目录；任何一步失败都报错而不是静默跳过。
+pub fn remove_task(root: &Path, id: &str) -> Result<serde_json::Value> {
+    let task = load(root, id)?;
+    let dir = task_dir(root, id)?;
+    let workspace = crate::settings::workspace_root(root);
+    let working = working_dir(root, id).ok();
+    if let Some(copy) = working.as_ref() {
+        if copy != &dir && copy.starts_with(&workspace) && copy.exists() {
+            fs::remove_dir_all(copy)?;
+        }
+    }
+    if dir.exists() {
+        fs::remove_dir_all(&dir)?;
+    }
+    let mut pruned: Vec<String> = Vec::new();
+    if let Some(copy) = working.as_ref() {
+        let mut current = copy.parent().map(Path::to_path_buf);
+        while let Some(path) = current {
+            if path == workspace || !path.starts_with(&workspace) {
+                break;
+            }
+            let empty = fs::read_dir(&path)
+                .map(|mut entries| entries.next().is_none())
+                .unwrap_or(false);
+            if !empty || fs::remove_dir(&path).is_err() {
+                break;
+            }
+            pruned.push(path.to_string_lossy().into_owned());
+            current = path.parent().map(Path::to_path_buf);
+        }
+    }
+    Ok(serde_json::json!({
+        "ok": true,
+        "task_id": id,
+        "file_name": task.file_name,
+        "removed_local": working.map(|path| path.to_string_lossy().into_owned()),
+        "pruned": pruned,
+    }))
+}
+
 fn filename(name: &str) -> Result<()> {
     let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
     if name.is_empty()
@@ -487,5 +550,71 @@ mod tests {
         );
         // 「有公钥没源」永远拒绝（保持原契约）。
         assert!(set_update(&root, None, Some("x".into()), None).is_err());
+    }
+
+    fn task_fixture(root: &Path, id: &str, mode: &str, remote: &str) -> PathBuf {
+        crate::settings::update(root, |settings| {
+            settings.workspace_root = Some(root.join("workspace").to_string_lossy().into_owned())
+        })
+        .unwrap();
+        let working = prepare_working_dir(root, id).unwrap();
+        let task = Task {
+            device_id: None,
+            task_id: id.to_string(),
+            file_name: "a.docx".into(),
+            mode: mode.into(),
+            server: "http://127.0.0.1:6111".into(),
+            repo_id: "11111111-1111-4111-8111-111111111111".into(),
+            remote_path: remote.into(),
+            session_id: "session".into(),
+            baseline_file_id: "b".repeat(40),
+            baseline_digest: "d".repeat(64),
+            size: 1,
+        };
+        storage::write(&task_dir(root, id).unwrap().join("task.json"), &task).unwrap();
+        fs::write(working.join("a.docx"), b"x").unwrap();
+        working
+    }
+
+    #[test]
+    fn find_task_keeps_view_and_edit_apart_and_is_deterministic() {
+        let (_dir, root) = storage::test_root();
+        let view = "1".repeat(64);
+        let edit = "2".repeat(64);
+        let other = "3".repeat(64);
+        task_fixture(&root, &view, "local-view", "/a.docx");
+        task_fixture(&root, &edit, "optimistic-edit", "/a.docx");
+        task_fixture(&root, &other, "local-view", "/b.docx");
+        let repo = "11111111-1111-4111-8111-111111111111";
+        assert_eq!(
+            find_task(&root, repo, "/a.docx", "local-view").unwrap().unwrap().task_id,
+            view
+        );
+        assert_eq!(
+            find_task(&root, repo, "/a.docx", "optimistic-edit")
+                .unwrap()
+                .unwrap()
+                .task_id,
+            edit
+        );
+        // 查看不得命中编辑任务，反之亦然；不存在的路径返回 None 而不是随便挑一条。
+        assert!(find_task(&root, repo, "/missing.docx", "local-view")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn removing_a_task_deletes_the_copy_and_prunes_empty_directories() {
+        let (_dir, root) = storage::test_root();
+        let id = "4".repeat(64);
+        let working = task_fixture(&root, &id, "optimistic-edit", "/a.docx");
+        let workspace = root.join("workspace");
+        let removed = remove_task(&root, &id).unwrap();
+        assert_eq!(removed["ok"], true);
+        assert!(!working.exists());
+        assert!(!task_dir(&root, &id).unwrap().exists());
+        assert!(tasks(&root).unwrap().is_empty());
+        // workspace 根是用户自己的目录，绝不能被顺手删掉。
+        assert!(workspace.exists());
     }
 }

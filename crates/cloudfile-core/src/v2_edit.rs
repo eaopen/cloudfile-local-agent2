@@ -31,6 +31,17 @@ struct State {
     ticket: String,
     guard: Option<Guard>,
 }
+
+/// 同文件重复「本地编辑」时，线上已经向前走了，本地那份不能再被静默替换：
+/// 把线上版本旁挂成 `<文件名>.cloudfile-conflict`，等用户在任务中心选一份。
+#[derive(Clone, Serialize, Deserialize)]
+struct Conflict {
+    file_id: String,
+    size: u64,
+    digest: String,
+    session_id: String,
+    at: u64,
+}
 #[derive(Deserialize)]
 struct TicketClaims {
     repo_id: String,
@@ -176,7 +187,7 @@ pub fn open(root: &Path, uri: &str) -> Result<Task> {
         )?;
         return Ok(task);
     }
-    let res = client()?
+    let mut res = client()?
         .get(format!("{server}/seafhttp/cf-edit/v1/read"))
         .bearer_auth(&state.ticket)
         .send()?;
@@ -218,6 +229,25 @@ pub fn open(root: &Path, uri: &str) -> Result<Task> {
         || size > crate::device::MAX_FILE
     {
         bail!("服务端文件元数据无效")
+    }
+    // 同一文件重复「本地查看 / 本地编辑」时先尝试合并到已有任务，绝不再建第二条。
+    if let Some(existing) = session::find_task(root, &repo_id, &remote, &mode)? {
+        if existing.server == server && is_v2(root, &existing.task_id) {
+            if let Some(merged) = merge(
+                root,
+                existing,
+                Merge {
+                    ticket: state.ticket.clone(),
+                    sid: sid.clone(),
+                    mode: mode.clone(),
+                    file_id: file_id.clone(),
+                    size,
+                    res: &mut res,
+                },
+            )? {
+                return Ok(merged);
+            }
+        }
     }
     let filename = std::path::Path::new(&remote)
         .file_name()
@@ -354,6 +384,166 @@ fn resume(root: &Path, server: &str, ticket: &str) -> Result<Option<Task>> {
     }
     Ok(None)
 }
+/// 把「同一文件再次打开」合并进已有任务。
+///
+/// - `local-view`：本地副本只是线上镜像，直接用新票据下载到的字节覆盖，任务保持一条。
+/// - `optimistic-edit`：`file_id` 没变说明本地那份就是最新，只换票据；变了说明线上
+///   已经向前走，把线上版本旁挂成 `<文件名>.cloudfile-conflict` 并写 `conflict.json`，
+///   任务仍是一条，由任务中心的「用线上覆盖本地 / 保留本地版本」决定。
+///
+/// 返回 `Ok(None)` 表示这条旧记录已经不可用（工作副本丢了），调用方按新任务继续。
+struct Merge<'a> {
+    ticket: String,
+    sid: String,
+    mode: String,
+    file_id: String,
+    size: u64,
+    res: &'a mut reqwest::blocking::Response,
+}
+
+fn merge(root: &Path, mut task: Task, input: Merge<'_>) -> Result<Option<Task>> {
+    let Merge { ticket, sid, mode, file_id, size, res } = input;
+    let mode = mode.as_str();
+    let dir = session::task_dir(root, &task.task_id)?;
+    let working = match session::working_dir(root, &task.task_id) {
+        Ok(working) => working,
+        Err(_) => {
+            let _ = session::remove_task(root, &task.task_id);
+            return Ok(None);
+        }
+    };
+    let local = match session::local_path(root, &task) {
+        Ok(local) => local,
+        Err(_) => {
+            // 记录还在、副本丢了：留着只会挡住下一次打开，直接清掉按新任务处理。
+            let _ = session::remove_task(root, &task.task_id);
+            return Ok(None);
+        }
+    };
+    let mut state = load(root, &task.task_id).unwrap_or(State {
+        ticket: ticket.clone(),
+        guard: None,
+    });
+    state.ticket = ticket;
+    if mode != "local-view" && file_id == task.baseline_file_id {
+        // 线上没变：本地那份就是最新，丢弃这次下载内容，只换票据。
+        task.session_id = sid;
+        storage::write(&dir.join("task.json"), &task)?;
+        store(root, &task.task_id, &state)?;
+        return Ok(Some(task));
+    }
+    let mut downloaded = tempfile::NamedTempFile::new_in(&working)?;
+    let copied = std::io::copy(&mut res.take(size + 1), &mut downloaded)?;
+    if copied != size {
+        bail!("文件下载不完整")
+    }
+    downloaded.flush()?;
+    downloaded.as_file().sync_all()?;
+    let digest = session::digest(downloaded.path())?;
+    if mode == "local-view" {
+        clear_read_only(&local)?;
+        downloaded.persist(&local)?;
+        // 查看副本永远是线上镜像：本地改它没有任何意义，重新压成只读。
+        let mut permissions = fs::metadata(&local)?.permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&local, permissions)?;
+        task.baseline_file_id = file_id;
+        task.baseline_digest = digest;
+        task.size = size;
+        task.session_id = sid;
+        storage::write(&dir.join("task.json"), &task)?;
+        store(root, &task.task_id, &state)?;
+        return Ok(Some(task));
+    }
+    // 编辑：线上向前走了。落一份旁挂副本等用户选择，绝不碰本地那份。
+    let conflict_path = working.join(format!("{}.cloudfile-conflict", task.file_name));
+    let _ = fs::remove_file(&conflict_path);
+    downloaded.persist(&conflict_path)?;
+    storage::write(
+        &dir.join("conflict.json"),
+        &Conflict {
+            file_id,
+            size,
+            digest,
+            session_id: sid.clone(),
+            at: crate::now(),
+        },
+    )?;
+    task.session_id = sid;
+    storage::write(&dir.join("task.json"), &task)?;
+    store(root, &task.task_id, &state)?;
+    Ok(Some(task))
+}
+
+// Windows 的只读位只有开/关两态，这里确实要关掉它才能替换文件；
+// Unix 分支走 0600，不经过 set_readonly(false)。
+#[allow(clippy::permissions_set_readonly_false)]
+fn clear_read_only(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // 只还给属主读写：set_readonly(false) 在 Unix 上会变成 world-writable。
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let mut permissions = fs::metadata(path)?.permissions();
+        if permissions.readonly() {
+            permissions.set_readonly(false);
+            fs::set_permissions(path, permissions)?;
+        }
+    }
+    Ok(())
+}
+
+/// 任务中心展示用：是否还有一份线上版本等用户决定。
+pub fn conflict(root: &Path, id: &str) -> Option<Value> {
+    let file = session::task_dir(root, id).ok()?.join("conflict.json");
+    if !file.exists() {
+        return None;
+    }
+    storage::read::<Conflict>(&file)
+        .ok()
+        .map(|value| json!({"file_id": value.file_id, "size": value.size, "at": value.at}))
+}
+
+/// 用户在任务中心选定一份：`remote` 用线上覆盖本地，`local` 保留本地。
+/// 两条路径都不新建任务，任务始终只有一条。
+pub fn resolve_conflict(root: &Path, id: &str, choice: &str) -> Result<Value> {
+    let mut task = session::load(root, id)?;
+    let dir = session::task_dir(root, id)?;
+    let conflict_path = dir.join("conflict.json");
+    let conflict: Conflict = storage::read(&conflict_path)?;
+    let working = session::working_dir(root, id)?;
+    let local = session::local_path(root, &task)?;
+    let copy = working.join(format!("{}.cloudfile-conflict", task.file_name));
+    match choice {
+        "remote" => {
+            if task.mode == "local-view" {
+                clear_read_only(&local)?;
+            }
+            fs::rename(&copy, &local)?;
+            if task.mode == "local-view" {
+                let mut permissions = fs::metadata(&local)?.permissions();
+                permissions.set_readonly(true);
+                fs::set_permissions(&local, permissions)?;
+            }
+            task.baseline_file_id = conflict.file_id.clone();
+            task.baseline_digest = conflict.digest.clone();
+            task.size = conflict.size;
+        }
+        "local" => {
+            // 保留本地：基线换成线上最新，后续上传以它为 base；本地内容一个字都不动。
+            task.baseline_file_id = conflict.file_id.clone();
+            let _ = fs::remove_file(&copy);
+        }
+        _ => bail!("未知的冲突处理方式"),
+    }
+    storage::write(&dir.join("task.json"), &task)?;
+    let _ = fs::remove_file(&conflict_path);
+    Ok(json!({"ok": true, "state": "resolved", "choice": choice, "file_name": task.file_name}))
+}
+
 fn status(root: &Path, task: &Task, st: &State) -> Result<Value> {
     let res = client()?
         .get(endpoint(root, task, "status")?)
@@ -667,5 +857,71 @@ mod tests {
         assert_eq!(claims.exp, 1700000000);
         assert!(ticket_claims("h.not-json.s").is_none());
         assert!(ticket_claims("nope").is_none());
+    }
+
+    fn conflict_fixture(root: &Path, id: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        crate::settings::update(root, |settings| {
+            settings.workspace_root = Some(root.join("workspace").to_string_lossy().into_owned())
+        })
+        .unwrap();
+        let working = session::prepare_working_dir(root, id).unwrap();
+        let task = Task {
+            device_id: None,
+            task_id: id.to_string(),
+            file_name: "a.docx".into(),
+            mode: "optimistic-edit".into(),
+            server: "http://127.0.0.1:6111".into(),
+            repo_id: "11111111-1111-4111-8111-111111111111".into(),
+            remote_path: "/a.docx".into(),
+            session_id: "old".into(),
+            baseline_file_id: "b".repeat(40),
+            baseline_digest: "d".repeat(64),
+            size: 4,
+        };
+        let local = working.join("a.docx");
+        fs::write(&local, b"mine").unwrap();
+        fs::write(working.join("a.docx.cloudfile-conflict"), b"theirs").unwrap();
+        storage::write(
+            &session::task_dir(root, id).unwrap().join("conflict.json"),
+            &Conflict {
+                file_id: "c".repeat(40),
+                size: 6,
+                digest: "e".repeat(64),
+                session_id: "new".into(),
+                at: 1,
+            },
+        )
+        .unwrap();
+        storage::write(&session::task_dir(root, id).unwrap().join("task.json"), &task).unwrap();
+        (local, working)
+    }
+
+    #[test]
+    fn remote_choice_overwrites_the_copy_and_keeps_one_task() {
+        let (_dir, root) = storage::test_root();
+        let id = "e".repeat(64);
+        let (local, _working) = conflict_fixture(&root, &id);
+        let value = resolve_conflict(&root, &id, "remote").unwrap();
+        assert_eq!(value["ok"], true);
+        assert_eq!(fs::read(&local).unwrap(), b"theirs");
+        let task = session::load(&root, &id).unwrap();
+        assert_eq!(task.baseline_file_id, "c".repeat(40));
+        assert_eq!(task.size, 6);
+        assert!(conflict(&root, &id).is_none());
+        assert_eq!(session::tasks(&root).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn local_choice_keeps_bytes_and_moves_the_baseline_forward() {
+        let (_dir, root) = storage::test_root();
+        let id = "f".repeat(64);
+        let (local, working) = conflict_fixture(&root, &id);
+        resolve_conflict(&root, &id, "local").unwrap();
+        assert_eq!(fs::read(&local).unwrap(), b"mine");
+        assert!(!working.join("a.docx.cloudfile-conflict").exists());
+        let task = session::load(&root, &id).unwrap();
+        assert_eq!(task.baseline_file_id, "c".repeat(40));
+        assert!(conflict(&root, &id).is_none());
+        assert!(resolve_conflict(&root, &id, "whatever").is_err());
     }
 }

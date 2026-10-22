@@ -95,8 +95,10 @@ fn summaries(root: &Path, uploading: &Mutex<HashSet<String>>) -> anyhow::Result<
         let has_lease = lease.ok().flatten().is_some()
             || cloudfile_core::v2_edit::has_checkout(root, &task.task_id);
         let closed = closed.unwrap_or(false);
+        // 云端已有新版本等待用户选择：必须出现在「待处理」，否则用户永远看不到这个决定。
+        let conflict = cloudfile_core::v2_edit::conflict(root, &task.task_id).is_some();
         // Three states the user can act on, in the order they matter.
-        let group = if needs_review || has_pending || (exclusive_mode && !closed && !has_lease) {
+        let group = if conflict || needs_review || has_pending || (exclusive_mode && !closed && !has_lease) {
             "needs-attention"
         } else if is_uploading || local_changed || (exclusive_mode && !closed) {
             "in-progress"
@@ -116,6 +118,7 @@ fn summaries(root: &Path, uploading: &Mutex<HashSet<String>>) -> anyhow::Result<
                 || cloudfile_core::v2_edit::has_checkout(root, &task.task_id),
             "checkout_closed":closed,
             "authorization_expires_at":cloudfile_core::v2_edit::ticket_expires_at(root, &task.task_id),
+            "conflict":conflict,
             "auto_upload":automatic.ok(),"uploading":is_uploading,
             "pending_upload":has_pending,"pending_action":action}));
     }
@@ -658,6 +661,34 @@ fn open_workspace(state: tauri::State<'_, State>) -> Result<(), String> {
     apps::open_directory(&directory).map_err(|error| error.to_string())
 }
 
+/// 删除任务：任务目录 + 工作副本 + 空目录清理（只在 workspace 根以下）。
+/// 已完成的任务才在界面上给出按钮，但这里不做门禁 —— 用户主动删除永远该被尊重。
+#[tauri::command]
+async fn delete_task(state: tauri::State<'_, State>, task_id: String) -> Result<Value, String> {
+    let root = state.root.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        session::remove_task(&root, &task_id).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|_| "删除任务失败".to_string())?
+}
+
+/// 冲突处理：`remote` 用线上版本覆盖本地，`local` 保留本地版本，任务仍是一条。
+#[tauri::command]
+async fn resolve_conflict(
+    state: tauri::State<'_, State>,
+    task_id: String,
+    choice: String,
+) -> Result<Value, String> {
+    let root = state.root.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        cloudfile_core::v2_edit::resolve_conflict(&root, &task_id, &choice)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|_| "处理冲突失败".to_string())?
+}
+
 #[tauri::command]
 async fn save_cloud(state: tauri::State<'_, State>, task_id: String) -> Result<Value, String> {
     let root = state.root.clone();
@@ -989,6 +1020,8 @@ fn run(autostart: bool) -> anyhow::Result<()> {
             trust_origin,
             trusted_origins,
             open_task,
+            delete_task,
+            resolve_conflict,
             save_cloud,
             recover_upload,
             begin_pairing,
