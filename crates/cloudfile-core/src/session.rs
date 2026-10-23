@@ -244,9 +244,16 @@ pub fn working_dir(root: &Path, id: &str) -> Result<PathBuf> {
         return Ok(private);
     }
     let copy: WorkingCopy = storage::read(&pointer)?;
-    if !copy.directory.is_absolute()
-        || copy.directory.file_name().and_then(|s| s.to_str()) != Some(id)
-    {
+    if !copy.directory.is_absolute() {
+        bail!("invalid working copy directory");
+    }
+    // 修改逻辑（2026-10-23）：新布局的目录是 `<workspace>/<view|edit>/<库短码>`，
+    // 最后一段不再是 task id —— 只认「绝对路径 + 在 workspace 之内」，
+    // 同时保留旧布局（`<workspace>/<task id>`）的合法形态。
+    let workspace = crate::settings::workspace_root(root);
+    let legacy = copy.directory.file_name().and_then(|s| s.to_str()) == Some(id);
+    let inside = copy.directory != workspace && copy.directory.starts_with(&workspace);
+    if !legacy && !inside {
         bail!("invalid working copy directory");
     }
     for part in copy.directory.ancestors() {
@@ -257,7 +264,91 @@ pub fn working_dir(root: &Path, id: &str) -> Result<PathBuf> {
     Ok(copy.directory)
 }
 
-/// Called under the task operation lock, before downloading a new task.
+/// 查看 / 编辑两个子树：资源管理器里一眼就能分清这份副本用来干什么。
+pub fn mode_subdir(mode: &str) -> &'static str {
+    if mode == "local-view" {
+        "view"
+    } else {
+        "edit"
+    }
+}
+
+/// 库短码：uuid 去掉横线后取前 16 位、按 8-8 排版（`c66005f6-36bc45e1`）。
+/// 64 bit 足够避碰，又比整串 uuid 短得多。
+pub fn library_short(repo_id: &str) -> String {
+    let hex: String = repo_id.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+    if hex.len() >= 16 {
+        format!("{}-{}", &hex[..8], &hex[8..16])
+    } else if hex.is_empty() {
+        "unknown".to_string()
+    } else {
+        hex
+    }
+}
+
+/// 同一库同一子树下，不同库内路径可能同名（`/A/x.docx` 与 `/B/x.docx`）。
+/// 后出现的那个加 `~<路径哈希前 8 位>`，保证两者的本地文件名稳定且互不覆盖。
+pub fn local_name(
+    root: &Path,
+    mode: &str,
+    repo_id: &str,
+    remote_path: &str,
+    base: &str,
+) -> Result<String> {
+    let subdir = mode_subdir(mode);
+    let taken = |name: &str| -> Result<bool> {
+        Ok(tasks(root)?.into_iter().any(|task| {
+            mode_subdir(&task.mode) == subdir
+                && task.repo_id == repo_id
+                && task.remote_path != remote_path
+                && task.file_name == name
+        }))
+    };
+    if !taken(base)? {
+        return Ok(base.to_string());
+    }
+    let digest = format!("{:x}", Sha256::digest(remote_path.as_bytes()));
+    let candidate = match base.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() => {
+            format!("{stem}~{}.{ext}", &digest[..8])
+        }
+        _ => format!("{base}~{}", &digest[..8]),
+    };
+    if !taken(&candidate)? {
+        return Ok(candidate);
+    }
+    Ok(format!("{candidate}~{}", &digest[..4]))
+}
+
+/// 新任务的目录：`<workspace>\<view|edit>\<库短码>`，文件名就是本地文件名。
+/// 目录固定、与 session 无关 —— 同一个文件重复打开落在同一个地方，用户找得到。
+pub fn prepare_task_dir(
+    root: &Path,
+    id: &str,
+    mode: &str,
+    repo_id: &str,
+    file_name: &str,
+) -> Result<PathBuf> {
+    filename(file_name)?;
+    let private = task_dir(root, id)?;
+    if private.join("working-copy.json").exists() || private.join("task.json").exists() {
+        return working_dir(root, id);
+    }
+    let directory = crate::settings::ensure_workspace(root)?
+        .join(mode_subdir(mode))
+        .join(library_short(repo_id));
+    storage::private_dir(&directory)?;
+    storage::write(
+        &private.join("working-copy.json"),
+        &WorkingCopy {
+            directory: directory.clone(),
+        },
+    )?;
+    Ok(directory)
+}
+
+/// 旧（配对设备 / v1）任务的目录：跟随 workspace 根，目录名就是 task id。
+/// 新任务一律走 [`prepare_task_dir`]；这个函数只为兼容既有 working-copy 指针保留。
 pub fn prepare_working_dir(root: &Path, id: &str) -> Result<PathBuf> {
     let private = task_dir(root, id)?;
     if private.join("working-copy.json").exists() || private.join("task.json").exists() {
@@ -345,7 +436,11 @@ pub fn remove_task(root: &Path, id: &str) -> Result<serde_json::Value> {
     if let Some(copy) = working.as_ref() {
         let mut current = copy.parent().map(Path::to_path_buf);
         while let Some(path) = current {
-            if path == workspace || !path.starts_with(&workspace) {
+            // 直接挂在 workspace 下的 `view` / `edit` 子树本身要留着，只清空库目录。
+            if path == workspace
+                || !path.starts_with(&workspace)
+                || path.parent() == Some(workspace.as_path())
+            {
                 break;
             }
             let empty = fs::read_dir(&path)
@@ -616,5 +711,77 @@ mod tests {
         assert!(tasks(&root).unwrap().is_empty());
         // workspace 根是用户自己的目录，绝不能被顺手删掉。
         assert!(workspace.exists());
+    }
+
+    const LAYOUT_REPO: &str = "c66005f6-36bc-45e1-bc8f-88bd1ec13ded";
+
+    fn layout_fixture(root: &Path, id: &str, mode: &str, remote: &str, name: &str) -> PathBuf {
+        crate::settings::update(root, |settings| {
+            settings.workspace_root = Some(root.join("workspace").to_string_lossy().into_owned())
+        })
+        .unwrap();
+        let working = prepare_task_dir(root, id, mode, LAYOUT_REPO, name).unwrap();
+        let task = Task {
+            device_id: None,
+            task_id: id.to_string(),
+            file_name: name.into(),
+            mode: mode.into(),
+            server: "http://127.0.0.1:6111".into(),
+            repo_id: LAYOUT_REPO.into(),
+            remote_path: remote.into(),
+            session_id: "session".into(),
+            baseline_file_id: "b".repeat(40),
+            baseline_digest: "d".repeat(64),
+            size: 1,
+        };
+        storage::write(&task_dir(root, id).unwrap().join("task.json"), &task).unwrap();
+        fs::write(working.join(name), b"x").unwrap();
+        working
+    }
+
+    #[test]
+    fn new_tasks_live_under_view_or_edit_with_the_library_code() {
+        let (_dir, root) = storage::test_root();
+        let workspace = root.join("workspace");
+        let code = library_short(LAYOUT_REPO);
+        assert_eq!(code, "c66005f6-36bc45e1");
+        let view = layout_fixture(&root, &"a".repeat(64), "local-view", "/a.docx", "a.docx");
+        assert_eq!(view, workspace.join("view").join(&code));
+        let edit = layout_fixture(&root, &"b".repeat(64), "optimistic-edit", "/a.docx", "a.docx");
+        assert_eq!(edit, workspace.join("edit").join(&code));
+        // 目录里不该出现任何 session / task id 的痕迹。
+        assert!(!view.to_string_lossy().contains(&"a".repeat(8)));
+    }
+
+    #[test]
+    fn same_name_in_two_paths_gets_a_stable_suffix() {
+        let (_dir, root) = storage::test_root();
+        crate::settings::update(&root, |settings| {
+            settings.workspace_root = Some(root.join("workspace").to_string_lossy().into_owned())
+        })
+        .unwrap();
+        let first = local_name(&root, "optimistic-edit", LAYOUT_REPO, "/A/x.docx", "x.docx").unwrap();
+        assert_eq!(first, "x.docx");
+        layout_fixture(&root, &"c".repeat(64), "optimistic-edit", "/A/x.docx", &first);
+        let second = local_name(&root, "optimistic-edit", LAYOUT_REPO, "/B/x.docx", "x.docx").unwrap();
+        assert!(second.starts_with("x~") && second.ends_with(".docx"), "{second}");
+        // 同一个库内路径重复问，答案必须稳定。
+        let again = local_name(&root, "optimistic-edit", LAYOUT_REPO, "/B/x.docx", "x.docx").unwrap();
+        assert_eq!(second, again);
+        // 换到查看子树互不影响。
+        let view = local_name(&root, "local-view", LAYOUT_REPO, "/B/x.docx", "x.docx").unwrap();
+        assert_eq!(view, "x.docx");
+    }
+
+    #[test]
+    fn removing_a_task_keeps_the_view_and_edit_subtrees() {
+        let (_dir, root) = storage::test_root();
+        let id = "d".repeat(64);
+        let working = layout_fixture(&root, &id, "local-view", "/a.docx", "a.docx");
+        let workspace = root.join("workspace");
+        remove_task(&root, &id).unwrap();
+        assert!(!working.exists());
+        assert!(workspace.join("view").exists(), "view 子树要留着");
+        assert!(!workspace.join("view").join(library_short(LAYOUT_REPO)).exists());
     }
 }

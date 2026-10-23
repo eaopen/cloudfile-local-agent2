@@ -276,8 +276,11 @@ pub fn open(root: &Path, uri: &str) -> Result<Task> {
         .filter(|s| !s.is_empty() && *s != ".")
         .ok_or_else(|| anyhow::anyhow!("文件名不可用"))?
         .to_string();
-    let dir_name = filename.replace(['/', char::from(92)], "_");
-    let working = session::prepare_working_dir(root, &id)?;
+    // 修改逻辑（2026-10-23）：本地目录固定成 <workspace>\<view|edit>\<库短码>，
+    // 与 session 无关 —— 同一个文件每次打开都落在同一处，用户能在资源管理器里找到。
+    let base_name = filename.replace(['/', char::from(92)], "_");
+    let dir_name = session::local_name(root, &mode, &repo_id, &remote, &base_name)?;
+    let working = session::prepare_task_dir(root, &id, &mode, &repo_id, &dir_name)?;
     let dest = working.join(&dir_name);
     if dest.exists() {
         bail!("工作副本已存在，不能覆盖")
