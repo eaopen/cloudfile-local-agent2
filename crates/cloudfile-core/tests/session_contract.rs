@@ -115,7 +115,8 @@ fn adding_origin_again_preserves_the_paired_service_deployment_path() {
 
 #[test]
 fn retired_v1_uri_never_claims_a_server_session() {
-    let (_dir, root) = storage::test_root();
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
     let uri = "cloudfile-open://v1/open?instance=https%3A%2F%2Fexample.com&session=11111111-1111-4111-8111-111111111111&ticket=not-v2";
     assert!(cloudfile_core::paired_session::open(&root, uri).is_err());
     assert!(session::tasks(&root).unwrap().is_empty());
