@@ -733,6 +733,7 @@ fn restart_app(app: tauri::AppHandle, state: tauri::State<'_, State>) -> Result<
     let mut command = std::process::Command::new(&binary);
     command
         .arg("--autostart")
+        .arg("--await-instance")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -1000,7 +1001,9 @@ fn main() {
         _ => {}
     }
     let autostart = args.iter().any(|value| value == "--autostart");
-    if let Err(error) = run(autostart) {
+    // 升级重启专用：老进程还在退出、桌面锁还握着，新实例要等一会儿而不是直接放弃。
+    let await_instance = args.iter().any(|value| value == "--await-instance");
+    if let Err(error) = run(autostart, await_instance) {
         eprintln!("CloudFile desktop: {error}");
     }
 }
@@ -1030,10 +1033,25 @@ fn self_test() -> i32 {
     i32::from(report["ok"] != json!(true))
 }
 
-fn run(autostart: bool) -> anyhow::Result<()> {
+fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
     let root = storage::root()?;
-    let _lock = match storage::lock(&root.join("desktop.lock")) {
+    let lock_path = root.join("desktop.lock");
+    let _lock = match storage::lock(&lock_path) {
         Ok(lock) => lock,
+        // 修改原因（2026-10-23）：升级后点「立即重启」时，新实例是被老进程拉起来的，
+        // 而老进程要等 `app.exit(0)` 走完才释放 desktop.lock。原来这里一失败就 return，
+        // 新实例直接消失 —— 用户看到的就是「点了重启没反应」。等待模式下最多等 10 秒。
+        Err(_) if await_instance => {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                match storage::lock(&lock_path) {
+                    Ok(lock) => break lock,
+                    Err(_) if std::time::Instant::now() < deadline => continue,
+                    Err(_) => return Ok(()),
+                }
+            }
+        }
         // A second launch only needs to raise the window the first one owns.
         Err(_) => return Ok(()),
     };
