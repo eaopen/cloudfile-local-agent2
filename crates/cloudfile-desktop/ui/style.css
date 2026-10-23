@@ -69,3 +69,11 @@ body.toast-body{background:transparent;display:block;overflow:hidden;padding:6px
 .task-source{font-size:11px;color:var(--muted);overflow-wrap:anywhere}.task-reference{font-size:11px;color:var(--warn);margin-top:4px;display:block}
 
 @media(max-width:780px){.help-columns{grid-template-columns:1fr;gap:12px}}
+
+
+/* 模态提示：检查更新、升级结果都走这里 —— 顶部横幅在长列表里会被滚出视野。 */
+.dialog-backdrop{position:fixed;inset:0;background:rgba(15,23,42,.42);display:flex;align-items:center;justify-content:center;z-index:60;padding:24px}
+.dialog-backdrop[hidden]{display:none}
+.dialog-card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px 22px;max-width:520px;width:100%;box-shadow:0 18px 48px rgba(15,23,42,.24)}
+.dialog-card h2{margin:0 0 8px;font-size:15px}
+.dialog-card p{margin:0;font-size:12.5px;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere}

@@ -32,10 +32,6 @@
     <p class="hint">退出会停止独占编辑续租。本地文件与待确认的提交会保留。</p>
     <div class="row"><button id="exit-cancel">继续运行</button><button id="exit-force" class="secondary">仍然退出</button></div>
   </div>
-  <div id="update-hint" class="banner" hidden>
-    <strong id="update-title"></strong><p id="update-notes"></p>
-    <div class="row"><button id="update-apply">下载并升级</button><button id="update-dismiss" class="secondary">稍后</button></div>
-  </div>
 
   <div id="view-tasks" class="page-view">
     <div class="counts" id="counts" aria-label="任务概况"></div>
@@ -102,5 +98,12 @@
 </main>
 <script src="task-ux.js"></script>
 <script src="app.js"></script>
+<div id="dialog" class="dialog-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="dialog-title">
+  <div class="dialog-card">
+    <h2 id="dialog-title"></h2>
+    <p id="dialog-body"></p>
+    <div class="row" id="dialog-actions"></div>
+  </div>
+</div>
 </body>
 </html>

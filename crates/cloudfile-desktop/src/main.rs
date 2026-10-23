@@ -697,6 +697,55 @@ async fn resolve_conflict(
     .map_err(|_| "处理冲突失败".to_string())?
 }
 
+/// 升级面板轮询用：当前运行版本、注册指向的版本（磁盘上已装的最新一份）、以及最近一次
+/// 升级的结果（native-host 在独立进程里跑的，只有 update-result.json 能告诉我们成败）。
+#[tauri::command]
+fn update_state(state: tauri::State<'_, State>) -> Result<Value, String> {
+    let active = hostreg::manifest_dir()
+        .ok()
+        .and_then(|dir| update::active_version(&dir, hostreg::HOST).ok().flatten());
+    let newer = active
+        .as_deref()
+        .map(|version| update::compare(version, cloudfile_core::VERSION).is_gt())
+        .unwrap_or(false);
+    Ok(json!({
+        "version": cloudfile_core::VERSION,
+        "active_version": active,
+        "newer": newer,
+        "result": native::load_update_result(&state.root),
+    }))
+}
+
+/// 升级完重启任务中心：拉起注册指向的那份桌面（新版本），再退出自己。
+/// 不重启的话，跑的还是旧构建 —— 用户会觉得「升级没生效」。
+#[tauri::command]
+fn restart_app(app: tauri::AppHandle, state: tauri::State<'_, State>) -> Result<Value, String> {
+    let dir = hostreg::manifest_dir().map_err(|error| error.to_string())?;
+    let version = update::active_version(&dir, hostreg::HOST)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "没有找到已安装的版本".to_string())?;
+    let binary = update::version_dir(&state.root, &version)
+        .map_err(|error| error.to_string())?
+        .join(update::Binary::Desktop.installed_name(std::env::consts::OS));
+    if !binary.is_file() {
+        return Err(format!("新版本目录里没有任务中心：{}", binary.display()));
+    }
+    let mut command = std::process::Command::new(&binary);
+    command
+        .arg("--autostart")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0000_0008);
+    }
+    command.spawn().map_err(|_| "无法启动新版本".to_string())?;
+    app.exit(0);
+    Ok(json!({"state": "restarting", "version": version}))
+}
+
 #[tauri::command]
 async fn save_cloud(state: tauri::State<'_, State>, task_id: String) -> Result<Value, String> {
     let root = state.root.clone();
@@ -1024,6 +1073,8 @@ fn run(autostart: bool) -> anyhow::Result<()> {
             autostart_set,
             check_update,
             run_update,
+            update_state,
+            restart_app,
             open_workspace,
             trust_origin,
             trusted_origins,

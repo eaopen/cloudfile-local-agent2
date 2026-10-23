@@ -339,6 +339,8 @@ pub fn check_update(root: &Path) -> Value {
     let mut value = json!({
         "update_source_set": false,
         "update_available": false,
+        // 界面要说清「当前是哪个版本」，否则「已是最新」看着像没回答。
+        "current_version": crate::VERSION,
         "update_source_insecure_allowed": policy.allow_insecure,
     });
     let Some(source) = config.update_source.clone() else {
