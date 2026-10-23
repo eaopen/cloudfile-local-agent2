@@ -95,10 +95,17 @@ fn summaries(root: &Path, uploading: &Mutex<HashSet<String>>) -> anyhow::Result<
         let has_lease = lease.ok().flatten().is_some()
             || cloudfile_core::v2_edit::has_checkout(root, &task.task_id);
         let closed = closed.unwrap_or(false);
-        // 云端已有新版本等待用户选择：必须出现在「待处理」，否则用户永远看不到这个决定。
-        let conflict = cloudfile_core::v2_edit::conflict(root, &task.task_id).is_some();
+        // 云端已有新版本、或本地有未上传的修改，都要用户选一次：必须出现在「待处理」，
+        // 否则用户永远看不到这个决定。
+        let conflict = cloudfile_core::v2_edit::conflict(root, &task.task_id);
+        let conflict_reason = conflict
+            .as_ref()
+            .and_then(|value| value["reason"].as_str())
+            .unwrap_or("remote-changed")
+            .to_string();
+        let has_conflict = conflict.is_some();
         // Three states the user can act on, in the order they matter.
-        let group = if conflict || needs_review || has_pending || (exclusive_mode && !closed && !has_lease) {
+        let group = if has_conflict || needs_review || has_pending || (exclusive_mode && !closed && !has_lease) {
             "needs-attention"
         } else if is_uploading || local_changed || (exclusive_mode && !closed) {
             "in-progress"
@@ -118,7 +125,8 @@ fn summaries(root: &Path, uploading: &Mutex<HashSet<String>>) -> anyhow::Result<
                 || cloudfile_core::v2_edit::has_checkout(root, &task.task_id),
             "checkout_closed":closed,
             "authorization_expires_at":cloudfile_core::v2_edit::ticket_expires_at(root, &task.task_id),
-            "conflict":conflict,
+            "conflict":has_conflict,
+            "conflict_reason":conflict_reason,
             "auto_upload":automatic.ok(),"uploading":is_uploading,
             "pending_upload":has_pending,"pending_action":action}));
     }

@@ -41,6 +41,9 @@ struct Conflict {
     digest: String,
     session_id: String,
     at: u64,
+    /// "remote-changed" | "local-dirty" | "both"：界面据此说清楚是哪种不一致。
+    #[serde(default)]
+    reason: String,
 }
 #[derive(Deserialize)]
 struct TicketClaims {
@@ -443,8 +446,14 @@ fn merge(root: &Path, mut task: Task, input: Merge<'_>) -> Result<Option<Task>> 
         guard: None,
     });
     state.ticket = ticket;
-    if mode != "local-view" && file_id == task.baseline_file_id {
-        // 线上没变：本地那份就是最新，丢弃这次下载内容，只换票据。
+    // 修改逻辑（2026-10-23）：本地改过但没上传时，重复点「本地编辑」不能再静默复用本地那份 ——
+    // 用户可能忘了自己有未上传的修改，所以要给一次明确选择（用本地已编辑的 / 用线上覆盖本地）。
+    let local_dirty = session::digest(&local)
+        .map(|digest| digest != task.baseline_digest)
+        .unwrap_or(true);
+    let remote_changed = file_id != task.baseline_file_id;
+    if mode != "local-view" && !remote_changed && !local_dirty {
+        // 线上没变、本地也没改：丢弃这次下载内容，只换票据。
         task.session_id = sid;
         storage::write(&dir.join("task.json"), &task)?;
         store(root, &task.task_id, &state)?;
@@ -477,6 +486,11 @@ fn merge(root: &Path, mut task: Task, input: Merge<'_>) -> Result<Option<Task>> 
     let conflict_path = working.join(format!("{}.cloudfile-conflict", task.file_name));
     let _ = fs::remove_file(&conflict_path);
     downloaded.persist(&conflict_path)?;
+    let reason = match (remote_changed, local_dirty) {
+        (true, true) => "both",
+        (false, true) => "local-dirty",
+        _ => "remote-changed",
+    };
     storage::write(
         &dir.join("conflict.json"),
         &Conflict {
@@ -485,6 +499,7 @@ fn merge(root: &Path, mut task: Task, input: Merge<'_>) -> Result<Option<Task>> 
             digest,
             session_id: sid.clone(),
             at: crate::now(),
+            reason: reason.to_string(),
         },
     )?;
     task.session_id = sid;
@@ -522,7 +537,14 @@ pub fn conflict(root: &Path, id: &str) -> Option<Value> {
     }
     storage::read::<Conflict>(&file)
         .ok()
-        .map(|value| json!({"file_id": value.file_id, "size": value.size, "at": value.at}))
+        .map(|value| {
+            json!({
+                "file_id": value.file_id,
+                "size": value.size,
+                "at": value.at,
+                "reason": if value.reason.is_empty() { "remote-changed" } else { value.reason.as_str() },
+            })
+        })
 }
 
 /// 用户在任务中心选定一份：`remote` 用线上覆盖本地，`local` 保留本地。
@@ -907,6 +929,7 @@ mod tests {
                 digest: "e".repeat(64),
                 session_id: "new".into(),
                 at: 1,
+                reason: "remote-changed".into(),
             },
         )
         .unwrap();

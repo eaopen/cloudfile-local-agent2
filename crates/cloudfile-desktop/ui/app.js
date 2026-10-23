@@ -539,14 +539,20 @@ function renderTask(task) {
   }
 
   if (task.conflict) {
-    // 同一文件再次「本地编辑」且云端已向前走：线上版本已旁挂成副本，等用户选一份。
+    // 同一文件再次「本地编辑」：云端向前走了，或本地还有没上传的修改。
+    // 两种情况的文案不同，但选择只有两个 —— 用哪一份，任务始终只有一条。
+    const CONFLICT_TEXT = {
+      'remote-changed': '云端已有新版本。请选择用线上版本覆盖本地，或保留本地版本。',
+      'local-dirty': '本地有未上传的修改。请选择继续用本地这份，或用线上版本覆盖本地（本地修改会丢弃）。',
+      both: '云端和本地都有变化。请选择用线上版本覆盖本地，或保留本地这份。',
+    };
     const warn = document.createElement('p');
     warn.className = 'upload-error';
-    warn.textContent = '云端已有新版本。请选择用线上版本覆盖本地，或保留本地版本（仍是一条任务）。';
+    warn.textContent = CONFLICT_TEXT[task.conflict_reason] || CONFLICT_TEXT['remote-changed'];
     info.append(warn);
     buttons.append(
       button('用线上覆盖本地', () => action(task, 'resolve_conflict', { choice: 'remote' })),
-      button('保留本地版本', () => action(task, 'resolve_conflict', { choice: 'local' }), {
+      button('保留本地这份', () => action(task, 'resolve_conflict', { choice: 'local' }), {
         secondary: true,
         disabled: working,
       }),
