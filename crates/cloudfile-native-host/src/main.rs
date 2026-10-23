@@ -384,7 +384,8 @@ fn run_update(root: &Path, host: &str, manifest: Option<PathBuf>) -> anyhow::Res
 }
 
 fn apply_update(root: &Path, host: &str, manifest: Option<PathBuf>) -> anyhow::Result<()> {
-    let (release, _, _) = fetch_verified_release(root, manifest.as_deref(), cloudfile_core::VERSION)?;
+    let (release, _, _) =
+        fetch_verified_release(root, manifest.as_deref(), cloudfile_core::VERSION)?;
     apply_release(host, &release)
 }
 
@@ -741,10 +742,7 @@ fn apply_release(host: &str, release: &update::Release) -> anyhow::Result<()> {
 
 /// 下载 + 暂存 + 健康检查，返回 (安装根, 暂存好的 host 路径)。**不碰注册** ——
 /// 全新安装这边没有旧注册可以接管，所以这一步必须能单独用。
-fn stage_release(
-    release: &update::Release,
-    install: &Path,
-) -> anyhow::Result<(PathBuf, PathBuf)> {
+fn stage_release(release: &update::Release, install: &Path) -> anyhow::Result<(PathBuf, PathBuf)> {
     let os = std::env::consts::OS;
     let mut files = Vec::new();
     for artifact in &release.artifacts {

@@ -199,12 +199,7 @@ pub fn open(root: &Path, uri: &str) -> Result<Task> {
         // 「原生读取失败」。401=票据被服务端拒（寿命上限/密钥不一致），403=当前无权限，
         // 404=路径或仓库不对 —— 三者处理方式完全不同。带上状态码与一小段服务端正文。
         let status = res.status();
-        let detail: String = res
-            .text()
-            .unwrap_or_default()
-            .chars()
-            .take(160)
-            .collect();
+        let detail: String = res.text().unwrap_or_default().chars().take(160).collect();
         bail!(
             "CloudFile 原生读取失败（HTTP {}）{}，请重新从网页发起",
             status.as_u16(),
@@ -426,7 +421,14 @@ struct Merge<'a> {
 }
 
 fn merge(root: &Path, mut task: Task, input: Merge<'_>) -> Result<Option<Task>> {
-    let Merge { ticket, sid, mode, file_id, size, res } = input;
+    let Merge {
+        ticket,
+        sid,
+        mode,
+        file_id,
+        size,
+        res,
+    } = input;
     let mode = mode.as_str();
     let dir = session::task_dir(root, &task.task_id)?;
     let working = match session::working_dir(root, &task.task_id) {
@@ -936,7 +938,11 @@ mod tests {
             },
         )
         .unwrap();
-        storage::write(&session::task_dir(root, id).unwrap().join("task.json"), &task).unwrap();
+        storage::write(
+            &session::task_dir(root, id).unwrap().join("task.json"),
+            &task,
+        )
+        .unwrap();
         (local, working)
     }
 

@@ -504,11 +504,7 @@ mod tests {
         assert!(!bare.contains(&"update".to_string()));
         session::trust(root, "https://example.com".into()).unwrap();
         let trusted = capabilities(root);
-        for expected in [
-            "open_workspace",
-            "query_local_file",
-            "query_local_folder",
-        ] {
+        for expected in ["open_workspace", "query_local_file", "query_local_folder"] {
             assert!(
                 trusted.contains(&expected.to_string()),
                 "{expected} missing"

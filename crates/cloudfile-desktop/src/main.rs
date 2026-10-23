@@ -105,7 +105,11 @@ fn summaries(root: &Path, uploading: &Mutex<HashSet<String>>) -> anyhow::Result<
             .to_string();
         let has_conflict = conflict.is_some();
         // Three states the user can act on, in the order they matter.
-        let group = if has_conflict || needs_review || has_pending || (exclusive_mode && !closed && !has_lease) {
+        let group = if has_conflict
+            || needs_review
+            || has_pending
+            || (exclusive_mode && !closed && !has_lease)
+        {
             "needs-attention"
         } else if is_uploading || local_changed || (exclusive_mode && !closed) {
             "in-progress"
