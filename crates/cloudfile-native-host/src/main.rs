@@ -578,6 +578,19 @@ fn resolve_source(
     Ok((source, policy, probes))
 }
 
+/// 某个**已完整安装**的版本目录里的 host 绝对路径。
+/// 注册必须指向它，而不是正在跑的引导体临时副本（那份旁边没有任务中心）。
+fn installed_host(install: &Path, version: &str) -> anyhow::Result<PathBuf> {
+    let dir = update::version_dir(install, version)?;
+    let host = dir.join(update::Binary::NativeHost.installed_name(std::env::consts::OS));
+    anyhow::ensure!(
+        host.is_file(),
+        "已安装版本目录里没有 native host：{}",
+        dir.display()
+    );
+    Ok(host)
+}
+
 /// 二进制：这台机器上还没有一份完整的同版本安装才暂存（`--install` 同时是修复命令）。
 /// 返回 (结论, 暂存好的 (版本, host 路径))。
 ///
@@ -605,15 +618,25 @@ fn stage_binaries(
     let advertised = update::parse_release(&update::fetch_manifest_for(policy, &source)?)?;
 
     // 这个版本已经完整地装在这台机器上：重跑安装等于修复注册与自启，二进制不动。
+    //
+    // 修改逻辑（2026-10-23）：原来这里只回 ("installed", None)，于是注册目标退到
+    // 「就地指正在跑的这份」——而跑的是引导体下载到安装根的临时副本，旁边没有
+    // cloudfile-desktop.exe，安装直接失败：
+    // 「安装根里没有 cloudfile-desktop.exe，无法就地注册；请用 --source 重新安装」。
+    // 实际现场是「二进制早就装好了、只差注册」，用户却被这句话锁死（再跑一次还是同一句）。
+    // 现在把**已装版本目录里的 host** 交给注册步骤，重跑安装即可修好注册与自启。
     if update::is_complete(install, &advertised.version) {
-        return Ok(("installed", None));
+        let host = installed_host(install, &advertised.version)?;
+        return Ok(("installed", Some((advertised.version, host))));
     }
     // 已经装着一个**更新的**版本（通道回退）：别用「安装」去降级。
     if let Some(active) = update::active_version(dir, host)? {
         if update::compare(&advertised.version, &active) == std::cmp::Ordering::Less
             && update::is_complete(install, &active)
         {
-            return Ok(("current", None));
+            // 同上：退回不回滚，但注册缺失时仍要能指到已装的那份。
+            let host = installed_host(install, &active)?;
+            return Ok(("current", Some((active, host))));
         }
     }
     // 同一份清单再取一次并完整验签。清单只有几十 KB、一台机器只跑一次安装，
