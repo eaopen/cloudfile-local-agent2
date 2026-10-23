@@ -192,7 +192,25 @@ pub fn open(root: &Path, uri: &str) -> Result<Task> {
         .bearer_auth(&state.ticket)
         .send()?;
     if !res.status().is_success() {
-        bail!("CloudFile 原生读取失败，请重新从网页发起")
+        // 修改原因（2026-10-23）：这句话原来不带状态码也不带服务端原因，线上只能看到
+        // 「原生读取失败」。401=票据被服务端拒（寿命上限/密钥不一致），403=当前无权限，
+        // 404=路径或仓库不对 —— 三者处理方式完全不同。带上状态码与一小段服务端正文。
+        let status = res.status();
+        let detail: String = res
+            .text()
+            .unwrap_or_default()
+            .chars()
+            .take(160)
+            .collect();
+        bail!(
+            "CloudFile 原生读取失败（HTTP {}）{}，请重新从网页发起",
+            status.as_u16(),
+            if detail.trim().is_empty() {
+                String::new()
+            } else {
+                format!("：{}", detail.trim())
+            }
+        )
     }
     let file_id = res
         .headers()
