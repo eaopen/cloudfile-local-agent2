@@ -1132,9 +1132,15 @@ mod tests {
         // 完整的同版本再装一次没有意义。
         assert!(stage(&root, "2.2.4", os, &files(b"new")).is_err());
 
-        // 旧构建暂存的目录里没有 WebView2Loader.dll：那不是可用的安装，重装要能就地补齐
+        // 旧构建暂存的目录里可能缺产物：那不是可用的安装，重装要能就地补齐
         // （不能整目录删掉 —— 正在跑的 host 可能就在里面）。
-        fs::remove_file(crate::webview2::loader_path(&dir)).unwrap();
+        // Windows 上典型缺的是 WebView2Loader.dll；别的平台没有这个依赖，
+        // 就删产物本身来制造同样的「不完整」。
+        #[cfg(windows)]
+        let missing = crate::webview2::loader_path(&dir);
+        #[cfg(not(windows))]
+        let missing = dir.join(Binary::Desktop.installed_name(os));
+        fs::remove_file(&missing).unwrap();
         assert!(!is_complete(&root, "2.2.4"));
         let again = stage(&root, "2.2.4", os, &files(b"newer")).unwrap();
         assert_eq!(again, dir, "就地修复不应该换目录");
