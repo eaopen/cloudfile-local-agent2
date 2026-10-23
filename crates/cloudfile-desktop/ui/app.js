@@ -921,7 +921,8 @@ function wire() {
         if (result.update_error) {
           dialog('检查更新失败', String(result.update_error), [['知道了']]);
         } else {
-          dialog('已是最新版本', `当前版本 ${result.current_version || ''} 已是最新。`.trim(), [['知道了']]);
+          const channel = result.latest_version ? `，通道最新也是 ${result.latest_version}` : '';
+          dialog('已是最新版本', `当前版本 ${result.current_version || ''}${channel}。`.trim(), [['知道了']]);
         }
         return;
       }

@@ -362,19 +362,24 @@ pub fn check_update(root: &Path) -> Value {
         Ok(bytes) => match update::parse_release(&bytes) {
             Ok(release) => {
                 let platform = update::platform_id(std::env::consts::OS, std::env::consts::ARCH);
+                // 修改逻辑（2026-10-23）：验签用「未安装」当基准，再把版本高低自己比一次。
+                // 修改原因：verify 把「清单版本不比本机新」当成错误抛，导致通道与本机同版本时
+                // 界面弹出「检查更新失败：release is not newer than the installed version」——
+                // 明明只是已是最新，却被报成失败。
                 match update::verify(
                     policy,
                     &release,
                     &source,
-                    crate::VERSION,
+                    update::NO_INSTALLED_VERSION,
                     crate::now(),
                     &platform,
                     &public_key,
                 ) {
                     Ok(()) => {
-                        value["update_available"] = json!(true);
                         value["latest_version"] = json!(release.version);
                         value["latest_notes"] = json!(release.notes);
+                        value["update_available"] =
+                            json!(update::compare(&release.version, crate::VERSION).is_gt());
                     }
                     Err(error) => value["update_error"] = json!(error.to_string()),
                 }
