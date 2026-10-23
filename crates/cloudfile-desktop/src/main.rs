@@ -133,7 +133,10 @@ fn summaries(root: &Path, uploading: &Mutex<HashSet<String>>) -> anyhow::Result<
     let count = |group: &str| tasks.iter().filter(|task| task["group"] == group).count();
     Ok(
         json!({"ok":true,"cdc_enabled":cloudfile_core::cdc::enabled(),"tasks":tasks,
-        "counts":{"in_progress":count("in-progress"),"needs_attention":count("needs-attention"),"done":count("done")}}),
+        // 修改原因（2026-10-23）：分组 key 必须和界面用的一致（kebab-case）。原来这里发的是
+        // in_progress / needs_attention，而 app.js 按 counts['in-progress'] 取，取到 undefined
+        // → 顶部「进行中」永远是 0，即使列表里就有进行中的任务。
+        "counts":{"in-progress":count("in-progress"),"needs-attention":count("needs-attention"),"done":count("done")}}),
     )
 }
 
@@ -288,7 +291,7 @@ async fn float_sync(
         .map_err(|_| "无法读取任务".to_string())?;
     let config = settings::load(&state.root).map_err(|error| error.to_string())?;
     let total = summary["tasks"].as_array().map(Vec::len).unwrap_or(0);
-    let attention = summary["counts"]["needs_attention"].as_u64().unwrap_or(0);
+    let attention = summary["counts"]["needs-attention"].as_u64().unwrap_or(0);
     let Some(window) = app.get_webview_window("float") else {
         return Ok(json!({"visible": false}));
     };
