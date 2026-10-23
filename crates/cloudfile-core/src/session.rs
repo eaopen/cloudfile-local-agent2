@@ -403,7 +403,12 @@ pub fn tasks(root: &Path) -> Result<Vec<Task>> {
 /// 现在按 **仓库 + 库内路径 + 模式族** 找回已有任务再做合并。
 /// 目录枚举顺序不可依赖（编辑子树里可能同时有历史的 `local-edit` 与 `optimistic-edit`），
 /// 命中多条时按 task_id 排序取第一条，保证同一输入永远得到同一个结果。
-pub fn find_task(root: &Path, repo_id: &str, remote_path: &str, mode: &str) -> Result<Option<Task>> {
+pub fn find_task(
+    root: &Path,
+    repo_id: &str,
+    remote_path: &str,
+    mode: &str,
+) -> Result<Option<Task>> {
     let view = mode == "local-view";
     let mut hits: Vec<Task> = tasks(root)?
         .into_iter()
@@ -682,7 +687,10 @@ mod tests {
         task_fixture(&root, &other, "local-view", "/b.docx");
         let repo = "11111111-1111-4111-8111-111111111111";
         assert_eq!(
-            find_task(&root, repo, "/a.docx", "local-view").unwrap().unwrap().task_id,
+            find_task(&root, repo, "/a.docx", "local-view")
+                .unwrap()
+                .unwrap()
+                .task_id,
             view
         );
         assert_eq!(
@@ -747,7 +755,13 @@ mod tests {
         assert_eq!(code, "c66005f6-36bc45e1");
         let view = layout_fixture(&root, &"a".repeat(64), "local-view", "/a.docx", "a.docx");
         assert_eq!(view, workspace.join("view").join(&code));
-        let edit = layout_fixture(&root, &"b".repeat(64), "optimistic-edit", "/a.docx", "a.docx");
+        let edit = layout_fixture(
+            &root,
+            &"b".repeat(64),
+            "optimistic-edit",
+            "/a.docx",
+            "a.docx",
+        );
         assert_eq!(edit, workspace.join("edit").join(&code));
         // 目录里不该出现任何 session / task id 的痕迹。
         assert!(!view.to_string_lossy().contains(&"a".repeat(8)));
@@ -760,13 +774,25 @@ mod tests {
             settings.workspace_root = Some(root.join("workspace").to_string_lossy().into_owned())
         })
         .unwrap();
-        let first = local_name(&root, "optimistic-edit", LAYOUT_REPO, "/A/x.docx", "x.docx").unwrap();
+        let first =
+            local_name(&root, "optimistic-edit", LAYOUT_REPO, "/A/x.docx", "x.docx").unwrap();
         assert_eq!(first, "x.docx");
-        layout_fixture(&root, &"c".repeat(64), "optimistic-edit", "/A/x.docx", &first);
-        let second = local_name(&root, "optimistic-edit", LAYOUT_REPO, "/B/x.docx", "x.docx").unwrap();
-        assert!(second.starts_with("x~") && second.ends_with(".docx"), "{second}");
+        layout_fixture(
+            &root,
+            &"c".repeat(64),
+            "optimistic-edit",
+            "/A/x.docx",
+            &first,
+        );
+        let second =
+            local_name(&root, "optimistic-edit", LAYOUT_REPO, "/B/x.docx", "x.docx").unwrap();
+        assert!(
+            second.starts_with("x~") && second.ends_with(".docx"),
+            "{second}"
+        );
         // 同一个库内路径重复问，答案必须稳定。
-        let again = local_name(&root, "optimistic-edit", LAYOUT_REPO, "/B/x.docx", "x.docx").unwrap();
+        let again =
+            local_name(&root, "optimistic-edit", LAYOUT_REPO, "/B/x.docx", "x.docx").unwrap();
         assert_eq!(second, again);
         // 换到查看子树互不影响。
         let view = local_name(&root, "local-view", LAYOUT_REPO, "/B/x.docx", "x.docx").unwrap();
@@ -782,6 +808,9 @@ mod tests {
         remove_task(&root, &id).unwrap();
         assert!(!working.exists());
         assert!(workspace.join("view").exists(), "view 子树要留着");
-        assert!(!workspace.join("view").join(library_short(LAYOUT_REPO)).exists());
+        assert!(!workspace
+            .join("view")
+            .join(library_short(LAYOUT_REPO))
+            .exists());
     }
 }

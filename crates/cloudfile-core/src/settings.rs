@@ -311,13 +311,12 @@ mod tests {
         // 没配过 → 用新的默认值。
         assert!(should_reset_workspace(None, &defaults, desired));
         // 任何一个历史默认值 → 换成新的（否则工作副本永远留在系统盘）。
-        for legacy in [
-            r"C:\Users\x\CloudFile-Dev\Workspace",
-            r"C:\Users\x\CloudFileAgent\workspace",
-            r"D:\CloudFileAgent2\workspace",
-        ] {
+        // 历史值直接取自 legacy_workspace_defaults：字面反斜杠串在非 Windows 上
+        // 与 `Path::join` 拼出来的不是同一个串，那边会把这条断言打成假失败。
+        for legacy in &defaults[..3] {
+            let legacy = legacy.to_string_lossy();
             assert!(
-                should_reset_workspace(Some(legacy), &defaults, desired),
+                should_reset_workspace(Some(&legacy), &defaults, desired),
                 "{legacy} 应当被改写"
             );
         }

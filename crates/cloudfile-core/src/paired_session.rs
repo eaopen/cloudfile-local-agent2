@@ -17,6 +17,7 @@ mod tests {
     #[test]
     fn v1_uri_is_not_a_legacy_server_session_fallback() {
         assert!(!crate::v2_edit::is_open_uri(
-            "cloudfile-open://v1/open?instance=https%3A%2F%2Fexample.com&session=x&ticket=y"));
+            "cloudfile-open://v1/open?instance=https%3A%2F%2Fexample.com&session=x&ticket=y"
+        ));
     }
 }

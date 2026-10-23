@@ -43,6 +43,10 @@ pub fn root() -> Result<PathBuf> {
 /// `tests/cli_contract.rs` 会把 `HOME`/`LOCALAPPDATA` 重定向到临时目录来隔离注册、配置与
 /// 版本目录；如果这时还去探 D 盘，测试就会写进开发机真实的 `D:\CloudFileAgent` ——
 /// 那是最难查的一类污染（测试「通过」了，但真机上的配置被改掉了）。
+///
+/// 只有 Windows 的 `default_root()` 读它：非 Windows 分支没有 D 盘可探，留着常量会被
+/// `-D warnings` 的 dead_code 判红。
+#[cfg(windows)]
 const NO_DRIVE_PREFERENCE: &str = "CLOUDFILE_AGENT2_NO_DRIVE_PREFERENCE";
 
 /// 默认安装根：能落 D 盘就落 D 盘，否则回落到 `%LOCALAPPDATA%`。
@@ -63,7 +67,8 @@ fn default_root() -> Result<PathBuf> {
     };
     #[cfg(windows)]
     let chosen = {
-        let opted_out = std::env::var_os(NO_DRIVE_PREFERENCE).is_some_and(|value| !value.is_empty());
+        let opted_out =
+            std::env::var_os(NO_DRIVE_PREFERENCE).is_some_and(|value| !value.is_empty());
         if opted_out {
             existing
         } else {
