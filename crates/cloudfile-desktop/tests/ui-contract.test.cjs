@@ -26,7 +26,9 @@ const declaredIds = new Set(
   [...html.matchAll(/\bid\s*=\s*"([^"]+)"/g)].map(match => match[1])
 );
 
-function fakeApp(serviceList) {
+function fakeApp(serviceList, options = {}) {
+  const calls = [];
+  const confirmations = [];
   const elements = new Map(
     [...declaredIds].map(id => [id, new FakeElement()])
   );
@@ -46,8 +48,24 @@ function fakeApp(serviceList) {
     document,
     window: {
       __TAURI__: {
-        core: { invoke: async name => {
+        core: { invoke: async (name, args) => {
+          calls.push({ name, args });
           if (name === 'service_status') return serviceList;
+          if (name === 'setup_state') return {
+            host: 'com.cloudfile.current_agent',
+            host_foreign: Boolean(options.hostForeign),
+            version: '2.2.0-alpha.2', install_root: '/test/bin',
+            trusted_count: 0, trusted_ready: false,
+            workspace_exists: false, workspace_root: '/test/workspace',
+            host_registered: !options.hostForeign,
+            autostart_enabled: false,
+            extension_version: null, extension_dir: '/test/extension',
+            extension_id: 'abcdefghijklmnopabcdefghijklmnop',
+            setup_completed: false,
+          };
+          if (name === 'register_host') return {
+            backed_up: Boolean(options.hostForeign), previous_manifest_path: '/test/previous.json'
+          };
           if (name === 'settings_get') return {
             version: '2.2.0-alpha.2', install_root: '/test/bin',
             autostart_enabled: false, autostart_mechanism: null,
@@ -62,13 +80,17 @@ function fakeApp(serviceList) {
         event: { listen() {} },
       },
       CloudFileTaskUX: {},
+      confirm: (message) => {
+        confirmations.push(message);
+        return Boolean(options.confirmTakeover);
+      },
     },
     setInterval() {},
   };
   vm.createContext(ctx);
   // Exercise the actual shipped JS, excluding only its asynchronous startup.
   vm.runInContext(script.replace(/\nstart\(\);\s*$/, '\n'), ctx, { filename: 'app.js' });
-  return { ctx, elements };
+  return { ctx, elements, calls, confirmations };
 }
 
 test('all literal JS element IDs and navigation views exist in the HTML', () => {
@@ -128,4 +150,37 @@ test('setup status renders first-run steps without registering an external servi
   assert.equal(elements.get('setup-steps').children.length, 6);
   assert.equal(elements.get('setup-ext-dir').value, '/test/extension');
   assert.match(elements.get('setup-steps').children[1].children[1].children[1].textContent, /尚未添加服务/);
+});
+
+
+test('Host repair never takes over a foreign controller without explicit consent', async () => {
+  const { ctx, elements, calls, confirmations } = fakeApp([], { hostForeign: true });
+  vm.runInContext('wire()', ctx);
+  await elements.get('host-register').onclick();
+  assert.equal(confirmations.length, 1);
+  assert.match(confirmations[0], /旧|\.NET/);
+  assert.equal(calls.some(call => call.name === 'register_host'), false);
+  assert.match(elements.get('message').textContent, /已取消/);
+});
+
+test('Host takeover passes true only after the user confirms an existing foreign controller', async () => {
+  const { ctx, elements, calls, confirmations } = fakeApp(
+    [], { hostForeign: true, confirmTakeover: true }
+  );
+  vm.runInContext('wire()', ctx);
+  await elements.get('host-register').onclick();
+  assert.equal(confirmations.length, 1);
+  const registrations = calls.filter(call => call.name === 'register_host');
+  assert.equal(registrations.length, 1);
+  assert.equal(registrations[0].args.takeover, true);
+});
+
+test('ordinary Host re-registration never needs a takeover confirmation', async () => {
+  const { ctx, elements, calls, confirmations } = fakeApp([]);
+  vm.runInContext('wire()', ctx);
+  await elements.get('host-register').onclick();
+  assert.equal(confirmations.length, 0);
+  const registrations = calls.filter(call => call.name === 'register_host');
+  assert.equal(registrations.length, 1);
+  assert.equal(registrations[0].args.takeover, false);
 });
