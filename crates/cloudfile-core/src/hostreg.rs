@@ -146,7 +146,7 @@ pub fn default_manifest_dir(
         "macos" => Ok(home.join("Library/Application Support/Google/Chrome/NativeMessagingHosts")),
         "windows" => {
             let local = local_app_data.context("LOCALAPPDATA is unavailable")?;
-            Ok(local.join("CloudFileAgent22").join("native-host"))
+            Ok(local.join("CloudFileAgent").join("native-host"))
         }
         _ => bail!("native host registration supports Windows and macOS only"),
     }
@@ -155,7 +155,20 @@ pub fn default_manifest_dir(
 pub fn manifest_dir() -> Result<PathBuf> {
     let home = dirs::home_dir().context("home directory unavailable")?;
     let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
-    default_manifest_dir(std::env::consts::OS, &home, local.as_deref())
+    let current = default_manifest_dir(std::env::consts::OS, &home, local.as_deref())?;
+    // 老机器（升级上来的）注册目录还叫 `CloudFileAgent22`：它还在就继续用它 ——
+    // 否则新目录是空的，`state()` 会报「未注册」，连回退与升级接管都找不到原注册。
+    // 重新 `--install` / `--register-host` 一次就会迁到新目录。
+    #[cfg(windows)]
+    {
+        if let Some(local) = &local {
+            let legacy = local.join("CloudFileAgent22").join("native-host");
+            if !current.is_dir() && legacy.is_dir() {
+                return Ok(legacy);
+            }
+        }
+    }
+    Ok(current)
 }
 
 pub fn manifest_path(dir: &Path, host: &str) -> PathBuf {
@@ -413,7 +426,7 @@ mod tests {
         );
         assert_eq!(
             default_manifest_dir("windows", home, Some(local)).unwrap(),
-            local.join("CloudFileAgent22/native-host")
+            local.join("CloudFileAgent/native-host")
         );
         assert!(default_manifest_dir("linux", home, Some(local)).is_err());
         assert!(default_manifest_dir("windows", home, None).is_err());

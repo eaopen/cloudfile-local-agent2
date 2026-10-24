@@ -107,20 +107,47 @@ pub fn path(root: &Path) -> PathBuf {
 /// Persist the development workspace separately from credentials and journals.
 /// Existing task locations are recorded per task and never moved here.
 pub fn initialize_workspace(root: &Path, home: &Path) -> Result<()> {
-    if load(root)?.workspace_root.is_none() {
-        let directory = home.join("CloudFile-Dev").join("Workspace");
+    // 以前当默认值写进过设置的那几个位置：写进去以后 `workspace::resolve` 就走「显式配置
+    // 优先」，盘符偏好永远轮不到 —— 工作副本会整片留在系统盘。所以只要设置里的值**恰好**
+    // 等于其中某一个，就改写成新的默认值（能落 D 盘就落 D 盘）。用户自己选过的目录不动。
+    let defaults = legacy_workspace_defaults(home);
+    let desired = crate::workspace::initial_root(root, home);
+    let current = load(root)?.workspace_root;
+    if should_reset_workspace(current.as_deref(), &defaults, &desired) {
         update(root, |settings| {
-            if settings.workspace_root.is_none() {
-                settings.workspace_root = Some(directory.to_string_lossy().into_owned());
-            }
+            settings.workspace_root = Some(desired.to_string_lossy().into_owned());
         })?;
     }
     Ok(())
 }
 
-pub fn default_workspace() -> Result<PathBuf> {
+/// 历史上作为「默认值」出现过的所有位置（含当前默认，这样切到新默认时也能纠正）。
+fn legacy_workspace_defaults(home: &Path) -> Vec<PathBuf> {
+    vec![
+        home.join("CloudFile-Dev").join("Workspace"), // 1.0 与早期 2.2
+        home.join("CloudFileAgent").join("workspace"), // 没有 D 盘时的当前默认
+        PathBuf::from("D:\\CloudFileAgent2\\workspace"), // 过渡版本
+        PathBuf::from("D:\\CloudFileAgent\\workspace"), // 当前首选
+    ]
+}
+
+/// 设置里的工作目录该不该改写成新的默认值。
+///
+/// 只认两种情况：没配过，或者配的**恰好**是某个历史默认值。用户自己选过的目录一律不动 ——
+/// 那是他的选择，不是我们的默认。
+fn should_reset_workspace(current: Option<&str>, defaults: &[PathBuf], desired: &Path) -> bool {
+    match current {
+        None => true,
+        Some(value) => {
+            let value = Path::new(value);
+            value != desired && defaults.iter().any(|default| default.as_path() == value)
+        }
+    }
+}
+
+pub fn default_workspace(root: &Path) -> Result<PathBuf> {
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("home directory unavailable"))?;
-    Ok(home.join("CloudFile-Dev").join("Workspace"))
+    Ok(crate::workspace::initial_root(root, &home))
 }
 
 /// Only create the user-visible directory when it is needed. Do not chmod an
@@ -262,7 +289,7 @@ mod tests {
         let (_dir, root) = tmp();
         let home = root.join("home");
         initialize_workspace(&root, &home).unwrap();
-        let expected = home.join("CloudFile-Dev/Workspace");
+        let expected = home.join("CloudFileAgent/workspace");
         assert_eq!(workspace_root(&root), expected);
         assert!(!expected.exists());
         assert_eq!(ensure_workspace(&root).unwrap(), expected);
@@ -274,6 +301,37 @@ mod tests {
         .unwrap();
         initialize_workspace(&root, &home).unwrap();
         assert_eq!(ensure_workspace(&root).unwrap(), custom);
+    }
+
+    #[test]
+    fn only_a_known_default_workspace_is_rewritten() {
+        let home = Path::new(r"C:\Users\x");
+        let defaults = legacy_workspace_defaults(home);
+        let desired = Path::new(r"D:\CloudFileAgent\workspace");
+        // 没配过 → 用新的默认值。
+        assert!(should_reset_workspace(None, &defaults, desired));
+        // 任何一个历史默认值 → 换成新的（否则工作副本永远留在系统盘）。
+        // 历史值直接取自 legacy_workspace_defaults：字面反斜杠串在非 Windows 上
+        // 与 `Path::join` 拼出来的不是同一个串，那边会把这条断言打成假失败。
+        for legacy in &defaults[..3] {
+            let legacy = legacy.to_string_lossy();
+            assert!(
+                should_reset_workspace(Some(&legacy), &defaults, desired),
+                "{legacy} 应当被改写"
+            );
+        }
+        // 用户自己选的目录 → 一个字都不动。
+        assert!(!should_reset_workspace(
+            Some(r"E:\Projects\CloudFile"),
+            &defaults,
+            desired
+        ));
+        // 已经是目标值 → 不做无意义的写入（没有 D 盘时就是这个情况）。
+        assert!(!should_reset_workspace(
+            Some(r"D:\CloudFileAgent\workspace"),
+            &defaults,
+            desired
+        ));
     }
 
     #[test]

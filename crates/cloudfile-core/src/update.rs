@@ -36,6 +36,14 @@ pub const MANIFEST_FILE: &str = "cloudfile-agent2-update.json";
 /// 所以 IP 源必须有自己的一份清单（同一批产物、不同的 URL 前缀、各自签名）。
 pub const MANIFEST_FILE_IP: &str = "cloudfile-agent2-update.ip.json";
 
+/// 「这台机器上还没有任何版本」的基准版本号，比任何合法版本都小。
+///
+/// 用在**全新安装**上：那时清单里的版本正好等于引导体自己的版本，拿 `VERSION`
+/// 当基准会把这份清单判成「不比当前新」而拒掉，机器就被装成空的
+/// （2026-10-19 现场就是：空白机器装完只有注册，没有任务中心）。
+/// 其余校验（平台、协议、有效期、签名、同源）一条不少。
+pub const NO_INSTALLED_VERSION: &str = "0.0.0";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Binary {
     NativeHost,
@@ -56,15 +64,23 @@ impl Binary {
             _ => bail!("unknown release artifact kind"),
         }
     }
-    pub fn file_name(self, os: &str, version: &str) -> String {
+    /// 安装到**版本目录里**的文件名。**不带版本后缀**：版本已经在目录名上
+    /// （`bin/<版本>/`），而这套程序处处靠「我和它在同一个目录」互相找 ——
+    /// 桌面进程找 host、host 找桌面进程、自检、自启、邮箱文件都在同一个目录里。
+    /// 名字里再带一遍版本，这些查找就全部落空（2026-10-19 之前就是这个状态：
+    /// 版本目录里的文件叫 `cloudfile-desktop-2.2.3.exe`，而所有「旁边的桌面进程」
+    /// 都按 `cloudfile-desktop.exe` 找，于是装出来的机器永远找不到任务中心）。
+    /// 通道上的产物名带版本（`cloudfile-desktop-<v>.exe`），那是给人看的；
+    /// 落到盘上以后用稳定名。
+    pub fn installed_name(self, os: &str) -> String {
         let base = match self {
-            Binary::NativeHost => format!("cloudfile-native-host-{version}"),
-            Binary::Desktop => format!("cloudfile-desktop-{version}"),
+            Binary::NativeHost => "cloudfile-native-host",
+            Binary::Desktop => "cloudfile-desktop",
         };
         if os == "windows" {
             format!("{base}.exe")
         } else {
-            base
+            base.to_string()
         }
     }
 }
@@ -543,26 +559,70 @@ pub fn active_version(dir: &Path, host: &str) -> Result<Option<String>> {
 /// Writes a staging directory next to the final one, then renames it into
 /// place. A crash leaves either the old state or a `.staging` leftover, never
 /// a half installed version that the manifest could point at.
+///
+/// A version directory that already exists but is **incomplete** (an older build
+/// staged it without the WebView2 loader, or files were removed) is filled in
+/// place instead: the running host usually lives in that very directory, and
+/// Windows refuses to delete or overwrite a running executable — while the
+/// missing piece is exactly the file nobody is holding.
 pub fn stage(root: &Path, version: &str, os: &str, files: &[(Binary, Vec<u8>)]) -> Result<PathBuf> {
     if !valid_version(version) {
         bail!("invalid version directory");
     }
     let target = version_dir(root, version)?;
     if target.exists() {
-        bail!("that version is already installed");
+        if dir_is_complete(&target) {
+            bail!("that version is already installed");
+        }
+        fill(&target, os, files)?;
+        return Ok(target);
     }
     let staging = bin_dir(root).join(format!(".staging-{version}-{}", uuid::Uuid::new_v4()));
     storage::private_dir(&staging)?;
+    fill(&staging, os, files)?;
+    fs::rename(&staging, &target)?;
+    Ok(target)
+}
+
+/// Writes the release artifacts into `dir`, leaving files whose bytes already
+/// match untouched (see `stage`: the repair path may be writing into a
+/// directory that a running process is holding).
+fn fill(dir: &Path, os: &str, files: &[(Binary, Vec<u8>)]) -> Result<()> {
     for (kind, bytes) in files {
         if bytes.is_empty() {
             bail!("refusing to stage an empty binary");
         }
-        let path = staging.join(kind.file_name(os, version));
+        let path = dir.join(kind.installed_name(os));
+        if fs::read(&path).is_ok_and(|current| &current == bytes) {
+            continue;
+        }
         storage::write_bytes(&path, bytes)?;
         set_executable(&path)?;
     }
-    fs::rename(&staging, &target)?;
-    Ok(target)
+    if files.iter().any(|(kind, _)| *kind == Binary::Desktop) {
+        // 桌面端在 GNU 工具链下**必须**有 `WebView2Loader.dll` 才能启动：没有它，
+        // 紧随其后的健康检查连 `--version` 都跑不出来（Windows 直接弹「找不到
+        // WebView2Loader.dll」），更新就永远卡在这一步。见 `crate::webview2`。
+        crate::webview2::ensure(dir)?;
+    }
+    Ok(())
+}
+
+/// 这个目录是不是一份**能用的**安装：host、桌面进程、以及（Windows 上）
+/// WebView2 的加载器都在。缺一个都算没装好 —— 修本地安装与「要不要重新装」
+/// 都以这个为准，而不是拿「版本号是否等于当前构建」猜。
+pub fn dir_is_complete(dir: &Path) -> bool {
+    let os = std::env::consts::OS;
+    dir.join(Binary::NativeHost.installed_name(os)).is_file()
+        && dir.join(Binary::Desktop.installed_name(os)).is_file()
+        && crate::webview2::present(dir)
+}
+
+/// `bin/<version>` 里那份安装是否完整。
+pub fn is_complete(root: &Path, version: &str) -> bool {
+    version_dir(root, version)
+        .map(|dir| dir_is_complete(&dir))
+        .unwrap_or(false)
 }
 
 fn set_executable(path: &Path) -> Result<()> {
@@ -581,11 +641,14 @@ fn set_executable(path: &Path) -> Result<()> {
 pub fn activate(root: &Path, dir: &Path, host: &str, version: &str) -> Result<PathBuf> {
     let directory = version_dir(root, version)?;
     let os = std::env::consts::OS;
-    let host_binary = directory.join(Binary::NativeHost.file_name(os, version));
-    let desktop_binary = directory.join(Binary::Desktop.file_name(os, version));
+    let host_binary = directory.join(Binary::NativeHost.installed_name(os));
+    let desktop_binary = directory.join(Binary::Desktop.installed_name(os));
     if !host_binary.is_file() || !desktop_binary.is_file() {
         bail!("staged version is incomplete; activation refused");
     }
+    // 兜住「这个版本目录是旧构建暂存的、里面没有 WebView2Loader.dll」（例如回退到旧版本）：
+    // 激活以后 Chrome 与登录项都会直接拉起这个 exe，缺一个 DLL 就整台机器用不了。
+    crate::webview2::ensure(&directory)?;
     let current = hostreg::state(dir, host, None)?;
     let extension_id = current
         .extension_id
@@ -678,6 +741,23 @@ pub fn parse_component(bytes: &[u8]) -> Result<(String, u32, u32)> {
 mod tests {
     use super::*;
     use p256::ecdsa::{signature::Signer, SigningKey};
+
+    /// 版本目录里必须带着桌面端的加载器。
+    /// 非 Windows 上没有这个依赖（`webview2::ensure` 是空操作），断言自动跳过。
+    fn assert_loader_present(dir: &std::path::Path) {
+        #[cfg(windows)]
+        {
+            let path = crate::webview2::loader_path(dir);
+            assert!(
+                path.is_file(),
+                "{} 里必须带着 {}",
+                dir.display(),
+                crate::webview2::LOADER_FILE
+            );
+        }
+        #[cfg(not(windows))]
+        let _ = dir;
+    }
 
     #[test]
     fn the_source_policy_accepts_plain_http_but_widens_nothing_else() {
@@ -1021,6 +1101,58 @@ mod tests {
     }
 
     #[test]
+    fn installed_file_names_are_stable_and_the_version_lives_in_the_directory() {
+        // 版本号只在目录名上（`bin/<版本>/`）。文件一律用稳定名 —— 桌面进程、host、
+        // 自检、自启、邮箱都靠「同一个目录里的这个名字」互相找。
+        assert_eq!(
+            Binary::NativeHost.installed_name("windows"),
+            "cloudfile-native-host.exe"
+        );
+        assert_eq!(
+            Binary::Desktop.installed_name("windows"),
+            "cloudfile-desktop.exe"
+        );
+        assert_eq!(Binary::Desktop.installed_name("macos"), "cloudfile-desktop");
+    }
+
+    #[test]
+    fn an_incomplete_version_directory_is_repaired_in_place() {
+        let (_dir, base) = crate::storage::test_root();
+        let root = base.join("install");
+        let os = std::env::consts::OS;
+        let files = |body: &[u8]| {
+            vec![
+                (Binary::NativeHost, body.to_vec()),
+                (Binary::Desktop, body.to_vec()),
+            ]
+        };
+
+        let dir = stage(&root, "2.2.4", os, &files(b"new")).unwrap();
+        assert!(is_complete(&root, "2.2.4"));
+        // 完整的同版本再装一次没有意义。
+        assert!(stage(&root, "2.2.4", os, &files(b"new")).is_err());
+
+        // 旧构建暂存的目录里可能缺产物：那不是可用的安装，重装要能就地补齐
+        // （不能整目录删掉 —— 正在跑的 host 可能就在里面）。
+        // Windows 上典型缺的是 WebView2Loader.dll；别的平台没有这个依赖，
+        // 就删产物本身来制造同样的「不完整」。
+        #[cfg(windows)]
+        let missing = crate::webview2::loader_path(&dir);
+        #[cfg(not(windows))]
+        let missing = dir.join(Binary::Desktop.installed_name(os));
+        fs::remove_file(&missing).unwrap();
+        assert!(!is_complete(&root, "2.2.4"));
+        let again = stage(&root, "2.2.4", os, &files(b"newer")).unwrap();
+        assert_eq!(again, dir, "就地修复不应该换目录");
+        assert!(is_complete(&root, "2.2.4"));
+        assert_eq!(
+            fs::read(dir.join(Binary::Desktop.installed_name(os))).unwrap(),
+            b"newer",
+            "补齐时产物本身也要更新到这次下载的字节"
+        );
+    }
+
+    #[test]
     fn staging_activation_and_prune_keep_a_revertible_history() {
         let (_dir, base) = crate::storage::test_root();
         let root = base.join("install");
@@ -1029,8 +1161,8 @@ mod tests {
         let id = "abcdefghijklmnopabcdefghijklmnop";
 
         // Register the currently running build first: takeover needs an owner.
-        let live = base.join(Binary::NativeHost.file_name(os, "2.2.0"));
-        let desktop = base.join(Binary::Desktop.file_name(os, "2.2.0"));
+        let live = base.join(Binary::NativeHost.installed_name(os));
+        let desktop = base.join(Binary::Desktop.installed_name(os));
         fs::write(&live, b"old").unwrap();
         fs::write(&desktop, b"old").unwrap();
         hostreg::install(
@@ -1061,6 +1193,9 @@ mod tests {
             installed_versions(&root).unwrap(),
             vec!["2.2.1".to_string()]
         );
+        // 桌面端（GNU 工具链）要靠同目录的 WebView2Loader.dll 才能启动：暂存时必须
+        // 一起放进去，否则紧跟着的健康检查连 `--version` 都跑不出来。
+        assert_loader_present(&version_dir(&root, "2.2.1").unwrap());
         assert!(stage(&root, "2.2.1", os, &[]).is_err());
 
         activate(&root, &manifests, hostreg::DEV_HOST, "2.2.1").unwrap();
@@ -1075,7 +1210,7 @@ mod tests {
         assert!(active["path"]
             .as_str()
             .unwrap()
-            .ends_with(&Binary::NativeHost.file_name(os, "2.2.1")));
+            .ends_with(&Binary::NativeHost.installed_name(os)));
         assert_eq!(
             active["allowed_origins"][0],
             format!("chrome-extension://{id}/")
@@ -1092,7 +1227,11 @@ mod tests {
             ],
         )
         .unwrap();
+        // 旧构建暂存的目录里没有这个文件：激活要顺手补上，否则回退之后整台机器用不了。
+        let loader = crate::webview2::loader_path(&version_dir(&root, "2.2.2").unwrap());
+        let _ = fs::remove_file(&loader);
         activate(&root, &manifests, hostreg::DEV_HOST, "2.2.2").unwrap();
+        assert_loader_present(&version_dir(&root, "2.2.2").unwrap());
         assert_eq!(
             active_version(&manifests, hostreg::DEV_HOST)
                 .unwrap()

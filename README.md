@@ -25,8 +25,8 @@
 - **大文件 CDC 分块上传（可选，默认关闭）**：≥16 MiB 的快照先按 Seafile 原生 CDC（Rabin，6/8/10 MiB）切分，用服务端已存在的原生块做签名 missing-block 计划；只有确实节省 ≥4 MiB 且复用 ≥25% 时才改走 `*-block-plan` / `*-block-stage` / `*-block-publish`，否则仍用已验证的全量传输。独占与普通本地编辑两条路径共用同一套计划与回退逻辑。
 - **本机安装、升级与回退均由自带程序完成**：`cloudfile-native-host` 同时是 CLI，注册 Host、登录项、下载校验、版本目录切换、回退与清理都不需要目标机器安装 Python 或 Rust 工具链。
 - 密钥存储在 macOS Keychain / Windows Credential Manager；采用 Rust P-256 签名，不依赖旧 Agent。当前是系统保护的可读密钥，不宣称 CNG/硬件不可导出密钥。
-- 独立用户目录 `CloudFileAgent22`、开发 Host `com.cloudfile.agent22.dev`。
-- 开发版新工作副本默认放在用户主目录 `CloudFile-Dev/Workspace/<任务 ID>/`，可在任务中心更改；首次打开目录时自动创建。修改目录只影响新任务，已有任务仍使用原位置。密钥、任务记录、Intent 与上传快照继续保存在私有 `CloudFileAgent22` 目录。
+- 独立用户目录 `CloudFileAgent`（Windows 默认 `D:\CloudFileAgent`，没有可用 D 盘时才是 `%LOCALAPPDATA%\CloudFileAgent`）、开发 Host `com.cloudfile.agent22.dev`。
+- 开发版新工作副本默认放在 `D:\CloudFileAgent\workspace\<任务 ID>\`（没有可用 D 盘时退回用户主目录 `~\CloudFileAgent\workspace\<任务 ID>\`），可在任务中心更改；首次打开目录时自动创建。修改目录只影响新任务，已有任务仍使用原位置。密钥、任务记录、Intent 与上传快照继续保存在私有 `CloudFileAgent22` 目录。
 
 本地应用 Ctrl/Cmd+S 保存到磁盘后，普通编辑由 Agent 自动观察工作副本并上传；独占编辑不会自动上传，必须由用户在任务中心显式提交。发生网络中断、冲突或未确认回执时暂停或保持待确认状态，保留工作副本与原上传快照；不会盲目自动重发。
 当前单文件上限与现有服务端一致，为 128 MiB。
@@ -74,11 +74,14 @@ cloudfile-desktop --self-test                                            # 同�
 一键安装（`--install`）等价于 Go 的 `install.cmd`，但目标机器**不需要任何脚本运行时**：
 
 - **主备地址**：`--source` 是主源（域名），`--source-fallback` 是备用源（通常是直连静态服务的 IP）。依次探测，**把实际可用的那个写回配置** —— 不然用户装完、第一次升级时才发现主源在这台机器上根本不通。主源可用时备源一次都不会被探测（省掉一次超时等待）；两个都不通时报错里带着每个地址**各自的原因**，只报一句「安装失败」在现场没有用。空地址会被跳过，主备写成同一个地址只探一次。
-- **顺序**：先判安装目录可写（别下完几 MB 才发现装不进去）→ 定源并写回 → 有更新才换二进制 → 注册 Host → 设开机自启 → 启动任务中心。
-- **幂等**：已经装好的机器重跑一遍等于**修复** —— 注册与自启会重做，二进制不动（清单不比当前新就不换）。
+- **顺序**：先判安装目录可写（别下完几 MB 才发现装不进去）→ 定源并写回 → 按磁盘状态决定要不要换二进制 → 注册 Host → 设开机自启 → 启动任务中心。
+- **幂等**：已经装好的机器重跑一遍等于**修复** —— 注册与自启会重做，二进制不动。「已经装好」的判据是**磁盘上那个版本目录是否完整**（host、桌面进程、`WebView2Loader.dll` 都在），不是拿清单版本跟自己的构建版本比：全新机器上正在跑的这份只是引导体下载到安装根里的临时副本，按版本号自比会报「已是最新」然后什么都不装（2026-10-19 现场就是这种「装完只有注册、没有任务中心」的状态）。
+- **目录里用稳定文件名**：版本只体现在目录名上（`bin/<版本>/`），里面一律是 `cloudfile-native-host.exe` / `cloudfile-desktop.exe`。桌面进程找 host、host 找桌面、自检、自启、邮箱都靠「同一个目录里的这个名字」，名字里再带一遍版本会让这些查找全部落空。
 - 自启失败与启动失败都**不判安装失败**（各只警告一句）：它们和注册是两件事，谁挂了都不该拖累另一个，二进制已经就位、用户也能自己双击。
 - 可跳过：`--skip-registration` / `--skip-autostart` / `--skip-launch`（现场分步排查、或只想升级二进制时用）。
 - **装到哪**：`CLOUDFILE_AGENT2_HOME` 覆盖 Agent 的整棵树（配置、任务、版本），与 Go 的 `install.cmd` / `internal/home` 一致；引导体的 `--install-dir` 是同一件事的显式写法。相对路径一律拒绝。
+- **默认落 D 盘**：Windows 上没有显式覆盖时，私有树落 `D:\CloudFileAgent`、工作副本落 `D:\CloudFileAgent\workspace`；只有 D 盘不可用（没有这块盘 / 不是固定盘 / 只读）才回落到 `%LOCALAPPDATA%\CloudFileAgent` 与 `~\CloudFileAgent\workspace`（同名同形，现场一眼能对上）。判据是「固定本地盘 + 真能写」，且运行期间只探一次。
+- **老机器的迁移**：如果只在 C 盘有一棵旧的私有树（配置、任务记录、journal、版本目录），首次运行会先整棵树拷到 D 盘（同盘临时目录里拷完再改名），**拷成功才切过去，C 盘原目录原地留作备份**；拷不动就继续用 C 盘，绝不把用户数据弄丢。旧的目录名（`CloudFileAgent22`、`CloudFileAgent2` 工作区）都算迁移源。设置里等于老默认值的工作目录也会一起改写成新的默认值 —— 用户自己选过的目录不动。要强制不落 D 盘（测试沙箱、便携部署）设 `CLOUDFILE_AGENT2_NO_DRIVE_PREFERENCE=1`。
 - **全新安装与升级走同一条路**：先暂存（健康检查通过才落进版本目录）、再按「有没有旧注册」决定接管还是新建注册。`update::activate` 是「接管既有注册」专用的，所以注册与激活在 `--install` 里是分开的两步 —— 否则空白机器上会因为「没有旧注册可接管」而失败。
 
 更新通道的信任策略：
@@ -138,6 +141,8 @@ powershell -ExecutionPolicy Bypass -File make-agent22-release.ps1 \
 ```
 
 `make-agent22-release.ps1` 会构建两个产物（内置版本号）、逐个跑 `--version` 核对版本、写清单、签名、回验，并做**端到端自检**：起本地通道，用一个版本更低的探针二进制跑真实的 `--check-update`，确认签名被真实 Rust 验签器接受 —— 这是唯一能证明「Python 签名器与 `update.rs` 没漂移」的检验。
+
+**GNU 工具链的桌面端必须带 `WebView2Loader.dll`**（2026-10-19 现场事故）：`webview2-com` 在 MSVC 下把加载器静态链进 exe，而在 `x86_64-pc-windows-gnu`（本机发版用的就是它）下只能动态导入 `WebView2Loader.dll` —— 缺了它进程在进 `main` 之前就起不来，Windows 弹「由于找不到 WebView2Loader.dll，无法继续执行代码」，`--version` 也拿不到版本，于是更新停在暂存后的健康检查那一步。因此这份 DLL 已收进仓库（`crates/cloudfile-core/assets/win-x64/`，sha256 `86545b66…`，与 `tauri-build` 拷到 `target\<profile>\` 的那份逐字节相同 —— 所以本机 `cargo run` 和发版脚本的 `--version` 检查一直是好的，坏的只有**装到别的机器上**的那份），由 `webview2::ensure` 在 `update::stage` / `update::activate` 时落到版本目录里 —— **不进发布清单**（清单的产物结构是签名载荷的一部分），也不用额外上传。升级 `webview2` 依赖时把它一起换掉。
 
 跨界面的契约只有一条：`signing_payload` 的字节形状。`update.rs` 里有一条 `the_signing_payload_is_a_fixed_byte_string` 逐字节钉住它；**Rust 侧改了字段顺序或分隔符，那条测试会红**，届时必须同步改签名器，否则通道上签出的清单会让所有已装 Agent 报「签名与钉住的公钥不符」。
 
@@ -254,7 +259,7 @@ Rust 测试与开发扩展打包测试，并生成开发 ZIP 上传 Artifact；
 - `cloudfile-core`：会话、用户配置、任务记录、设备签名、提交快照与全量上传；`exclusive` 模块负责独占 Checkout 租约与 Commit/Checkin，`cdc` 模块负责大文件分块切分与计划/暂存/发布链路，`guard` 模块是“能否安全退出 / 升级”的唯一判定来源，`settings` 负责本机偏好与悬浮位置，`workspace` 负责工作副本根目录策略与一次性搬迁，`apps` 负责应用检测与自定义打开规则，`hostreg` / `update` / `autostart` 负责注册、版本目录与登录项。
 - `cloudfile-core` 的三个 Windows 底层保障模块：`winreg`（进程内读写注册表）、`childproc`（子进程不弹控制台窗口）、`shortcut`（「启动」文件夹里的 `.lnk`）。注册、登录项、WebView2 探测、应用探测**一律走它们**，不再 spawn `reg.exe`——否则父进程是 GUI（Tauri 桌面）时每次调用都会闪一个黑窗口，而且在禁用 `reg.exe` 的机器上会直接失败而不是降级。只有「打开文档的应用」与「必须脱离宿主存活的升级进程」例外，前者需要窗口、后者用 `DETACHED_PROCESS` 自带无控制台。
 - 读前加固只有一处判据：`fsaccess`（对应 Go 的 `internal/fsaccess`）。任务目录、任务记录、偏好文件在**读**之前都要求「私有的普通文件/目录」，语义是 **fail closed**（与 Go 的 store 层一致）：一份权限被改松的状态文件不能被当成可信输入去授权退出、上传或续租。列表类接口不会把它报成「没有任务」——那会让人以为工作副本丢了。**Windows 上这条判据是刻意的 no-op**：`Metadata` 只反映只读属性，套 POSIX 位会把每一个状态路径都判死；真实访问由 NTFS ACL 管，而 ACL 不通过 `Metadata` 暴露。所以 Windows 上的加固是「绝对路径 + 非重解析点 + 普通文件 + 体积上限」，不含权限私有。
-- Windows 的登录项有**两条途径**，装的时候依次尝试：先写当前用户的 `Run` 键，被组策略或安全软件锁住时（企业机器上常见）退到「启动」文件夹里的 `CloudFileAgent22.lnk`。两条都用 `IShellLinkW`/`IPersistFile` 由 shell 自己维护格式，不手写二进制。`--status` 与设置界面会报出实际生效的是哪一条（`run-key` / `startup-folder`），因为这两种情况在任务管理器里长得完全不一样。两条途径都带上 `--autostart`：登录启动必须进托盘而不是抢焦点。
+- Windows 的登录项有**两条途径**，装的时候依次尝试：先写当前用户的 `Run` 键，被组策略或安全软件锁住时（企业机器上常见）退到「启动」文件夹里的 `CloudFileAgent.lnk`。两条都用 `IShellLinkW`/`IPersistFile` 由 shell 自己维护格式，不手写二进制。`--status` 与设置界面会报出实际生效的是哪一条（`run-key` / `startup-folder`），因为这两种情况在任务管理器里长得完全不一样。两条途径都带上 `--autostart`：登录启动必须进托盘而不是抢焦点。
 - `cloudfile-native-host`：有界 stdio 消息、本机请求转交，以及安装/升级/回退用的命令行。
 - **模式（mode）是子树，不是字符串**：本地副本只有三个子树 —— 查看（`local-view`，只读）、可编辑、独占可编辑；`local-edit` 与 `optimistic-edit` 是**可编辑子树的两个名字**。浏览器请求与任务都在这层比较，所以「缺省/`local-edit`」永远不会命中只读的查看副本（Go 的 `Request.MirrorMode()` 同义，原文理由：编辑子树是唯一不会被「查看」打开覆盖的那个）。反过来才是会伤人的：查看副本是只读的，被当成编辑副本交给用户，用户改完存不进去。可上传/可提交另有一道**模式白名单**（`journal::capture` 的 `editable task required`、`upload`/`exclusive` 各自校验），所以查看副本拿不到 Intent。
 - 本机自检（`selftest` 模块）：把「这台机器上装的东西到底能不能工作」变成一次可脚本化的问答（`--self-test`，两个入口共用同一套检查）。十二项各自独立跑、独立报，输出固定形状的 JSON，有项确实不工作时退出码非 0。**刻意不创建窗口、不发网络请求**：建窗口依赖窗口站/桌面会话，在服务、SSH、CI 上必然不稳，自检本身变成「时好时坏」就没有价值；网络请求要等超时，会把「10 秒出结论」拖成「30 秒也不一定」。更新源只报「配没配、够不够用」，内容对不对由 `--check-update` 回答。

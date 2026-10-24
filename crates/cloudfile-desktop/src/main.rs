@@ -95,8 +95,21 @@ fn summaries(root: &Path, uploading: &Mutex<HashSet<String>>) -> anyhow::Result<
         let has_lease = lease.ok().flatten().is_some()
             || cloudfile_core::v2_edit::has_checkout(root, &task.task_id);
         let closed = closed.unwrap_or(false);
+        // 云端已有新版本、或本地有未上传的修改，都要用户选一次：必须出现在「待处理」，
+        // 否则用户永远看不到这个决定。
+        let conflict = cloudfile_core::v2_edit::conflict(root, &task.task_id);
+        let conflict_reason = conflict
+            .as_ref()
+            .and_then(|value| value["reason"].as_str())
+            .unwrap_or("remote-changed")
+            .to_string();
+        let has_conflict = conflict.is_some();
         // Three states the user can act on, in the order they matter.
-        let group = if needs_review || has_pending || (exclusive_mode && !closed && !has_lease) {
+        let group = if has_conflict
+            || needs_review
+            || has_pending
+            || (exclusive_mode && !closed && !has_lease)
+        {
             "needs-attention"
         } else if is_uploading || local_changed || (exclusive_mode && !closed) {
             "in-progress"
@@ -116,13 +129,18 @@ fn summaries(root: &Path, uploading: &Mutex<HashSet<String>>) -> anyhow::Result<
                 || cloudfile_core::v2_edit::has_checkout(root, &task.task_id),
             "checkout_closed":closed,
             "authorization_expires_at":cloudfile_core::v2_edit::ticket_expires_at(root, &task.task_id),
+            "conflict":has_conflict,
+            "conflict_reason":conflict_reason,
             "auto_upload":automatic.ok(),"uploading":is_uploading,
             "pending_upload":has_pending,"pending_action":action}));
     }
     let count = |group: &str| tasks.iter().filter(|task| task["group"] == group).count();
     Ok(
         json!({"ok":true,"cdc_enabled":cloudfile_core::cdc::enabled(),"tasks":tasks,
-        "counts":{"in_progress":count("in-progress"),"needs_attention":count("needs-attention"),"done":count("done")}}),
+        // 修改原因（2026-10-23）：分组 key 必须和界面用的一致（kebab-case）。原来这里发的是
+        // in_progress / needs_attention，而 app.js 按 counts['in-progress'] 取，取到 undefined
+        // → 顶部「进行中」永远是 0，即使列表里就有进行中的任务。
+        "counts":{"in-progress":count("in-progress"),"needs-attention":count("needs-attention"),"done":count("done")}}),
     )
 }
 
@@ -173,7 +191,7 @@ fn settings_set(
 ) -> Result<Value, String> {
     let workspace_root = match workspace_root {
         Some(value) if value.trim().is_empty() => Some(
-            settings::default_workspace()
+            settings::default_workspace(&state.root)
                 .map_err(|error| error.to_string())?
                 .to_string_lossy()
                 .into_owned(),
@@ -277,7 +295,7 @@ async fn float_sync(
         .map_err(|_| "无法读取任务".to_string())?;
     let config = settings::load(&state.root).map_err(|error| error.to_string())?;
     let total = summary["tasks"].as_array().map(Vec::len).unwrap_or(0);
-    let attention = summary["counts"]["needs_attention"].as_u64().unwrap_or(0);
+    let attention = summary["counts"]["needs-attention"].as_u64().unwrap_or(0);
     let Some(window) = app.get_webview_window("float") else {
         return Ok(json!({"visible": false}));
     };
@@ -468,7 +486,7 @@ fn setup_state(state: tauri::State<'_, State>) -> Result<Value, String> {
         "extension_version": extension::installed_version(&dir),
         "workspace_root": workspace.to_string_lossy(),
         "workspace_tasks": cloudfile_core::workspace::tasks_root(root).to_string_lossy(),
-        "workspace_default": cloudfile_core::workspace::default_root_hint(),
+        "workspace_default": cloudfile_core::workspace::default_root_hint(&state.root),
         "workspace_exists": workspace.is_dir(),
         "autostart_enabled": autostart::enabled(),
         "trusted_count": trusted,
@@ -659,6 +677,84 @@ fn run_update(state: tauri::State<'_, State>, force: bool) -> Result<Value, Stri
 fn open_workspace(state: tauri::State<'_, State>) -> Result<(), String> {
     let directory = settings::ensure_workspace(&state.root).map_err(|error| error.to_string())?;
     apps::open_directory(&directory).map_err(|error| error.to_string())
+}
+
+/// 删除任务：任务目录 + 工作副本 + 空目录清理（只在 workspace 根以下）。
+/// 已完成的任务才在界面上给出按钮，但这里不做门禁 —— 用户主动删除永远该被尊重。
+#[tauri::command]
+async fn delete_task(state: tauri::State<'_, State>, task_id: String) -> Result<Value, String> {
+    let root = state.root.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        session::remove_task(&root, &task_id).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|_| "删除任务失败".to_string())?
+}
+
+/// 冲突处理：`remote` 用线上版本覆盖本地，`local` 保留本地版本，任务仍是一条。
+#[tauri::command]
+async fn resolve_conflict(
+    state: tauri::State<'_, State>,
+    task_id: String,
+    choice: String,
+) -> Result<Value, String> {
+    let root = state.root.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        cloudfile_core::v2_edit::resolve_conflict(&root, &task_id, &choice)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|_| "处理冲突失败".to_string())?
+}
+
+/// 升级面板轮询用：当前运行版本、注册指向的版本（磁盘上已装的最新一份）、以及最近一次
+/// 升级的结果（native-host 在独立进程里跑的，只有 update-result.json 能告诉我们成败）。
+#[tauri::command]
+fn update_state(state: tauri::State<'_, State>) -> Result<Value, String> {
+    let active = hostreg::manifest_dir()
+        .ok()
+        .and_then(|dir| update::active_version(&dir, hostreg::HOST).ok().flatten());
+    let newer = active
+        .as_deref()
+        .map(|version| update::compare(version, cloudfile_core::VERSION).is_gt())
+        .unwrap_or(false);
+    Ok(json!({
+        "version": cloudfile_core::VERSION,
+        "active_version": active,
+        "newer": newer,
+        "result": native::load_update_result(&state.root),
+    }))
+}
+
+/// 升级完重启任务中心：拉起注册指向的那份桌面（新版本），再退出自己。
+/// 不重启的话，跑的还是旧构建 —— 用户会觉得「升级没生效」。
+#[tauri::command]
+fn restart_app(app: tauri::AppHandle, state: tauri::State<'_, State>) -> Result<Value, String> {
+    let dir = hostreg::manifest_dir().map_err(|error| error.to_string())?;
+    let version = update::active_version(&dir, hostreg::HOST)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "没有找到已安装的版本".to_string())?;
+    let binary = update::version_dir(&state.root, &version)
+        .map_err(|error| error.to_string())?
+        .join(update::Binary::Desktop.installed_name(std::env::consts::OS));
+    if !binary.is_file() {
+        return Err(format!("新版本目录里没有任务中心：{}", binary.display()));
+    }
+    let mut command = std::process::Command::new(&binary);
+    command
+        .arg("--autostart")
+        .arg("--await-instance")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0000_0008);
+    }
+    command.spawn().map_err(|_| "无法启动新版本".to_string())?;
+    app.exit(0);
+    Ok(json!({"state": "restarting", "version": version}))
 }
 
 #[tauri::command]
@@ -915,7 +1011,9 @@ fn main() {
         _ => {}
     }
     let autostart = args.iter().any(|value| value == "--autostart");
-    if let Err(error) = run(autostart) {
+    // 升级重启专用：老进程还在退出、桌面锁还握着，新实例要等一会儿而不是直接放弃。
+    let await_instance = args.iter().any(|value| value == "--await-instance");
+    if let Err(error) = run(autostart, await_instance) {
         eprintln!("CloudFile desktop: {error}");
     }
 }
@@ -945,10 +1043,25 @@ fn self_test() -> i32 {
     i32::from(report["ok"] != json!(true))
 }
 
-fn run(autostart: bool) -> anyhow::Result<()> {
+fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
     let root = storage::root()?;
-    let _lock = match storage::lock(&root.join("desktop.lock")) {
+    let lock_path = root.join("desktop.lock");
+    let _lock = match storage::lock(&lock_path) {
         Ok(lock) => lock,
+        // 修改原因（2026-10-23）：升级后点「立即重启」时，新实例是被老进程拉起来的，
+        // 而老进程要等 `app.exit(0)` 走完才释放 desktop.lock。原来这里一失败就 return，
+        // 新实例直接消失 —— 用户看到的就是「点了重启没反应」。等待模式下最多等 10 秒。
+        Err(_) if await_instance => {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                match storage::lock(&lock_path) {
+                    Ok(lock) => break lock,
+                    Err(_) if std::time::Instant::now() < deadline => continue,
+                    Err(_) => return Ok(()),
+                }
+            }
+        }
         // A second launch only needs to raise the window the first one owns.
         Err(_) => return Ok(()),
     };
@@ -988,10 +1101,14 @@ fn run(autostart: bool) -> anyhow::Result<()> {
             autostart_set,
             check_update,
             run_update,
+            update_state,
+            restart_app,
             open_workspace,
             trust_origin,
             trusted_origins,
             open_task,
+            delete_task,
+            resolve_conflict,
             save_cloud,
             recover_upload,
             begin_pairing,
@@ -1208,7 +1325,6 @@ fn run(autostart: bool) -> anyhow::Result<()> {
                     wire::Request::OpenWorkspace { repo_id, path, mode } => {
                         native::open_workspace(&root, &repo_id, &path, &mode)
                     }
-                    wire::Request::OpenSessionFile { path } => native::open_session_file(&root, &path),
                     wire::Request::PairEnrollment { server } => match device::enrollment(&root, &server) {
                         Ok(value) => json!({"ok":true,"enrollment":value,
                             "service_path":session::service_path(&root,&server).unwrap_or_default()}),
@@ -1270,16 +1386,6 @@ fn run(autostart: bool) -> anyhow::Result<()> {
                     wire::Request::Update {} | wire::Request::UpdateExtension {} => {
                         wire::error("请在命令行执行 cloudfile-native-host --update 或 --update-extension")
                     }
-                    request @ wire::Request::Open { .. } => match session::open_session(&root, request) {
-                        Ok(task) => {
-                            show(&handle);
-                            match session::launch(&root, &task.task_id) {
-                                Ok(()) => json!({"ok":true}),
-                                Err(_) => wire::error("download retained; local application could not open file"),
-                            }
-                        }
-                        Err(_) => wire::error("session rejected or download failed; inspect trusted origin and server session"),
-                    },
                 });
                 if result.is_err() {
                     eprintln!("CloudFile mailbox operation failed");

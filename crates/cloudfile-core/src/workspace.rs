@@ -54,18 +54,20 @@ const REPORT: &str = "mirror-adopt.json";
 
 /// Windows 上首选镜像根——**常量**，不按 `app_root` 推导。
 ///
-/// 沿用 1.0 的默认地址 `D:\CloudFileAgent2\workspace`：从正式版升级上来的机器，
-/// 本地工作副本本来就落在那里，换客户端不该让用户再去设置一遍，也不该让
-/// 「我的文件去哪儿了」成为一个问题。任务目录会落在它下面的 `tasks\` 子目录，
-/// 与 1.0 的 `view\` / `edit\` 互不干扰。
+/// 位置跟私有树同一个根：`D:\CloudFileAgent\workspace`。任务目录会落在它下面的 `tasks\` 子目录，
+/// 与 1.0 的 `view\` / `edit\` 互不干扰。没有可用 D 盘时退回 `~/CloudFileAgent/workspace`。
 ///
 /// 用户可以在任务中心里改成别的目录（`settings.workspace_root`），显式配置永远优先。
 #[cfg(windows)]
-const PREFERRED_ROOT: &str = "D:\\CloudFileAgent2\\workspace";
+const PREFERRED_ROOT: &str = "D:\\CloudFileAgent\\workspace";
 
-/// Windows 上「代理数据目录」的名字。
+/// Windows 上「代理数据目录」的名字（`%LOCALAPPDATA%\<名字>`）。
 #[cfg(windows)]
-const APP_DIR_NAME: &str = "CloudFileAgent22";
+const APP_DIR_NAME: &str = "CloudFileAgent";
+
+/// 旧的名字（升级上来的机器上还有）。只有找迁移源、判断「这是不是标准安装根」时才认它。
+#[cfg(windows)]
+const LEGACY_APP_DIR_NAME: &str = "CloudFileAgent22";
 
 /// 首选位置能否当镜像根，每进程只探一次。
 ///
@@ -85,18 +87,33 @@ pub fn report_path(app_root: &Path) -> PathBuf {
     app_root.join(REPORT)
 }
 
-/// 界面上要显示的「默认地址」：**没做任何配置时**任务会落在哪里。
+/// 首次运行写进设置的默认工作目录，也是界面上的「默认地址」。
 ///
 /// 与 [`resolve`] 的区别是它完全不受用户配置影响 —— 设置面板要能同时说清
 /// 「现在用的是哪个」和「恢复默认会回到哪」，否则「恢复默认」是一个盲操作。
-#[cfg(windows)]
-pub fn default_root_hint() -> String {
-    PREFERRED_ROOT.to_string()
+///
+/// **Windows 上默认 D 盘**（`D:\CloudFileAgent\workspace`，与私有树同一个根）；
+/// D 盘不可用（没有这块盘 / 不是固定盘 / 只读）才退回用户主目录下的
+/// `CloudFileAgent\workspace` —— 两边同名同形，现场一眼能对上。
+pub fn initial_root(app_root: &Path, home: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        if is_default_app_root(app_root) {
+            if let Some(preferred) = preferred_root() {
+                if *PREFERRED_USABLE.get_or_init(|| usable(&preferred)) {
+                    return preferred;
+                }
+            }
+        }
+    }
+    let _ = app_root;
+    home.join("CloudFileAgent").join("workspace")
 }
 
-#[cfg(not(windows))]
-pub fn default_root_hint() -> String {
-    String::new()
+/// 界面上要显示的「默认地址」。
+pub fn default_root_hint(app_root: &Path) -> String {
+    let home = dirs::home_dir().unwrap_or_default();
+    initial_root(app_root, &home).to_string_lossy().into_owned()
 }
 
 /// 解析工作区根目录（**不含** `tasks` 这一层）。
@@ -116,9 +133,9 @@ pub fn tasks_root(app_root: &Path) -> PathBuf {
 fn default_root(app_root: &Path) -> PathBuf {
     #[cfg(windows)]
     {
-        // 盘符偏好只作用于**真实安装根**（`%LocalAppData%\CloudFileAgent22`）。
-        // 测试、便携安装或任何别的根都不该被改写到 D 盘——那会让一个测试进程
-        // 悄悄写进用户真实的工作区。
+        // 盘符偏好只作用于**真实安装根**（`%LocalAppData%\CloudFileAgent` 或 `D:\CloudFileAgent`，
+        // 老机器上还可能是 `%LocalAppData%\CloudFileAgent22`）。测试、便携安装或任何别的根
+        // 都不该被改写到 D 盘——那会让一个测试进程悄悄写进用户真实的工作区。
         if is_default_app_root(app_root) {
             if let Some(preferred) = preferred_root() {
                 if *PREFERRED_USABLE.get_or_init(|| usable(&preferred)) {
@@ -133,13 +150,21 @@ fn default_root(app_root: &Path) -> PathBuf {
 /// `app_root` 是不是本平台的标准安装根。
 #[cfg(windows)]
 fn is_default_app_root(app_root: &Path) -> bool {
-    let Some(default) = dirs::data_local_dir().map(|dir| dir.join(APP_DIR_NAME)) else {
-        return false;
-    };
+    // 标准安装根有三个：`%LOCALAPPDATA%\CloudFileAgent`、`D:\CloudFileAgent`（见
+    // `storage::default_root`），以及老机器上还没搬走的 `%LOCALAPPDATA%\CloudFileAgent22`。
+    // 它们都该拿到盘符偏好，否则装在 D 盘的机器会把工作目录解析成私有树自己，
+    // 而不是 `D:\CloudFileAgent\workspace`。
+    let candidates = [
+        dirs::data_local_dir().map(|dir| dir.join(APP_DIR_NAME)),
+        dirs::data_local_dir().map(|dir| dir.join(LEGACY_APP_DIR_NAME)),
+        Some(crate::storage::preferred_root()),
+    ];
     // Windows 路径不区分大小写，macOS 通常也不区分（但按字节比更保守，这里统一折大小写）。
-    default
-        .to_string_lossy()
-        .eq_ignore_ascii_case(&app_root.to_string_lossy())
+    let app_root = app_root.to_string_lossy();
+    candidates
+        .into_iter()
+        .flatten()
+        .any(|default| default.to_string_lossy().eq_ignore_ascii_case(&app_root))
 }
 
 #[cfg(all(not(windows), test))]
@@ -156,16 +181,23 @@ fn preferred_root() -> Option<PathBuf> {
 /// 候选位置能不能用：既要是固定本地盘，又要真的写得进去
 /// （只读或被写满的盘同样不能当镜像根）。
 #[cfg(windows)]
-fn usable(directory: &Path) -> bool {
+pub(crate) fn usable(directory: &Path) -> bool {
     if !fixed_volume(directory) {
         return false;
     }
+    let created = !directory.exists();
     if fs::create_dir_all(directory).is_err() {
         return false;
     }
     // 探测文件立刻随临时文件析构删除：这个目录会显示在扩展弹窗里，
     // 留一个 `.cf-probe` 在那儿用户会看见。
-    tempfile::NamedTempFile::new_in(directory).is_ok()
+    let writable = tempfile::NamedTempFile::new_in(directory).is_ok();
+    // 探盘不该在用户机器上留下目录。尤其是：`D:\CloudFileAgent` 一旦被提前建出来，
+    // 私有树的「要不要搬过去」就会误判成「已经在 D 盘了」，老机器的数据就留在 C 盘。
+    if created && writable {
+        let _ = fs::remove_dir(directory);
+    }
+    writable
 }
 
 /// `GetDriveTypeW(path) == DRIVE_FIXED`：光驱/可移动盘/网络共享都不是固定盘。
@@ -638,29 +670,49 @@ mod tests {
     fn only_the_standard_install_root_gets_the_drive_preference() {
         // 测试/便携用的临时根绝不能被改写到别的盘：那会写进用户真实的工作区。
         let (_dir, base) = tmp();
+        let home = base.join("home");
         assert!(!is_default_app_root(&base));
-        assert_eq!(resolve(&base), base);
+        // 用 `default_root` / `initial_root` 而不是 `resolve`：后者会读这台机器上真实的
+        // settings.json，测出来的就不是「默认值」而是「本机配置」了。
+        assert_eq!(default_root(&base), base);
+        assert_eq!(
+            initial_root(&base, &home),
+            home.join("CloudFileAgent").join("workspace")
+        );
         assert_eq!(tasks_root(&base), base.join("tasks"));
 
         #[cfg(windows)]
         {
-            // 真实安装根才会去探首选盘。这里只断言**不变量**（解析结果只能是安装根
-            // 或首选盘上的固定路径），因为 CI 的 Windows runner 不一定有 D 盘。
-            let default_root = dirs::data_local_dir().unwrap().join("CloudFileAgent22");
-            assert!(is_default_app_root(&default_root));
+            // 标准安装根（C 盘的新/旧位置、D 盘的新位置）才去探首选盘。
+            // 这里只断言**不变量**（结果只能是首选盘或主目录），因为 CI 的 runner 不一定有 D 盘。
+            let local_root = dirs::data_local_dir().unwrap().join("CloudFileAgent");
+            let legacy_root = dirs::data_local_dir().unwrap().join("CloudFileAgent22");
+            let preferred_install = crate::storage::preferred_root();
+            assert!(is_default_app_root(&local_root));
+            assert!(
+                is_default_app_root(&legacy_root),
+                "老机器上还没搬走的 CloudFileAgent22 也算标准根"
+            );
+            assert!(
+                is_default_app_root(&preferred_install),
+                "装在 D 盘的机器同样要拿到盘符偏好"
+            );
             assert_eq!(
                 preferred_root(),
-                Some(PathBuf::from("D:\\CloudFileAgent2\\workspace"))
+                Some(PathBuf::from("D:\\CloudFileAgent\\workspace"))
             );
-            let resolved = resolve(&default_root);
-            assert!(
-                resolved == default_root
-                    || resolved == PathBuf::from("D:\\CloudFileAgent2\\workspace"),
-                "只能解析成安装根或首选盘，实际 {resolved:?}"
-            );
-            // 一旦真的切到首选盘，那个位置必须是固定本地盘（不是光驱/U 盘/网络盘）。
-            if resolved != default_root {
-                assert!(fixed_volume(&resolved), "首选根必须落在固定本地盘上");
+            let fallback = home.join("CloudFileAgent").join("workspace");
+            for app_root in [&local_root, &legacy_root, &preferred_install] {
+                let resolved = initial_root(app_root, &home);
+                assert!(
+                    resolved == fallback
+                        || resolved == PathBuf::from("D:\\CloudFileAgent\\workspace"),
+                    "只能是首选盘或主目录，实际 {resolved:?}"
+                );
+                // 一旦真的切到首选盘，那个位置必须是固定本地盘（不是光驱/U 盘/网络盘）。
+                if resolved != fallback {
+                    assert!(fixed_volume(&resolved), "首选根必须落在固定本地盘上");
+                }
             }
         }
     }

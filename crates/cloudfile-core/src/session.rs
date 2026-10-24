@@ -1,12 +1,11 @@
-use crate::{storage, wire::Request};
-use anyhow::{bail, Context, Result};
+use crate::storage;
+use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     fs,
-    io::{Read, Write},
+    io::Read,
     path::{Path, PathBuf},
-    time::Duration,
 };
 use url::Url;
 #[derive(Default, Serialize, Deserialize)]
@@ -42,23 +41,6 @@ impl Config {
             allow_insecure: self.allow_insecure_update_source,
         }
     }
-}
-#[derive(Deserialize)]
-pub struct Claimed {
-    pub session_id: String,
-    pub mode: String,
-    pub expires_at: u64,
-    pub repo_id: String,
-    pub path: String,
-    pub file: RemoteFile,
-    pub file_id: String,
-    pub size: u64,
-    pub writeback: Option<serde_json::Value>,
-}
-#[derive(Deserialize)]
-pub struct RemoteFile {
-    pub name: String,
-    pub content_url: String,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Task {
@@ -262,9 +244,16 @@ pub fn working_dir(root: &Path, id: &str) -> Result<PathBuf> {
         return Ok(private);
     }
     let copy: WorkingCopy = storage::read(&pointer)?;
-    if !copy.directory.is_absolute()
-        || copy.directory.file_name().and_then(|s| s.to_str()) != Some(id)
-    {
+    if !copy.directory.is_absolute() {
+        bail!("invalid working copy directory");
+    }
+    // 修改逻辑（2026-10-23）：新布局的目录是 `<workspace>/<view|edit>/<库短码>`，
+    // 最后一段不再是 task id —— 只认「绝对路径 + 在 workspace 之内」，
+    // 同时保留旧布局（`<workspace>/<task id>`）的合法形态。
+    let workspace = crate::settings::workspace_root(root);
+    let legacy = copy.directory.file_name().and_then(|s| s.to_str()) == Some(id);
+    let inside = copy.directory != workspace && copy.directory.starts_with(&workspace);
+    if !legacy && !inside {
         bail!("invalid working copy directory");
     }
     for part in copy.directory.ancestors() {
@@ -275,7 +264,91 @@ pub fn working_dir(root: &Path, id: &str) -> Result<PathBuf> {
     Ok(copy.directory)
 }
 
-/// Called under the task operation lock, before downloading a new task.
+/// 查看 / 编辑两个子树：资源管理器里一眼就能分清这份副本用来干什么。
+pub fn mode_subdir(mode: &str) -> &'static str {
+    if mode == "local-view" {
+        "view"
+    } else {
+        "edit"
+    }
+}
+
+/// 库短码：uuid 去掉横线后取前 16 位、按 8-8 排版（`c66005f6-36bc45e1`）。
+/// 64 bit 足够避碰，又比整串 uuid 短得多。
+pub fn library_short(repo_id: &str) -> String {
+    let hex: String = repo_id.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+    if hex.len() >= 16 {
+        format!("{}-{}", &hex[..8], &hex[8..16])
+    } else if hex.is_empty() {
+        "unknown".to_string()
+    } else {
+        hex
+    }
+}
+
+/// 同一库同一子树下，不同库内路径可能同名（`/A/x.docx` 与 `/B/x.docx`）。
+/// 后出现的那个加 `~<路径哈希前 8 位>`，保证两者的本地文件名稳定且互不覆盖。
+pub fn local_name(
+    root: &Path,
+    mode: &str,
+    repo_id: &str,
+    remote_path: &str,
+    base: &str,
+) -> Result<String> {
+    let subdir = mode_subdir(mode);
+    let taken = |name: &str| -> Result<bool> {
+        Ok(tasks(root)?.into_iter().any(|task| {
+            mode_subdir(&task.mode) == subdir
+                && task.repo_id == repo_id
+                && task.remote_path != remote_path
+                && task.file_name == name
+        }))
+    };
+    if !taken(base)? {
+        return Ok(base.to_string());
+    }
+    let digest = format!("{:x}", Sha256::digest(remote_path.as_bytes()));
+    let candidate = match base.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() => {
+            format!("{stem}~{}.{ext}", &digest[..8])
+        }
+        _ => format!("{base}~{}", &digest[..8]),
+    };
+    if !taken(&candidate)? {
+        return Ok(candidate);
+    }
+    Ok(format!("{candidate}~{}", &digest[..4]))
+}
+
+/// 新任务的目录：`<workspace>\<view|edit>\<库短码>`，文件名就是本地文件名。
+/// 目录固定、与 session 无关 —— 同一个文件重复打开落在同一个地方，用户找得到。
+pub fn prepare_task_dir(
+    root: &Path,
+    id: &str,
+    mode: &str,
+    repo_id: &str,
+    file_name: &str,
+) -> Result<PathBuf> {
+    filename(file_name)?;
+    let private = task_dir(root, id)?;
+    if private.join("working-copy.json").exists() || private.join("task.json").exists() {
+        return working_dir(root, id);
+    }
+    let directory = crate::settings::ensure_workspace(root)?
+        .join(mode_subdir(mode))
+        .join(library_short(repo_id));
+    storage::private_dir(&directory)?;
+    storage::write(
+        &private.join("working-copy.json"),
+        &WorkingCopy {
+            directory: directory.clone(),
+        },
+    )?;
+    Ok(directory)
+}
+
+/// 旧（配对设备 / v1）任务的目录：跟随 workspace 根，目录名就是 task id。
+/// 新任务一律走 [`prepare_task_dir`]；这个函数只为兼容既有 working-copy 指针保留。
 pub fn prepare_working_dir(root: &Path, id: &str) -> Result<PathBuf> {
     let private = task_dir(root, id)?;
     if private.join("working-copy.json").exists() || private.join("task.json").exists() {
@@ -322,6 +395,78 @@ pub fn tasks(root: &Path) -> Result<Vec<Task>> {
     result.sort_by(|a, b| a.file_name.cmp(&b.file_name));
     Ok(result)
 }
+
+/// 同一文件在同一子树里只保留一条任务：`local-view` 与可编辑子树各自独立。
+///
+/// 修改逻辑（2026-10-22）：网页每次「本地查看 / 本地编辑」都会拿到新的 session，
+/// 旧逻辑用 `sha256(server + session)` 当任务 ID，于是同一个文件每点一次就多一条任务。
+/// 现在按 **仓库 + 库内路径 + 模式族** 找回已有任务再做合并。
+/// 目录枚举顺序不可依赖（编辑子树里可能同时有历史的 `local-edit` 与 `optimistic-edit`），
+/// 命中多条时按 task_id 排序取第一条，保证同一输入永远得到同一个结果。
+pub fn find_task(
+    root: &Path,
+    repo_id: &str,
+    remote_path: &str,
+    mode: &str,
+) -> Result<Option<Task>> {
+    let view = mode == "local-view";
+    let mut hits: Vec<Task> = tasks(root)?
+        .into_iter()
+        .filter(|task| task.repo_id == repo_id && task.remote_path == remote_path)
+        .filter(|task| (task.mode == "local-view") == view)
+        .collect();
+    hits.sort_by(|left, right| left.task_id.cmp(&right.task_id));
+    Ok(hits.into_iter().next())
+}
+
+/// 删除任务：任务目录（含 journal / v2 状态）+ 工作副本，并向上清理空目录。
+///
+/// 修改原因（2026-10-22）：任务中心只有「打开」，已完成的任务永远留在列表里，
+/// 本地下载的那份也一直占着地方。清理范围严格限制在 workspace 根以下：
+/// 绝不越过 workspace 根去删用户自己的目录；任何一步失败都报错而不是静默跳过。
+pub fn remove_task(root: &Path, id: &str) -> Result<serde_json::Value> {
+    let task = load(root, id)?;
+    let dir = task_dir(root, id)?;
+    let workspace = crate::settings::workspace_root(root);
+    let working = working_dir(root, id).ok();
+    if let Some(copy) = working.as_ref() {
+        if copy != &dir && copy.starts_with(&workspace) && copy.exists() {
+            fs::remove_dir_all(copy)?;
+        }
+    }
+    if dir.exists() {
+        fs::remove_dir_all(&dir)?;
+    }
+    let mut pruned: Vec<String> = Vec::new();
+    if let Some(copy) = working.as_ref() {
+        let mut current = copy.parent().map(Path::to_path_buf);
+        while let Some(path) = current {
+            // 直接挂在 workspace 下的 `view` / `edit` 子树本身要留着，只清空库目录。
+            if path == workspace
+                || !path.starts_with(&workspace)
+                || path.parent() == Some(workspace.as_path())
+            {
+                break;
+            }
+            let empty = fs::read_dir(&path)
+                .map(|mut entries| entries.next().is_none())
+                .unwrap_or(false);
+            if !empty || fs::remove_dir(&path).is_err() {
+                break;
+            }
+            pruned.push(path.to_string_lossy().into_owned());
+            current = path.parent().map(Path::to_path_buf);
+        }
+    }
+    Ok(serde_json::json!({
+        "ok": true,
+        "task_id": id,
+        "file_name": task.file_name,
+        "removed_local": working.map(|path| path.to_string_lossy().into_owned()),
+        "pruned": pruned,
+    }))
+}
+
 fn filename(name: &str) -> Result<()> {
     let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
     if name.is_empty()
@@ -353,128 +498,6 @@ pub fn digest(path: &Path) -> Result<String> {
         hash.update(&buffer[..n]);
     }
     Ok(format!("{:x}", hash.finalize()))
-}
-pub fn open_session(root: &Path, request: Request) -> Result<Task> {
-    let Request::Open {
-        protocol,
-        server,
-        ticket,
-        expires_at,
-        local_action,
-    } = request
-    else {
-        bail!("session required")
-    };
-    if protocol != "cloudfile-local/v2"
-        || expires_at <= crate::now()
-        || ticket.is_empty()
-        || ticket.len() > 16384
-        || !matches!(local_action.as_str(), "" | "keep" | "open" | "overwrite")
-    {
-        bail!("invalid or expired session");
-    }
-    let base = origin(&server)?;
-    if !config(root)?.allowed_origins.contains(&server) {
-        bail!("origin is not trusted; add it in the desktop app");
-    }
-    let client = reqwest::blocking::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(300))
-        .build()?;
-    let response = client
-        .post(format!(
-            "{server}{}/api/v2.1/cloudfile/agent-sessions/claim/",
-            service_path(root, &server)?
-        ))
-        .json(&serde_json::json!({"ticket":ticket}))
-        .send()
-        .context("session claim failed")?;
-    if response.status() != 200 {
-        bail!("session claim rejected");
-    }
-    let mut data = Vec::new();
-    response.take(1024 * 1024 + 1).read_to_end(&mut data)?;
-    if data.len() > 1024 * 1024 {
-        bail!("claim response too large");
-    }
-    let c: Claimed = serde_json::from_slice(&data)?;
-    filename(&c.file.name)?;
-    if c.expires_at <= crate::now()
-        || !matches!(c.mode.as_str(), "local-view" | "local-edit")
-        || c.writeback.is_some()
-        || c.size > 4 * 1024 * 1024 * 1024
-        || uuid::Uuid::parse_str(&c.repo_id).is_err()
-        || uuid::Uuid::parse_str(&c.session_id).is_err()
-        || !c.path.starts_with('/')
-        || c.path
-            .split('/')
-            .skip(1)
-            .any(|x| x.is_empty() || x == "." || x == "..")
-        || c.path.contains(['\\', '\0'])
-        || c.file_id.len() != 40
-        || !c.file_id.bytes().all(|b| b.is_ascii_hexdigit())
-    {
-        bail!("invalid session response");
-    }
-    let content = Url::parse(&c.file.content_url)?;
-    if content.origin() != base.origin()
-        || !content.username().is_empty()
-        || content.password().is_some()
-        || content.fragment().is_some()
-    {
-        bail!("untrusted content URL");
-    }
-    let id = format!(
-        "{:x}",
-        Sha256::digest(format!("{server}\0{}\0{}\0{}", c.repo_id, c.mode, c.path))
-    );
-    let dir = task_dir(root, &id)?;
-    storage::private_dir(&dir)?;
-    let _lock = storage::lock(&dir.join("operation.lock"))?;
-    if dir.join("task.json").exists() {
-        // Reopening never replaces an existing working copy, including overwrite requests.
-        let task = load(root, &id)?;
-        local_path(root, &task)?;
-        return Ok(task);
-    }
-    let working = prepare_working_dir(root, &id)?;
-    let target = working.join(&c.file.name);
-    if target.exists() {
-        bail!("untracked working copy retained; review the task directory");
-    }
-    let mut response = client.get(content).send().context("download failed")?;
-    if response.status() != 200 {
-        bail!("download rejected");
-    }
-    let mut tmp = tempfile::NamedTempFile::new_in(&working)?;
-    let written = std::io::copy(&mut (&mut response).take(c.size + 1), &mut tmp)?;
-    if written != c.size {
-        bail!("download size mismatch");
-    }
-    tmp.flush()?;
-    tmp.as_file().sync_all()?;
-    let hash = digest(tmp.path())?;
-    if c.mode == "local-view" {
-        let mut permissions = tmp.as_file().metadata()?.permissions();
-        permissions.set_readonly(true);
-        tmp.as_file().set_permissions(permissions)?;
-    }
-    tmp.persist_noclobber(&target)?;
-    let task = Task {
-        device_id: None,
-        task_id: id,
-        file_name: c.file.name,
-        mode: c.mode,
-        server,
-        repo_id: c.repo_id,
-        remote_path: c.path,
-        session_id: c.session_id,
-        baseline_file_id: c.file_id,
-        baseline_digest: hash,
-        size: written,
-    };
-    storage::write(&dir.join("task.json"), &task)?;
-    Ok(task)
 }
 /// Hands the working copy to a local application. Precedence is an explicit
 /// user rule, then a detected application, then the OS default for known
@@ -627,5 +650,167 @@ mod tests {
         );
         // 「有公钥没源」永远拒绝（保持原契约）。
         assert!(set_update(&root, None, Some("x".into()), None).is_err());
+    }
+
+    fn task_fixture(root: &Path, id: &str, mode: &str, remote: &str) -> PathBuf {
+        crate::settings::update(root, |settings| {
+            settings.workspace_root = Some(root.join("workspace").to_string_lossy().into_owned())
+        })
+        .unwrap();
+        let working = prepare_working_dir(root, id).unwrap();
+        let task = Task {
+            device_id: None,
+            task_id: id.to_string(),
+            file_name: "a.docx".into(),
+            mode: mode.into(),
+            server: "http://127.0.0.1:6111".into(),
+            repo_id: "11111111-1111-4111-8111-111111111111".into(),
+            remote_path: remote.into(),
+            session_id: "session".into(),
+            baseline_file_id: "b".repeat(40),
+            baseline_digest: "d".repeat(64),
+            size: 1,
+        };
+        storage::write(&task_dir(root, id).unwrap().join("task.json"), &task).unwrap();
+        fs::write(working.join("a.docx"), b"x").unwrap();
+        working
+    }
+
+    #[test]
+    fn find_task_keeps_view_and_edit_apart_and_is_deterministic() {
+        let (_dir, root) = storage::test_root();
+        let view = "1".repeat(64);
+        let edit = "2".repeat(64);
+        let other = "3".repeat(64);
+        task_fixture(&root, &view, "local-view", "/a.docx");
+        task_fixture(&root, &edit, "optimistic-edit", "/a.docx");
+        task_fixture(&root, &other, "local-view", "/b.docx");
+        let repo = "11111111-1111-4111-8111-111111111111";
+        assert_eq!(
+            find_task(&root, repo, "/a.docx", "local-view")
+                .unwrap()
+                .unwrap()
+                .task_id,
+            view
+        );
+        assert_eq!(
+            find_task(&root, repo, "/a.docx", "optimistic-edit")
+                .unwrap()
+                .unwrap()
+                .task_id,
+            edit
+        );
+        // 查看不得命中编辑任务，反之亦然；不存在的路径返回 None 而不是随便挑一条。
+        assert!(find_task(&root, repo, "/missing.docx", "local-view")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn removing_a_task_deletes_the_copy_and_prunes_empty_directories() {
+        let (_dir, root) = storage::test_root();
+        let id = "4".repeat(64);
+        let working = task_fixture(&root, &id, "optimistic-edit", "/a.docx");
+        let workspace = root.join("workspace");
+        let removed = remove_task(&root, &id).unwrap();
+        assert_eq!(removed["ok"], true);
+        assert!(!working.exists());
+        assert!(!task_dir(&root, &id).unwrap().exists());
+        assert!(tasks(&root).unwrap().is_empty());
+        // workspace 根是用户自己的目录，绝不能被顺手删掉。
+        assert!(workspace.exists());
+    }
+
+    const LAYOUT_REPO: &str = "c66005f6-36bc-45e1-bc8f-88bd1ec13ded";
+
+    fn layout_fixture(root: &Path, id: &str, mode: &str, remote: &str, name: &str) -> PathBuf {
+        crate::settings::update(root, |settings| {
+            settings.workspace_root = Some(root.join("workspace").to_string_lossy().into_owned())
+        })
+        .unwrap();
+        let working = prepare_task_dir(root, id, mode, LAYOUT_REPO, name).unwrap();
+        let task = Task {
+            device_id: None,
+            task_id: id.to_string(),
+            file_name: name.into(),
+            mode: mode.into(),
+            server: "http://127.0.0.1:6111".into(),
+            repo_id: LAYOUT_REPO.into(),
+            remote_path: remote.into(),
+            session_id: "session".into(),
+            baseline_file_id: "b".repeat(40),
+            baseline_digest: "d".repeat(64),
+            size: 1,
+        };
+        storage::write(&task_dir(root, id).unwrap().join("task.json"), &task).unwrap();
+        fs::write(working.join(name), b"x").unwrap();
+        working
+    }
+
+    #[test]
+    fn new_tasks_live_under_view_or_edit_with_the_library_code() {
+        let (_dir, root) = storage::test_root();
+        let workspace = root.join("workspace");
+        let code = library_short(LAYOUT_REPO);
+        assert_eq!(code, "c66005f6-36bc45e1");
+        let view = layout_fixture(&root, &"a".repeat(64), "local-view", "/a.docx", "a.docx");
+        assert_eq!(view, workspace.join("view").join(&code));
+        let edit = layout_fixture(
+            &root,
+            &"b".repeat(64),
+            "optimistic-edit",
+            "/a.docx",
+            "a.docx",
+        );
+        assert_eq!(edit, workspace.join("edit").join(&code));
+        // 目录里不该出现任何 session / task id 的痕迹。
+        assert!(!view.to_string_lossy().contains(&"a".repeat(8)));
+    }
+
+    #[test]
+    fn same_name_in_two_paths_gets_a_stable_suffix() {
+        let (_dir, root) = storage::test_root();
+        crate::settings::update(&root, |settings| {
+            settings.workspace_root = Some(root.join("workspace").to_string_lossy().into_owned())
+        })
+        .unwrap();
+        let first =
+            local_name(&root, "optimistic-edit", LAYOUT_REPO, "/A/x.docx", "x.docx").unwrap();
+        assert_eq!(first, "x.docx");
+        layout_fixture(
+            &root,
+            &"c".repeat(64),
+            "optimistic-edit",
+            "/A/x.docx",
+            &first,
+        );
+        let second =
+            local_name(&root, "optimistic-edit", LAYOUT_REPO, "/B/x.docx", "x.docx").unwrap();
+        assert!(
+            second.starts_with("x~") && second.ends_with(".docx"),
+            "{second}"
+        );
+        // 同一个库内路径重复问，答案必须稳定。
+        let again =
+            local_name(&root, "optimistic-edit", LAYOUT_REPO, "/B/x.docx", "x.docx").unwrap();
+        assert_eq!(second, again);
+        // 换到查看子树互不影响。
+        let view = local_name(&root, "local-view", LAYOUT_REPO, "/B/x.docx", "x.docx").unwrap();
+        assert_eq!(view, "x.docx");
+    }
+
+    #[test]
+    fn removing_a_task_keeps_the_view_and_edit_subtrees() {
+        let (_dir, root) = storage::test_root();
+        let id = "d".repeat(64);
+        let working = layout_fixture(&root, &id, "local-view", "/a.docx", "a.docx");
+        let workspace = root.join("workspace");
+        remove_task(&root, &id).unwrap();
+        assert!(!working.exists());
+        assert!(workspace.join("view").exists(), "view 子树要留着");
+        assert!(!workspace
+            .join("view")
+            .join(library_short(LAYOUT_REPO))
+            .exists());
     }
 }

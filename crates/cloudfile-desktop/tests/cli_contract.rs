@@ -80,10 +80,8 @@ fn the_self_test_answers_with_json_and_never_opens_a_window() {
         serde_json::from_slice(&output.stdout).expect("self-test output is not JSON");
     let checks = report["checks"].as_array().unwrap();
     assert!(checks.len() >= 10, "{}", checks.len());
-    assert!(report["root"]
-        .as_str()
-        .unwrap()
-        .contains("CloudFileAgent22"));
+    // 默认安装根现在叫 `CloudFileAgent`（老机器上可能还是 `CloudFileAgent22`）。
+    assert!(report["root"].as_str().unwrap().contains("CloudFileAgent"));
     // 报告全在 stdout：解析失败的原因要能直接看到。
     assert!(
         output.stderr.is_empty(),

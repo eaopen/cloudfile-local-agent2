@@ -30,7 +30,9 @@ if not defined BASE_PRIMARY (
 )
 
 set "INSTALLER=cloudfile-install.exe"
-set "WORKDIR=%LOCALAPPDATA%\CloudFileAgent22"
+set "WORKDIR=%LOCALAPPDATA%\CloudFileAgent"
+rem 有 D 盘就落 D 盘，没有才回到系统盘
+if exist "D:\" set "WORKDIR=D:\CloudFileAgent"
 if not "%CLOUDFILE_AGENT2_HOME%"=="" set "WORKDIR=%CLOUDFILE_AGENT2_HOME%"
 if not exist "%WORKDIR%" mkdir "%WORKDIR%" >nul 2>&1
 

@@ -28,15 +28,6 @@ pub enum Request {
     Tasks {},
     #[serde(rename = "focus_task")]
     Focus { task_id: String },
-    #[serde(rename = "open_session")]
-    Open {
-        protocol: String,
-        server: String,
-        ticket: String,
-        expires_at: u64,
-        #[serde(default)]
-        local_action: String,
-    },
     /// Lightweight version probe the extension repeats periodically.
     #[serde(rename = "check_update")]
     CheckUpdate {},
@@ -70,9 +61,6 @@ pub enum Request {
         #[serde(default)]
         mode: String,
     },
-    /// Compatibility entry for a downloaded `.cloudfile` handoff file.
-    #[serde(rename = "open_session_file")]
-    OpenSessionFile { path: String },
 }
 pub fn read<R: Read>(input: &mut R) -> Result<Option<Value>> {
     let mut header = [0; 4];

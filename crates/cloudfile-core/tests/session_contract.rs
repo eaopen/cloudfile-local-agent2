@@ -1,45 +1,8 @@
-use cloudfile_core::{session, storage, wire};
+// V2 local edit has no server-side claim or handoff file.
+use cloudfile_core::{session, storage};
 use serde_json::json;
-use std::{
-    io::{Read, Write},
-    net::TcpListener,
-    thread,
-};
-fn fixture(cross_origin: bool, redirect: bool) -> (String, thread::JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let server = format!("http://{}", listener.local_addr().unwrap());
-    let origin = server.clone();
-    let handle = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let request = read_request(&mut stream);
-        assert!(request.contains("/agent-sessions/claim/"));
-        let body=json!({"session_id":"11111111-1111-4111-8111-111111111111","mode":"local-edit","expires_at":cloudfile_core::now()+60,"repo_id":"22222222-2222-4222-8222-222222222222","path":"/report.txt","file":{"name":"report.txt","content_url":if cross_origin{"http://127.0.0.1:1/stolen".into()}else{format!("{origin}/content")}},"file_id":"a".repeat(40),"size":3}).to_string();
-        write!(
-            stream,
-            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        )
-        .unwrap();
-        drop(stream);
-        if !cross_origin {
-            let (mut stream, _) = listener.accept().unwrap();
-            let _ = read_request(&mut stream);
-            if redirect {
-                write!(stream,"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/stolen\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
-            } else {
-                write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\nabc"
-                )
-                .unwrap();
-            }
-        }
-    });
-    (server, handle)
-}
-/// Read a complete HTTP request before answering. Responding while the client
-/// is still writing its body races the connection close and breaks the client.
+use std::io::{Read, Write};
+
 fn read_request(stream: &mut std::net::TcpStream) -> String {
     stream
         .set_read_timeout(Some(std::time::Duration::from_secs(5)))
@@ -63,58 +26,6 @@ fn read_request(stream: &mut std::net::TcpStream) -> String {
         stream.read_exact(&mut body).unwrap();
     }
     text + &String::from_utf8_lossy(&body)
-}
-fn request(server: String) -> wire::Request {
-    wire::Request::Open {
-        protocol: "cloudfile-local/v2".into(),
-        server,
-        ticket: "one-use-ticket".into(),
-        expires_at: cloudfile_core::now() + 60,
-        local_action: String::new(),
-    }
-}
-#[test]
-fn claim_download_and_preserve_user_bytes() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().canonicalize().unwrap();
-    cloudfile_core::settings::update(&root, |s| {
-        s.workspace_root = Some(
-            root.join("visible-workspace")
-                .to_string_lossy()
-                .into_owned(),
-        );
-    })
-    .unwrap();
-    let (server, handle) = fixture(false, false);
-    session::trust(&root, server.clone()).unwrap();
-    let task = session::open_session(&root, request(server)).unwrap();
-    handle.join().unwrap();
-    let local = session::local_path(&root, &task).unwrap();
-    assert!(local.starts_with(root.join("visible-workspace")));
-    assert_eq!(std::fs::read(&local).unwrap(), b"abc");
-    std::fs::write(&local, b"user changes").unwrap();
-    let loaded = session::load(&root, &task.task_id).unwrap();
-    assert_ne!(session::digest(&local).unwrap(), loaded.baseline_digest);
-    assert_eq!(session::tasks(&root).unwrap().len(), 1);
-    assert_eq!(std::fs::read(local).unwrap(), b"user changes");
-}
-#[test]
-fn cross_origin_and_redirect_never_download() {
-    for (cross, redirect) in [(true, false), (false, true)] {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
-        let (server, handle) = fixture(cross, redirect);
-        session::trust(&root, server.clone()).unwrap();
-        assert!(session::open_session(&root, request(server)).is_err());
-        handle.join().unwrap();
-        assert!(session::tasks(&root).unwrap().is_empty());
-    }
-}
-#[test]
-fn untrusted_origin_never_claims() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().canonicalize().unwrap();
-    assert!(session::open_session(&root, request("http://127.0.0.1:1".into())).is_err());
 }
 #[test]
 fn singleton_lock_and_interrupted_mailbox() {
@@ -200,4 +111,13 @@ fn adding_origin_again_preserves_the_paired_service_deployment_path() {
         session::service_path(&root, "https://files.example.com").unwrap(),
         "/other"
     );
+}
+
+#[test]
+fn retired_v1_uri_never_claims_a_server_session() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let uri = "cloudfile-open://v1/open?instance=https%3A%2F%2Fexample.com&session=11111111-1111-4111-8111-111111111111&ticket=not-v2";
+    assert!(cloudfile_core::paired_session::open(&root, uri).is_err());
+    assert!(session::tasks(&root).unwrap().is_empty());
 }

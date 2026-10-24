@@ -16,7 +16,6 @@ const tasks = document.querySelector('#tasks');
 const counts = document.querySelector('#counts');
 const exitBanner = document.querySelector('#confirm-exit');
 const exitText = document.querySelector('#confirm-exit-text');
-const updateBanner = document.querySelector('#update-hint');
 const hostState = document.querySelector('#host-state');
 const setupSteps = document.querySelector('#setup-steps');
 const setupLog = document.querySelector('#setup-log');
@@ -402,6 +401,23 @@ function button(label, handler, { secondary = false, disabled = false } = {}) {
   return element;
 }
 
+// 模态提示：检查更新与升级结果都走这里。顶部横幅在长任务列表里会被滚出视野，
+// 用户以为「点了没反应」，所以结果一律弹在眼前。
+function dialog(title, body, actions) {
+  document.querySelector('#dialog-title').textContent = title;
+  document.querySelector('#dialog-body').textContent = body || '';
+  const row = document.querySelector('#dialog-actions');
+  row.replaceChildren();
+  for (const [label, handler, secondary] of actions && actions.length ? actions : [['知道了', null, false]]) {
+    row.append(button(label, handler || closeDialog, { secondary: Boolean(secondary) }));
+  }
+  document.querySelector('#dialog').hidden = false;
+}
+
+function closeDialog() {
+  document.querySelector('#dialog').hidden = true;
+}
+
 function openButton(task) {
   return button(
     '打开文件',
@@ -536,6 +552,41 @@ function renderTask(task) {
       ? '仅供查看，本地修改不会回传云端'
       : '旧会话仅支持本地打开；要上传请从网页重新发起普通编辑';
     buttons.append(hint);
+  }
+
+  if (task.conflict) {
+    // 同一文件再次「本地编辑」：云端向前走了，或本地还有没上传的修改。
+    // 两种情况的文案不同，但选择只有两个 —— 用哪一份，任务始终只有一条。
+    const CONFLICT_TEXT = {
+      'remote-changed': '云端已有新版本。请选择用线上版本覆盖本地，或保留本地版本。',
+      'local-dirty': '本地有未上传的修改。请选择继续用本地这份，或用线上版本覆盖本地（本地修改会丢弃）。',
+      both: '云端和本地都有变化。请选择用线上版本覆盖本地，或保留本地这份。',
+    };
+    const warn = document.createElement('p');
+    warn.className = 'upload-error';
+    warn.textContent = CONFLICT_TEXT[task.conflict_reason] || CONFLICT_TEXT['remote-changed'];
+    info.append(warn);
+    buttons.append(
+      button('用线上覆盖本地', () => action(task, 'resolve_conflict', { choice: 'remote' })),
+      button('保留本地这份', () => action(task, 'resolve_conflict', { choice: 'local' }), {
+        secondary: true,
+        disabled: working,
+      }),
+    );
+  }
+
+  if (task.group === 'done' && !working) {
+    buttons.append(
+      button(
+        '删除',
+        async () => {
+          if (!window.confirm(`删除任务「${task.file_name}」？\n本地已下载的文件会一并删除，空目录也会清理。`)) return;
+          await action(task, 'delete_task');
+          say('任务已删除，本地文件也已清理。');
+        },
+        { secondary: true },
+      ),
+    );
   }
 
   row.append(info, buttons);
@@ -870,28 +921,39 @@ function wire() {
   };
 
   document.querySelector('#check-update').onclick = async () => {
+    dialog('正在检查更新…', '正在读取更新通道。', []);
     try {
       const result = await invoke('check_update');
       if (!result.update_source_set) {
-        say('尚未配置升级地址；开发版不自动检查。');
+        dialog('未配置升级地址', '当前是开发版，没有配置签名更新源，因此不会检查更新。', [['知道了']]);
         return;
       }
       if (!result.update_available) {
-        say(result.update_error ? `检查未通过：${result.update_error}` : '当前已是最新版本。');
+        if (result.update_error) {
+          dialog('检查更新失败', String(result.update_error), [['知道了']]);
+        } else {
+          const channel = result.latest_version ? `，通道最新也是 ${result.latest_version}` : '';
+          dialog('已是最新版本', `当前版本 ${result.current_version || ''}${channel}。`.trim(), [['知道了']]);
+        }
         return;
       }
-      document.querySelector('#update-title').textContent = `发现新版本 ${result.latest_version}`;
-      document.querySelector('#update-notes').textContent = result.latest_notes || '暂无版本说明。';
-      updateBanner.hidden = false;
-      say('发现可用升级；确认后再下载。');
+      dialog(
+        `发现新版本 ${result.latest_version}`,
+        `${result.latest_notes || '暂无版本说明。'}\n\n升级会在后台下载并安装，完成后需要重启任务中心才会生效。`,
+        [['下载并升级', () => applyUpdate()], ['稍后', closeDialog, true]],
+      );
     } catch (error) {
-      say(String(error));
+      dialog('检查更新失败', String(error), [['知道了']]);
     }
   };
 
-  document.querySelector('#update-apply').onclick = async () => {
+  // 后台升级：native-host --update 在独立进程里下载并安装，结果写 update-result.json。
+  // 这里必须自己轮询，否则用户看到的最后一个状态永远是「正在升级…」。
+  async function applyUpdate() {
+    dialog('正在升级…', '正在下载并安装新版本，请不要关闭任务中心。', []);
+    let result;
     try {
-      let result = await invoke('run_update', { force: false });
+      result = await invoke('run_update', { force: false });
       if (result.state === 'blocked') {
         // Exactly the exit dialog's trade-off: an upgrade stops the process
         // that renews Checkouts, so it is never silent when something is at risk.
@@ -904,21 +966,50 @@ function wire() {
           `仍有任务未处理，升级会中断后台续租：\n${detail}\n\n本地工作副本与待确认的 Intent 都会保留。是否继续升级？`,
         );
         if (!proceed) {
-          say('已取消升级；当前版本保持不变。');
+          dialog('已取消升级', '当前版本保持不变。', [['知道了']]);
           return;
         }
+        dialog('正在升级…', '正在下载并安装新版本，请不要关闭任务中心。', []);
         result = await invoke('run_update', { force: true });
       }
-      say(stateText(result));
-      updateBanner.hidden = true;
     } catch (error) {
-      say(String(error));
+      dialog('升级失败', String(error), [['知道了']]);
+      return;
     }
-  };
+    if (result.state !== 'running') {
+      dialog('升级未开始', stateText(result), [['知道了']]);
+      return;
+    }
+    const deadline = Date.now() + 4 * 60 * 1000;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      let state;
+      try {
+        state = await invoke('update_state');
+      } catch {
+        continue;
+      }
+      const outcome = state.result && state.result.state;
+      if (outcome === 'completed') {
+        const target = state.active_version ? ` ${state.active_version}` : '';
+        dialog(
+          '升级完成',
+          `已安装${target}。需要重启任务中心才会用上新版本。`,
+          [
+            ['立即重启', () => invoke('restart_app').catch((error) => dialog('重启失败', String(error), [['知道了']]))],
+            ['稍后重启', closeDialog, true],
+          ],
+        );
+        return;
+      }
+      if (outcome === 'failed') {
+        dialog('升级失败', '新版本没有安装成功。可以稍后再试；如果反复失败，请检查更新通道是否可访问。', [['知道了']]);
+        return;
+      }
+    }
+    dialog('升级仍在进行', '后台还在下载或安装。稍后到「设置 → 检查更新」可以再看一次结果。', [['知道了']]);
+  }
 
-  document.querySelector('#update-dismiss').onclick = () => {
-    updateBanner.hidden = true;
-  };
 
   document.querySelector('#exit-cancel').onclick = () => {
     exitBanner.hidden = true;
@@ -969,6 +1060,20 @@ async function start() {
     refresh(),
   ]);
   renderExitState();
+  // 升级过一次却没重启时，跑的还是旧构建 —— 主动提示，别让用户以为升级没生效。
+  invoke('update_state')
+    .then((state) => {
+      if (!state.newer) return;
+      dialog(
+        `已更新到 ${state.active_version}`,
+        `当前运行的是 ${state.version}，重启任务中心后生效。`,
+        [
+          ['立即重启', () => invoke('restart_app').catch((error) => dialog('重启失败', String(error), [['知道了']]))],
+          ['稍后', closeDialog, true],
+        ],
+      );
+    })
+    .catch(() => {});
   setInterval(() => {
     refresh();
     renderExitState();

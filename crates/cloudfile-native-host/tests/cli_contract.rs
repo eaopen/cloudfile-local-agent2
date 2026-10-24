@@ -99,6 +99,9 @@ impl Sandbox {
         if let Some(local) = &self.local_app_data {
             command.env("LOCALAPPDATA", local);
         }
+        // 沙箱必须把自己完全关在临时目录里：不然默认安装根会去探 D 盘，测试就会
+        // 写进开发机真实的 `D:\CloudFileAgent`。
+        command.env("CLOUDFILE_AGENT2_NO_DRIVE_PREFERENCE", "1");
         command
     }
 
@@ -132,7 +135,7 @@ impl Sandbox {
         self.local_app_data
             .clone()
             .unwrap()
-            .join("CloudFileAgent22/config.json")
+            .join("CloudFileAgent/config.json")
     }
 
     fn manifest_dir(&self) -> PathBuf {
@@ -140,7 +143,7 @@ impl Sandbox {
             self.local_app_data
                 .clone()
                 .unwrap()
-                .join("CloudFileAgent22/native-host")
+                .join("CloudFileAgent/native-host")
         } else {
             self.home
                 .join("Library/Application Support/Google/Chrome/NativeMessagingHosts")
@@ -610,7 +613,7 @@ fn the_self_test_reports_every_check_and_exits_non_zero_when_something_is_broken
         .local_app_data
         .clone()
         .unwrap()
-        .join("CloudFileAgent22");
+        .join("CloudFileAgent");
     assert!(!root.join("self-test.json").exists());
     assert!(!root.join("self-test.lock").exists());
 

@@ -36,7 +36,8 @@ Usage: cloudfile-install [options] [-- <extra cloudfile-native-host --install op
   --source <url>            primary update origin (or CLOUDFILE_INSTALL_SOURCE)
   --source-fallback <url>   mirror used when the primary is unreachable
   --public-key <base64url>  pinned P-256 release key (defaults to the built-in one)
-  --install-dir <path>      install root (defaults to %LOCALAPPDATA%\\CloudFileAgent22,
+  --install-dir <path>      install root (defaults to D:\\CloudFileAgent when the D drive
+                            is usable, otherwise %LOCALAPPDATA%\\CloudFileAgent,
                             or $CLOUDFILE_AGENT2_HOME)
   --dry-run                 resolve the source and print the plan; changes nothing
   --no-pause                do not wait for Enter at the end (double-click behaviour)
@@ -151,7 +152,7 @@ fn run(args: &[String]) -> Result<i32> {
         &source,
         // 引导安装时这台机器上还没有任何版本可比，所以「必须比当前新」这条不适用：
         // 用一个比任何合法版本都小的基准，其余校验（平台、协议、有效期、签名、同源）一条不少。
-        NO_INSTALLED_VERSION,
+        update::NO_INSTALLED_VERSION,
         cloudfile_core::now(),
         &update::platform_id(std::env::consts::OS, std::env::consts::ARCH),
         &public_key,
@@ -185,10 +186,6 @@ fn run(args: &[String]) -> Result<i32> {
     }
     Ok(code)
 }
-
-/// 这台机器上「还没有版本」的基准。比任何合法版本都小，所以「清单必须更新」永远成立，
-/// 而其余所有校验照旧 —— 引导安装不该因为「装的正好是同一个版本」而被拒绝。
-const NO_INSTALLED_VERSION: &str = "0.0.0";
 
 struct Options {
     source: Option<String>,
