@@ -536,9 +536,9 @@ async fn setup_apply(state: tauri::State<'_, State>) -> Result<Value, String> {
             let binary =
                 host_binary().ok_or_else(|| anyhow::anyhow!("本机未找到 cloudfile-native-host"))?;
             let dir = hostreg::manifest_dir()?;
-            // A generic repair must not silently displace a Windows .NET or
-            // another program's controller. The user can explicitly confirm
-            // takeover through the Host settings action instead.
+            // An older CloudFile Agent registration is ours: this explicit
+            // install/upgrade retires it (no second confirmation). A different
+            // program's controller still requires confirmation in Host settings.
             hostreg::install(&dir, hostreg::HOST, hostreg::EXTENSION_ID, &binary, false)
         })();
         steps.push(match registration {
