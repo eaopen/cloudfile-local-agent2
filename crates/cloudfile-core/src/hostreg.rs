@@ -114,12 +114,6 @@ fn manifest_path_text(path: &Path) -> String {
     text
 }
 
-/// 两条路径是否指向同一个可执行文件：比较前统一成 manifest 里的写法，
-/// 否则「自己注册的」会因为在一边 canonicalize 过而被判成 foreign。
-fn same_binary(left: &Path, right: &Path) -> bool {
-    manifest_path_text(left) == manifest_path_text(right)
-}
-
 /// The exact manifest Chrome requires. Field order is fixed so a takeover diff
 /// stays readable.
 pub fn manifest(name: &str, binary: &Path, extension_id: &str) -> Result<Value> {
@@ -495,15 +489,6 @@ mod tests {
                 manifest_path_text(Path::new(r"\\?\UNC\server\share\host.exe")),
                 r"\\?\UNC\server\share\host.exe"
             );
-            // 同一文件两种写法不能判成 foreign —— 否则自己的注册会被当成别人的。
-            assert!(same_binary(
-                Path::new(r"\\?\D:\apps\host.exe"),
-                Path::new(r"D:\apps\host.exe")
-            ));
-            assert!(!same_binary(
-                Path::new(r"\\?\D:\apps\host.exe"),
-                Path::new(r"D:\other\host.exe")
-            ));
         }
         #[cfg(not(windows))]
         {
@@ -511,10 +496,6 @@ mod tests {
                 manifest_path_text(Path::new("/opt/cloudfile/host")),
                 "/opt/cloudfile/host"
             );
-            assert!(same_binary(
-                Path::new("/opt/cloudfile/host"),
-                Path::new("/opt/cloudfile/host")
-            ));
         }
     }
 
