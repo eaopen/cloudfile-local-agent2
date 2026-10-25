@@ -103,7 +103,7 @@ cloudfile-desktop --self-test                                            # 同�
 
 规则：
 
-- 被其他程序注册的 Host **不会**被静默替换。需要显式加 `--takeover`，且原 Manifest 一定先备份为 `<host>.previous.json`，可用 `--rollback-host` 还原。任务中心里对应的接管需要用户确认。
+- 被其他程序注册的 Host **不会**被静默替换；需要显式加 `--takeover`，且原 Manifest 一定先备份为 `<host>.previous.json`，可用 `--rollback-host` 还原。任务中心里对应的接管需要用户确认。由**旧 CloudFile Agent** 写入的注册视为本产品自有：用户显式安装/升级 Rust 版本时自动备份并替换，不再二次确认。
 - 升级只信任签名清单：校验签名、SHA-256、平台与协议版本后才暂存到新的版本目录，不覆盖正在运行的程序；暂存程序必须能启动、`--version` 与 `--component` 都通过才允许切换。健康检查失败会删除暂存目录，当前版本保持不变。
 - 升级前会检查活动任务。存在有效 Checkout 或未确认 Intent 时默认拒绝升级，因为升级会替换承担续租与发布的进程；用户可在任务中心看到风险清单后明确选择继续。失败时保留用户数据，不会把未确认任务当作已完成。
 - Windows 需要 WebView2 运行时，`--status` 会报告 `runtime.webview2`；macOS 使用系统 WebKit（该字段为 `null`，表示不适用而非缺失）。不捆绑离线 WebView2，以保持包体积。
@@ -209,8 +209,13 @@ cargo build -p cloudfile-native-host --locked
 
 扩展 ID 是产品常量（`hostreg::EXTENSION_ID`），不需要传 —— 只有换扩展公钥重新打包时才需要 `--extension-id`。
 任务中心里也不再有「填 ID + 注册」这一路：引导页的「一键完成」或「Chrome 注册与升级」里的「重新注册」都用同一个常量。
-Host 注册只影响当前用户。命令行默认不会覆盖其它程序的注册，只有明确传入 `--takeover` 或在安装/修复界面执行接管时才会备份再替换
+Host 注册只影响当前用户。旧 CloudFile Agent 的注册在显式安装/升级时视为自有并自动备份替换；命令行不会覆盖其它程序的注册，只有明确传入 `--takeover` 或在安装/修复界面确认接管时才会备份再替换
 （原 Manifest 存为 `<host>.previous.json`，`--rollback-host` 可还原）。
+首次安装/修复引导不会自动覆盖其它程序的 Host；如果 Windows 上仍由旧 .NET
+客户端占用 `com.cloudfile.current_agent`，需从「设置 → 浏览器连接与诊断 → 重新注册 Host」
+阅读提示并明确确认，或者对命令行安装显式加 `--takeover`。
+原有 Rust Host 更新无需额外接管确认；接管其它程序时也不会继承对方的扩展 ID。
+
 
 ### Host 名（为什么 Windows 上是 `com.cloudfile.current_agent`）
 

@@ -12,7 +12,7 @@ Go Agent2 没有正式发行，因此不要求 Go 数据升级、Go Journal 读�
 | macOS | `com.cloudfile.agent2` | 与已存在的 Chrome 插件固定路由对齐；不意味着兼容未发布 Go |
 | 开发 | `com.cloudfile.agent22.dev` | 隔离使用独立浏览器配置文件及应用数据 |
 
-新仓库开发阶段维持 `com.cloudfile.agent22.dev`，不可默认覆盖另两个正式 Host。接管时校验真实所有权、备份 Manifest/注册位置、活动文件状态，允许一次性切换与回退；不接受用户未确认的 silent takeover。生产 Host 的应用签名和应用数据存储应与开发 Host 区分，避免测试工作副本混入正式运行。
+新仓库开发阶段维持 `com.cloudfile.agent22.dev`，不可默认覆盖另两个正式 Host。接管时校验真实所有权、备份 Manifest/注册位置、活动文件状态，允许一次性切换与回退；旧 CloudFile Agent 的替换由用户显式安装/升级动作授权，其它程序不接受未确认的 silent takeover。生产 Host 的应用签名和应用数据存储应与开发 Host 区分，避免测试工作副本混入正式运行。
 
 ## 浏览器消息需要保留的能力
 

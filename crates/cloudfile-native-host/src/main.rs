@@ -659,38 +659,44 @@ fn registration_target(
     args: &[String],
 ) -> anyhow::Result<(PathBuf, String, bool)> {
     let existing = hostreg::state(dir, host, None)?;
+    let owned_rust = existing.binary.as_ref().is_some_and(|binary| {
+        binary
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("cloudfile-native-host"))
+    });
     let target = match staged {
-        // 暂存那一步返回的就是 host 的最终路径（版本目录里的那个），直接注册它。
+        // A staged Rust update wins regardless of the previous controller.
         Some((_, staged_host)) => staged_host.clone(),
-        None => match &existing.binary {
-            Some(binary) => binary.clone(),
-            None => {
-                // 没有暂存也没有旧注册：只能就地指正在跑的这份。它旁边**必须**有任务中心，
-                // 否则注册出来的东西 Chrome 拉起来也起不了任务中心（引导体下载到安装根里的
-                // 临时副本就是这种情况，它随后还会被删掉）。
-                let binary = host_binary()?;
-                let desktop = binary
-                    .parent()
-                    .map(|dir| dir.join(DESKTOP_NAME))
-                    .filter(|path| path.is_file());
-                anyhow::ensure!(
-                    desktop.is_some(),
-                    "安装根里没有 {DESKTOP_NAME}，无法就地注册；请用 --source 重新安装"
-                );
-                binary
-            }
-        },
+        // Repair an existing Rust registration without changing its binary.
+        None if owned_rust => existing.binary.clone().unwrap(),
+        // A foreign controller is never re-registered as if it were ours.
+        None => {
+            // 没有暂存也没有自家注册：只能就地指正在跑的这份。它旁边**必须**有任务中心，
+            // 否则注册出来的东西 Chrome 拉起来也起不了任务中心（引导体下载到安装根里的
+            // 临时副本就是这种情况，它随后还会被删掉）。
+            let binary = host_binary()?;
+            let desktop = binary
+                .parent()
+                .map(|dir| dir.join(DESKTOP_NAME))
+                .filter(|path| path.is_file());
+            anyhow::ensure!(
+                desktop.is_some(),
+                "安装根里没有 {DESKTOP_NAME}，无法就地注册；请用 --source 重新安装"
+            );
+            binary
+        }
     };
-    // 已有注册时沿用它的扩展 ID：白名单不该因为重跑一次安装就被改掉。
-    // 都没有就用产品常量 —— 扩展 ID 固定，安装不该要求用户抄一串字符。
+    // Reuse allowed origins only for an existing Rust host. Reusing a foreign
+    // vendor's extension ID during an explicit takeover would disconnect the
+    // CloudFile extension, even if the manifest was backed up correctly.
     let extension_id = flag(args, "--extension-id")
-        .or_else(|| existing.extension_id.clone())
+        .or_else(|| owned_rust.then(|| existing.extension_id.clone()).flatten())
         .unwrap_or_else(|| hostreg::EXTENSION_ID.to_string());
-    // 有旧注册、或这次换了版本，都要显式接管：`hostreg::install` 会先把原 manifest
-    // 备份成 `<host>.previous.json`，可用 `--rollback-host` 还原。
-    let takeover = staged.is_some()
-        || existing.binary.is_some()
-        || args.iter().any(|value| value == "--takeover");
+    // A version update may replace our own Rust binary without takeover;
+    // replacing a different program always requires explicit --takeover.
+    // hostreg::install enforces this even if the manifest changes concurrently.
+    let takeover = args.iter().any(|value| value == "--takeover");
     Ok((target, extension_id, takeover))
 }
 
@@ -915,4 +921,71 @@ fn update_configured(root: &Path, kind: &str) -> Option<()> {
     // Agent 自身升级要公钥（验签用），扩展不需要。
     config.update_public_key.as_ref()?;
     policy.valid_source(&source).then_some(())
+}
+
+#[cfg(test)]
+mod registration_policy_tests {
+    use super::*;
+
+    #[test]
+    fn install_never_auto_takes_a_foreign_controller_even_after_staging() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().canonicalize().unwrap();
+        let host = hostreg::HOST;
+        let manifest = hostreg::manifest_path(&dir, host);
+        let foreign = json!({
+            "name": host,
+            "description": "Old .NET or unrelated Host",
+            "path": "/opt/other/controller",
+            "type": "stdio",
+            "allowed_origins": [
+                "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/"
+            ]
+        });
+        storage::write(&manifest, &foreign).unwrap();
+        let staged = ("2.2.1".to_string(), dir.join("cloudfile-native-host"));
+        let (binary, extension_id, takeover) =
+            registration_target(&dir, host, Some(&staged), &[]).unwrap();
+        assert_eq!(binary, staged.1);
+        assert_eq!(
+            extension_id,
+            hostreg::EXTENSION_ID,
+            "foreign extension ID must not be inherited"
+        );
+        assert!(
+            !takeover,
+            "staging a new Rust version is not consent to replace another controller"
+        );
+
+        let (_, _, takeover) =
+            registration_target(&dir, host, Some(&staged), &["--takeover".to_string()]).unwrap();
+        assert!(takeover);
+    }
+
+    #[test]
+    fn ordinary_rust_upgrade_keeps_explicit_takeover_false() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().canonicalize().unwrap();
+        let host = hostreg::HOST;
+        let manifest = hostreg::manifest_path(&dir, host);
+        let current = hostreg::manifest(
+            host,
+            &dir.join("v2.2.0").join("cloudfile-native-host"),
+            hostreg::EXTENSION_ID,
+        )
+        .unwrap();
+        storage::write(&manifest, &current).unwrap();
+        let staged = (
+            "2.2.1".to_string(),
+            dir.join("v2.2.1").join("cloudfile-native-host"),
+        );
+        let (binary, extension_id, takeover) =
+            registration_target(&dir, host, Some(&staged), &[]).unwrap();
+        assert_eq!(binary, staged.1);
+        assert_eq!(extension_id, hostreg::EXTENSION_ID);
+        assert!(
+            !takeover,
+            "existing Rust installs are upgraded by ownership check, not forced takeover"
+        );
+    }
 }

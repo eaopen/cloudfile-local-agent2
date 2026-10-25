@@ -466,7 +466,7 @@ fn setup_state(state: tauri::State<'_, State>) -> Result<Value, String> {
     let workspace = cloudfile_core::workspace::resolve(root);
     let registered = registration
         .as_ref()
-        .map(|item| item.binary.is_some())
+        .map(|item| item.binary.is_some() && !item.foreign)
         .unwrap_or(false);
     // A reusable Agent has no embedded enterprise trust origins.
     // Administrators or users configure actual services in the Services view.
@@ -536,7 +536,10 @@ async fn setup_apply(state: tauri::State<'_, State>) -> Result<Value, String> {
             let binary =
                 host_binary().ok_or_else(|| anyhow::anyhow!("本机未找到 cloudfile-native-host"))?;
             let dir = hostreg::manifest_dir()?;
-            hostreg::install(&dir, hostreg::HOST, hostreg::EXTENSION_ID, &binary, true)
+            // An older CloudFile Agent registration is ours: this explicit
+            // install/upgrade retires it (no second confirmation). A different
+            // program's controller still requires confirmation in Host settings.
+            hostreg::install(&dir, hostreg::HOST, hostreg::EXTENSION_ID, &binary, false)
         })();
         steps.push(match registration {
             Ok(outcome) => json!({"key":"host","ok":true,"detail":outcome.manifest_path,

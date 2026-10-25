@@ -4,7 +4,8 @@
 //! user's machine needed a scripting runtime just to connect the extension. The
 //! agent now performs every registration step itself, keeps a rollback copy of
 //! whatever it replaced, and refuses to overwrite a host owned by another
-//! program.
+//! program. A registration from an older CloudFile Agent is ours: an explicit
+//! install upgrades it without a second confirmation.
 //!
 //! Development and production identities stay separate on POSIX: the dev build
 //! registers `com.cloudfile.agent22.dev` and never touches the hosts the
@@ -113,12 +114,6 @@ fn manifest_path_text(path: &Path) -> String {
     text
 }
 
-/// 两条路径是否指向同一个可执行文件：比较前统一成 manifest 里的写法，
-/// 否则「自己注册的」会因为在一边 canonicalize 过而被判成 foreign。
-fn same_binary(left: &Path, right: &Path) -> bool {
-    manifest_path_text(left) == manifest_path_text(right)
-}
-
 /// The exact manifest Chrome requires. Field order is fixed so a takeover diff
 /// stays readable.
 pub fn manifest(name: &str, binary: &Path, extension_id: &str) -> Result<Value> {
@@ -222,7 +217,7 @@ fn apply_registry(host: &str, manifest: Option<&Path>) -> Result<()> {
     registry_update(host, manifest).map(|_| ())
 }
 
-pub fn state(dir: &Path, host: &str, expected_binary: Option<&Path>) -> Result<Registration> {
+pub fn state(dir: &Path, host: &str, _expected_binary: Option<&Path>) -> Result<Registration> {
     validate_host(host)?;
     let path = manifest_path(dir, host);
     let mut registration = Registration {
@@ -243,10 +238,10 @@ pub fn state(dir: &Path, host: &str, expected_binary: Option<&Path>) -> Result<R
         .and_then(|origin| origin.as_str())
         .and_then(|origin| origin.strip_prefix("chrome-extension://"))
         .map(|origin| origin.trim_end_matches('/').to_string());
-    registration.foreign = match (expected_binary, &binary) {
-        (Some(expected), Some(found)) => !same_binary(expected, found),
-        _ => false,
-    };
+    // Foreign means "a different program owns this slot". An older CloudFile
+    // Agent registration is ours: the user's explicit install/upgrade is the
+    // consent to retire it, without a second confirmation prompt.
+    registration.foreign = !cloudfile_owned_manifest(&value);
     registration.binary = binary;
     Ok(registration)
 }
@@ -291,8 +286,7 @@ pub fn install(
         let current: Value = storage::read(&path)?;
         let replaced = manifest(host, &binary, extension_id)?;
         if current != replaced {
-            let owner = current["path"].as_str().unwrap_or_default();
-            if !takeover && !is_agent_binary(Path::new(owner)) {
+            if !takeover && !cloudfile_owned_manifest(&current) {
                 bail!("{host} is registered by another program; run takeover to replace it");
             }
             fs::rename(&path, &previous)?;
@@ -315,10 +309,23 @@ pub fn install(
     })
 }
 
-fn is_agent_binary(path: &Path) -> bool {
-    path.file_name()
+/// True for a manifest written by a CloudFile agent: this Rust host, the older
+/// .NET agent, or another shipped CloudFile build. Unknown third-party programs
+/// are not ours and still require an explicit `--takeover`.
+fn cloudfile_owned_manifest(value: &Value) -> bool {
+    let description = value["description"]
+        .as_str()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if description.contains("cloudfile") {
+        return true;
+    }
+    value["path"]
+        .as_str()
+        .map(Path::new)
+        .and_then(|path| path.file_name())
         .and_then(|name| name.to_str())
-        .is_some_and(|name| name.starts_with("cloudfile-native-host"))
+        .is_some_and(|name| name.to_ascii_lowercase().contains("cloudfile"))
 }
 
 /// Removes only a manifest this agent owns. A foreign host is left untouched.
@@ -482,15 +489,6 @@ mod tests {
                 manifest_path_text(Path::new(r"\\?\UNC\server\share\host.exe")),
                 r"\\?\UNC\server\share\host.exe"
             );
-            // 同一文件两种写法不能判成 foreign —— 否则自己的注册会被当成别人的。
-            assert!(same_binary(
-                Path::new(r"\\?\D:\apps\host.exe"),
-                Path::new(r"D:\apps\host.exe")
-            ));
-            assert!(!same_binary(
-                Path::new(r"\\?\D:\apps\host.exe"),
-                Path::new(r"D:\other\host.exe")
-            ));
         }
         #[cfg(not(windows))]
         {
@@ -498,10 +496,6 @@ mod tests {
                 manifest_path_text(Path::new("/opt/cloudfile/host")),
                 "/opt/cloudfile/host"
             );
-            assert!(same_binary(
-                Path::new("/opt/cloudfile/host"),
-                Path::new("/opt/cloudfile/host")
-            ));
         }
     }
 
@@ -573,6 +567,49 @@ mod tests {
         install(&manifest_dir, DEV_HOST, ID, &path, true).unwrap();
         unregister(&manifest_dir, DEV_HOST).unwrap();
         assert!(!manifest_path(&manifest_dir, DEV_HOST).exists());
+    }
+
+    #[test]
+    fn a_recognized_legacy_cloudfile_host_is_upgraded_without_takeover() {
+        let (_dir, base) = crate::storage::test_root();
+        let manifest_dir = base.join("hosts");
+        let path = binary(&base);
+        // Manifests written by an older CloudFile Agent (.NET or earlier Rust)
+        // count as ours: an explicit install is the user's consent to retire it.
+        storage::write(
+            &manifest_path(&manifest_dir, DEV_HOST),
+            &json!({
+                "name": DEV_HOST,
+                "type": "stdio",
+                "path": if cfg!(windows) {
+                    "C:/Program Files/CloudFile Agent/CloudFileAgent.exe"
+                } else {
+                    "/opt/CloudFileAgent/CloudFileAgent"
+                },
+            }),
+        )
+        .unwrap();
+        assert!(!state(&manifest_dir, DEV_HOST, Some(&path)).unwrap().foreign);
+        let outcome = install(&manifest_dir, DEV_HOST, ID, &path, false).unwrap();
+        assert!(outcome.backed_up);
+        let current: Value = storage::read(&manifest_path(&manifest_dir, DEV_HOST)).unwrap();
+        assert_eq!(current["path"], manifest_path_text(&path).as_str());
+        assert!(!state(&manifest_dir, DEV_HOST, Some(&path)).unwrap().foreign);
+    }
+
+    #[test]
+    fn an_unknown_third_party_host_still_requires_takeover() {
+        let (_dir, base) = crate::storage::test_root();
+        let manifest_dir = base.join("hosts");
+        let path = binary(&base);
+        storage::write(
+            &manifest_path(&manifest_dir, DEV_HOST),
+            &json!({"name": DEV_HOST, "type": "stdio", "path": "/opt/other/vendor-host"}),
+        )
+        .unwrap();
+        assert!(state(&manifest_dir, DEV_HOST, Some(&path)).unwrap().foreign);
+        let error = install(&manifest_dir, DEV_HOST, ID, &path, false).unwrap_err();
+        assert!(error.to_string().contains("another program"));
     }
 
     #[test]

@@ -29,6 +29,8 @@
 - 使用 `cargo fmt --all --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo test --workspace --locked --no-fail-fast` 验证。平台相关要看 Windows/macOS CI 的真实结果。
 - 新代码优先扩展 `crates/cloudfile-core`，OS 适配限定在小模块；Tauri 只负责 UI/进程生命周期，不创建第二套业务授权与文件提交逻辑。
 - 不擅自更改 Server 端点、Chrome Host 名称、设备签名编码、CDC 块格式、用户数据目录或已有持久 Journal。确需变更要记录契约、测试与迁移边界。
+- Windows 单一 `com.cloudfile.current_agent` 可能仍由旧 .NET 客户端占用；首次安装/一键修复**可以替换已识别的旧 CloudFile Agent**（用户明确安装/升级 Rust 版本即视为替换授权，不再二次确认）。任何非 CloudFile 程序的注册仍必须由用户明确确认或 CLI `--takeover` 才可替换，并保留原 manifest 供回退。Rust→Rust 升级按自有注册规则正常进行。
+
 - 开发版 Chrome 扩展仅将 macOS 的 `AGENT2_HOST` 映射到 `com.cloudfile.agent22.dev`；Windows 的 `CURRENT_HOST` 必须保持 `com.cloudfile.current_agent` 并与本仓 `hostreg::HOST` 一致。不得批量替换所有 Host 字符串。
 - 目标机器安装无需管理员、Python/Rust/Go/.NET Runtime；macOS 不清除 quarantine 或绕过 Gatekeeper，Windows 不绕过 WDAC/AppLocker。
 
