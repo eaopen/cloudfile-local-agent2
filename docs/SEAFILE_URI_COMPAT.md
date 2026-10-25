@@ -80,7 +80,7 @@ continues to work where permitted.
 
 1. Windows 10/11 **non-administrator** installation/URL defaults, no UAC.
 2. Fresh Office file: browser login → V2 handoff → desktop open → automatic
-   upload → new Seafile version and Etech display.
+   upload → new Seafile version and customer display.
 3. Existing SeaDrive default retained; switching and uninstall restoration;
    no dual writers on the same local file.
 4. Cross-process authorization, ticket expiry/reauthorization, network loss,

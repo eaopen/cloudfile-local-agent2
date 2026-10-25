@@ -30,7 +30,7 @@ Only add dependency retrieval when a real business scenario provides a trusted f
 
 ## Subsequent slices, not part of this patch
 
-- Etech/CloudFile real local-view read-only grant (not merely task label).
+- Customer/CloudFile real local-view read-only grant (not merely task label).
 - GUI for per-extension local application selection, including vetted corporate EXE commands and safe working directory.
 - Office atomic-save, AutoCAD Xref/SolidWorks assembly, and one custom enterprise app acceptance tests.
 - Refresh browser authorization for long-lived CAD editing without a new local task or work copy.

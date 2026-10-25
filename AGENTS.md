@@ -57,4 +57,4 @@ P0 任务中心；P1 Windows .NET 现有功能覆盖；P2 独占编辑与 CDC �
 ## V2 开发期数据初始化
 
 - Agent2 只读取当前 V2 JWT、Go 文件接口和 `cf_edit_guard` 所代表的独占状态；`cf_audit_event` 由 Server 写入，Agent2 不使用任何旧 CloudFile SQL 表。
-- 服务端扩展数据不会从历史开发版本迁移。当前库绑定从 Seafile 原生事实重新登记，Etech 重新下发权限与身份组映射。Agent2 本地未提交文件由 Journal 管理，不因服务端开发库重建而自动丢弃；实际 DEV 重建前应停止未完成的独占任务。
+- 服务端扩展数据不会从历史开发版本迁移。当前库绑定从 Seafile 原生事实重新登记，客户 Provider 重新下发权限与身份组映射。Agent2 本地未提交文件由 Journal 管理，不因服务端开发库重建而自动丢弃；实际 DEV 重建前应停止未完成的独占任务。

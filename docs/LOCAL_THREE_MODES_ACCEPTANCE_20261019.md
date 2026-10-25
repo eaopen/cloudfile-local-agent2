@@ -27,10 +27,10 @@
 - V2 ticket 标记 `local-view`、读取返回 `X-CF-Mode=local-view`；Agent2 接入对应只读下载、写回永久拒绝。
 - 原生 Fileserver 绝不允许将只读票据用于 Publish / Checkout；Agent2 工作副本保留且不由自动编辑观察器接管。
 - 对应补丁在 [Hub #27](https://github.com/eaopen/cloudfile-hub/pull/27)、[Server #11](https://github.com/eaopen/cloudfile-server/pull/11)；Chrome [#3](https://github.com/eaopen/cloudfile-chrome-extension/pull/3) 沿用已有带 Origin 验证的 V2 URI。**只有这三端与本 PR 对应版本共同部署后，才可实际验收 V2 本地查看。**
-- 如本次 Etech DEV 尚未部署独立只读接口，网页应只显示已验收的“下载”入口而非宣称 V2 本地查看完整可用。
+- 如本次客户 DEV 尚未部署独立只读接口，网页应只显示已验收的“下载”入口而非宣称 V2 本地查看完整可用。
 
 ### E1：普通编辑验收
-- 登录真实 CloudFile/Etech -> 领取 V2 编辑票据 -> Agent2 下载 -> Word/Excel 保存 -> 观察稳定 -> 新 Seafile File ID / 版本可见。
+- 登录真实 CloudFile/客户环境 -> 领取 V2 编辑票据 -> Agent2 下载 -> Word/Excel 保存 -> 观察稳定 -> 新 Seafile File ID / 版本可见。
 - Office 原子保存/重命名（临时缺失）、两份文件并行、重复保存、旧版本冲突、临时网络中断、上传响应丢失查询原 Intent、票据到期后用户重新从网页打开。
 - 本地编辑不应要求 Local Bridge 或额外 AI 功能；如果浏览器/扩展桥仍选择旧 .NET/Go Host，不能记为 Rust Agent2 验收通过。
 
