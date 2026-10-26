@@ -18,13 +18,26 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            // 单任务默认「跟随总开关」：总开关开了这个任务就自动上传（与旧行为一致）。
+            // 总开关本身在 settings.json 的 auto_upload，缺省关闭（内测能力）。
             enabled: true,
             pause_reason: None,
             last_synced_at: None,
         }
     }
 }
-pub fn settings(root: &Path, id: &str) -> Result<Settings> {
+
+/// 自动上传的总开关：`settings.json` 的 `auto_upload`，缺省 false（内测，默认不开）。
+/// 关掉它，所有任务的自动上传都停；界面也不会给出单任务开关。
+pub fn master_enabled(root: &Path) -> bool {
+    crate::settings::load(root)
+        .ok()
+        .and_then(|settings| settings.auto_upload)
+        .unwrap_or(false)
+}
+
+/// 落盘的原始值：只有单任务自己的开关与暂停/同步状态，不含总开关。
+fn stored(root: &Path, id: &str) -> Result<Settings> {
     let path = session::task_dir(root, id)?.join("auto-upload.json");
     if path.exists() {
         storage::read(&path)
@@ -32,19 +45,34 @@ pub fn settings(root: &Path, id: &str) -> Result<Settings> {
         Ok(Settings::default())
     }
 }
+
+/// 生效值 = 总开关 AND 单任务开关（单任务默认 true，即「跟随总开关」）。
+pub fn settings(root: &Path, id: &str) -> Result<Settings> {
+    let mut value = stored(root, id)?;
+    value.enabled = master_enabled(root) && value.enabled;
+    Ok(value)
+}
+
 fn update(root: &Path, id: &str, change: impl FnOnce(&mut Settings)) -> Result<()> {
     let dir = session::task_dir(root, id)?;
     let _lock = storage::lock(&dir.join("auto-upload.lock"))?;
-    let mut current = settings(root, id)?;
+    // 改的是**落盘值**：不能把总开关算进去，否则会把「跟随总开关」固化成显式开关。
+    let mut current = stored(root, id)?;
     change(&mut current);
     storage::write(&dir.join("auto-upload.json"), &current)
 }
+
+/// 单任务开关：手动关掉某个文件的自动上传，关掉之后还能再打开。
+/// 总开关没开时不允许打开 —— 那是内测开关，只在配置文件里。
 pub fn set_enabled(root: &Path, id: &str, enabled: bool) -> Result<()> {
     let task = session::load(root, id)?;
     if task.mode != "optimistic-edit"
         || (task.device_id.is_none() && !crate::v2_edit::is_v2(root, id))
     {
         anyhow::bail!("此任务不支持自动上传");
+    }
+    if enabled && !master_enabled(root) {
+        anyhow::bail!("自动上传总开关未开启；需要时请在配置文件中启用");
     }
     update(root, id, |current| {
         current.enabled = enabled;
@@ -53,6 +81,7 @@ pub fn set_enabled(root: &Path, id: &str, enabled: bool) -> Result<()> {
         }
     })
 }
+
 pub fn confirmed(root: &Path, id: &str) -> Result<()> {
     update(root, id, |current| {
         current.pause_reason = None;
@@ -205,6 +234,8 @@ mod tests {
         storage::write(&dir.join("task.json"), &task).unwrap();
         // Mark the task as V2 without ever reaching the remote service.
         storage::write(&dir.join("v2-edit.json"), &json!({})).unwrap();
+        // 自动上传默认关闭（2026-10-26），这个用例要测观察器，用配置打开。
+        crate::settings::update(&root, |settings| settings.auto_upload = Some(true)).unwrap();
         let working = dir.join("office.docx");
         std::fs::write(&working, b"first edit").unwrap();
         let mut observer = Observer::default();
@@ -246,6 +277,8 @@ mod tests {
     #[test]
     fn view_and_exclusive_tasks_never_offer_automatic_upload() {
         let (_temp, root) = storage::test_root();
+        // 配置里打开自动上传；查看与独占任务仍然不参与。
+        crate::settings::update(&root, |settings| settings.auto_upload = Some(true)).unwrap();
         for (suffix, mode) in [('d', "local-view"), ('e', "exclusive-edit")] {
             let id = suffix.to_string().repeat(64);
             let dir = session::task_dir(&root, &id).unwrap();
@@ -266,7 +299,6 @@ mod tests {
             storage::write(&dir.join("task.json"), &task).unwrap();
             storage::write(&dir.join("v2-edit.json"), &json!({})).unwrap();
             std::fs::write(dir.join("document.txt"), b"new content").unwrap();
-            assert!(set_enabled(&root, &id, true).is_err());
         }
         let mut calls = 0;
         Observer::default()
@@ -276,5 +308,58 @@ mod tests {
             })
             .unwrap();
         assert_eq!(calls, 0);
+    }
+
+    fn plain_task(root: &Path, id: &str) -> std::path::PathBuf {
+        let dir = session::task_dir(root, id).unwrap();
+        storage::private_dir(&dir).unwrap();
+        let task = Task {
+            task_id: id.to_string(),
+            device_id: None,
+            file_name: "note.txt".into(),
+            mode: "optimistic-edit".into(),
+            server: "https://example.com".into(),
+            repo_id: "11111111-1111-4111-8111-111111111111".into(),
+            remote_path: "/note.txt".into(),
+            session_id: "22222222-2222-4222-8222-222222222222".into(),
+            baseline_file_id: "a".repeat(40),
+            baseline_digest: "b".repeat(64),
+            size: 3,
+        };
+        storage::write(&dir.join("task.json"), &task).unwrap();
+        storage::write(&dir.join("v2-edit.json"), &json!({})).unwrap();
+        std::fs::write(dir.join("note.txt"), b"x").unwrap();
+        dir
+    }
+
+    #[test]
+    fn auto_upload_follows_the_master_switch_and_the_per_task_override() {
+        let (_temp, root) = storage::test_root();
+        let id = "d".repeat(64);
+        plain_task(&root, &id);
+        // 总开关关（配置里没这一项）：不自动上传，也不允许从任务侧绕过。
+        assert!(!settings(&root, &id).unwrap().enabled);
+        assert!(set_enabled(&root, &id, true).is_err());
+        // 总开关开：任务默认跟随 → 自动上传（与旧行为一致）。
+        crate::settings::update(&root, |settings| settings.auto_upload = Some(true)).unwrap();
+        assert!(settings(&root, &id).unwrap().enabled);
+        // 手动关掉这个文件，只影响它自己。
+        set_enabled(&root, &id, false).unwrap();
+        assert!(!settings(&root, &id).unwrap().enabled);
+        let other = "e".repeat(64);
+        plain_task(&root, &other);
+        assert!(settings(&root, &other).unwrap().enabled);
+        // 关掉之后还能再打开。
+        set_enabled(&root, &id, true).unwrap();
+        assert!(settings(&root, &id).unwrap().enabled);
+        // 总开关关掉时，手动开过的也停。
+        crate::settings::update(&root, |settings| settings.auto_upload = Some(false)).unwrap();
+        assert!(!settings(&root, &id).unwrap().enabled);
+        // 暂停与恢复：resume 语义由 set_enabled(true) 承担（清 pause_reason）。
+        crate::settings::update(&root, |settings| settings.auto_upload = Some(true)).unwrap();
+        pause(&root, &id, "上传结果未确认").unwrap();
+        assert!(settings(&root, &id).unwrap().pause_reason.is_some());
+        set_enabled(&root, &id, true).unwrap();
+        assert!(settings(&root, &id).unwrap().pause_reason.is_none());
     }
 }

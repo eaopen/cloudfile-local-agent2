@@ -131,7 +131,7 @@ fn summaries(root: &Path, uploading: &Mutex<HashSet<String>>) -> anyhow::Result<
             "authorization_expires_at":cloudfile_core::v2_edit::ticket_expires_at(root, &task.task_id),
             "conflict":has_conflict,
             "conflict_reason":conflict_reason,
-            "auto_upload":automatic.ok(),"uploading":is_uploading,
+            "auto_upload":automatic.ok(),"auto_upload_master":auto_upload::master_enabled(root),"uploading":is_uploading,
             "pending_upload":has_pending,"pending_action":action}));
     }
     let count = |group: &str| tasks.iter().filter(|task| task["group"] == group).count();
@@ -822,6 +822,8 @@ fn untrust_origin(state: tauri::State<'_, State>, origin: String) -> Result<(), 
     session::untrust(&state.root, origin).map_err(|error| error.to_string())
 }
 
+/// 单任务开关：关掉/恢复某个文件的自动上传。总开关（settings.json 的 auto_upload）
+/// 关闭时界面不给入口，core 也会拒绝打开。
 #[tauri::command]
 fn set_auto_upload(
     state: tauri::State<'_, State>,
@@ -1098,6 +1100,7 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
             open_extension_dir,
             update_extension,
             untrust_origin,
+            set_auto_upload,
             autostart_set,
             check_update,
             run_update,
@@ -1113,7 +1116,6 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
             recover_upload,
             begin_pairing,
             service_status,
-            set_auto_upload,
             commit_task,
             recover_commit,
             retry_commit,
