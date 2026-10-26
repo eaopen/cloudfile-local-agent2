@@ -66,8 +66,36 @@ jobs:
           $logPath = Join-Path $env:RUNNER_TEMP 'agent2-bootstrap-mismatch.txt'
           $second = Start-Process -FilePath $env:ComSpec -ArgumentList '/d', '/c', 'call .\scripts\install.cmd' -NoNewWindow -Wait -PassThru -RedirectStandardOutput $logPath
           $output = Get-Content -Path $logPath -Raw
-          if ($second.ExitCode -eq 0 -or -not ($output -match 'SHA-256 verification failed')) {
-            throw 'A mismatched cached bootstrap was not rejected by digest verification'
+          # Since 37b0f31 a stale *cache* is no longer a hard stop: it is deleted and
+          # re-fetched against the same pinned digest (still byte-for-byte verified),
+          # because the cached exe always predates the current channel. What must hold
+          # here is that the mismatched file is never executed and the run fails closed
+          # when no verified bytes can be obtained.
+          if ($second.ExitCode -eq 0) {
+            throw 'A mismatched cached bootstrap was incorrectly accepted'
+          }
+          if (-not ($output -match '\[WARN\]')) {
+            throw 'A mismatched cached bootstrap was not retried against the pinned digest'
+          }
+          if (-not ($output -match '\[ERROR\]')) {
+            throw 'A failed bootstrap re-download did not fail closed'
+          }
+          if (Test-Path (Join-Path $env:CLOUDFILE_AGENT2_HOME 'cloudfile-install.exe')) {
+            throw 'An unverified cached bootstrap was left behind'
+          }
+          # A bootstrap shipped next to the script is the release artifact itself:
+          # a digest mismatch there is a hard rejection, never a re-download.
+          $bundle = Join-Path (Join-Path $PWD 'scripts') 'cloudfile-install.exe'
+          Set-Content -Path $bundle -Value 'not a trusted bootstrap'
+          try {
+            $bundleLog = Join-Path $env:RUNNER_TEMP 'agent2-bootstrap-bundle.txt'
+            $third = Start-Process -FilePath $env:ComSpec -ArgumentList '/d', '/c', 'call .\scripts\install.cmd' -NoNewWindow -Wait -PassThru -RedirectStandardOutput $bundleLog
+            $bundleOutput = Get-Content -Path $bundleLog -Raw
+            if ($third.ExitCode -eq 0 -or -not ($bundleOutput -match 'SHA-256 verification failed')) {
+              throw 'A mismatched bundle bootstrap was not rejected by digest verification'
+            }
+          } finally {
+            Remove-Item -LiteralPath $bundle -Force -ErrorAction SilentlyContinue
           }
       - name: Package development build
         run: python scripts/package.py
