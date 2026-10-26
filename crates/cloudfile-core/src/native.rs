@@ -536,10 +536,7 @@ mod tests {
         // 修改逻辑（2026-10-26）：正式版版本号从 2.0.0 重新起算，这里不再钉死 "2.2.0"。
         // 要守的是「构建版本仍属 2.x 这条产品线」，与具体的构建号无关。
         assert!(
-            value["build_version"]
-                .as_str()
-                .unwrap()
-                .starts_with("2."),
+            value["build_version"].as_str().unwrap().starts_with("2."),
             "build version must stay in the 2.x line"
         );
         assert!(value["applications"].as_array().unwrap().len() > 1);
