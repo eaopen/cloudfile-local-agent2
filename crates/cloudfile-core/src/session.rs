@@ -158,18 +158,26 @@ pub fn seeded_origins() -> Vec<String> {
     out
 }
 
-/// 首次初始化时补齐内置服务：**只在 config.json 还不存在时**写入。
-/// 之后用户删掉某个服务是明确的意愿，启动时不再强行加回来。
+/// 补齐内置服务：**只在当前一条服务都没有时**写入。
+///
+/// 修改逻辑（2026-10-26）：原来要求「config.json 不存在」才写，导致从旧版升级上来、
+/// config.json 已经有了的机器永远拿不到内置服务（现场就是这样）。真正的判据应该是
+/// **信任列表为空** —— 一条都没有说明用户从没配置过，内置的两条就是他该看到的；
+/// 只要还剩一条，就说明用户自己做过选择，绝不再塞回去。
 pub fn ensure_default_origins(root: &Path) -> Result<Vec<String>> {
-    let path = root.join("config.json");
-    if path.exists() {
-        return Ok(Vec::new());
-    }
     let wanted = seeded_origins();
     if wanted.is_empty() {
         return Ok(Vec::new());
     }
-    let mut cfg = Config::default();
+    let path = root.join("config.json");
+    let mut cfg = if path.exists() {
+        storage::read(&path)?
+    } else {
+        Config::default()
+    };
+    if !cfg.allowed_origins.is_empty() {
+        return Ok(Vec::new());
+    }
     cfg.allowed_origins = wanted.clone();
     storage::write(&path, &cfg)?;
     Ok(wanted)
