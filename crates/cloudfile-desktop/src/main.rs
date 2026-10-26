@@ -1052,7 +1052,10 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
     //  2) 工作副本目录 —— 以前要等到第一次打开文件才创建，用户点「打开工作目录」时是空的/不存在。
     if let Ok(added) = session::ensure_default_origins(&root) {
         if !added.is_empty() {
-            eprintln!("CloudFile desktop: seeded trusted origins: {}", added.join(", "));
+            eprintln!(
+                "CloudFile desktop: seeded trusted origins: {}",
+                added.join(", ")
+            );
         }
     }
     let _ = settings::ensure_workspace(&root);

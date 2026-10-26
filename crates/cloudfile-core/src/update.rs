@@ -457,7 +457,10 @@ pub fn fetch_manifest_for(policy: SourcePolicy, source: &str) -> Result<Vec<u8>>
         .send()
         .map_err(|error| anyhow::anyhow!("无法读取更新清单 {url}：{error}"))?;
     if response.status() != 200 {
-        bail!("更新清单不可用（HTTP {}）：{url}", response.status().as_u16());
+        bail!(
+            "更新清单不可用（HTTP {}）：{url}",
+            response.status().as_u16()
+        );
     }
     let mut bytes = Vec::new();
     use std::io::Read;
