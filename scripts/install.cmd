@@ -37,7 +37,10 @@ if not "%CLOUDFILE_AGENT2_HOME%"=="" set "WORKDIR=%CLOUDFILE_AGENT2_HOME%"
 if not exist "%WORKDIR%" mkdir "%WORKDIR%" >nul 2>&1
 
 set "TARGET=%~dp0%INSTALLER%"
-if exist "%TARGET%" goto run
+if exist "%TARGET%" (
+  set "SOURCE_KIND=bundle"
+  goto run
+)
 set "TARGET=%WORKDIR%\%INSTALLER%"
 if exist "%TARGET%" (
   rem Cached executables outside the supplied bundle also require publisher verification.
@@ -46,6 +49,7 @@ if exist "%TARGET%" (
     set "CODE=1"
     goto end
   )
+  set "SOURCE_KIND=cache"
   goto run
 )
 
@@ -78,9 +82,25 @@ rem If the publisher supplied a hash, verify both cached and downloaded EXEs.
 if defined CLOUDFILE_INSTALL_BOOTSTRAP_SHA256 (
   call :verify
   if errorlevel 1 (
-    echo [ERROR] Bootstrap SHA-256 verification failed. Refusing to execute it.
-    set "CODE=1"
-    goto end
+    rem 本机缓存的是上一次安装留下的引导体（通道换了新版就必然对不上）。
+    rem 缓存不可信但**可以换掉**：删掉后按钉住的哈希重新下载，仍然逐字节校验。
+    rem 只有「和脚本放在一起的发布包」对不上才直接拒绝 —— 那是发布物本身有问题。
+    if /i "%SOURCE_KIND%"=="cache" (
+      echo [WARN] 本机缓存的安装引导体与当前通道不一致，重新下载...
+      del /f /q "%TARGET%" >nul 2>&1
+      call :fetch "%BASE_PRIMARY%/%INSTALLER%"
+      if errorlevel 1 if defined BASE_MIRROR call :fetch "%BASE_MIRROR%/%INSTALLER%"
+      if errorlevel 1 (
+        echo [ERROR] 引导体下载失败或校验不通过，已停止。
+        set "CODE=1"
+        goto end
+      )
+    ) else (
+      echo [ERROR] Bootstrap SHA-256 verification failed. Refusing to execute it.
+      echo         请重新下载整包：脚本旁边的 %INSTALLER% 与发布哈希不一致。
+      set "CODE=1"
+      goto end
+    )
   )
 )
 echo 通道：%BASE_PRIMARY%
