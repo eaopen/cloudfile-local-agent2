@@ -448,12 +448,16 @@ pub fn fetch_manifest_for(policy: SourcePolicy, source: &str) -> Result<Vec<u8>>
         .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
+    // 修改逻辑（2026-10-26）：原来这里只有一句 context("update manifest request failed")，
+    // 界面只能照抄这一句 —— 分不清是域名解析、代理、404 还是清单没上传。
+    // 现在把完整 URL 和真实原因一起带给用户。
+    let url = format!("{source}/{}", manifest_file(source));
     let response = client
-        .get(format!("{source}/{}", manifest_file(source)))
+        .get(&url)
         .send()
-        .context("update manifest request failed")?;
+        .map_err(|error| anyhow::anyhow!("无法读取更新清单 {url}：{error}"))?;
     if response.status() != 200 {
-        bail!("update manifest rejected");
+        bail!("更新清单不可用（HTTP {}）：{url}", response.status().as_u16());
     }
     let mut bytes = Vec::new();
     use std::io::Read;
