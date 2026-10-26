@@ -715,8 +715,22 @@ fn launch_desktop(desktop: Option<&Path>) -> anyhow::Result<bool> {
         eprintln!("警告：找不到 {DESKTOP_NAME}，任务中心没能自动启动；装好后手动双击即可。");
         return Ok(false);
     };
+    // 修改逻辑（2026-10-26）：装/升级完成后旧的任务中心还在跑，单实例锁会把新实例顶掉，
+    // 用户看到的仍是旧版本（现场就是这样）。先停掉旧的，再拉新的。
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/IM", DESKTOP_NAME])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        // 给它一点时间释放 desktop.lock。
+        std::thread::sleep(std::time::Duration::from_millis(400));
+    }
     let mut command = std::process::Command::new(desktop);
     command
+        .arg("--autostart")
+        .arg("--await-instance")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());

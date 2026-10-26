@@ -139,19 +139,22 @@ pub fn untrust(root: &Path, raw: String) -> Result<()> {
 /// 通道里的安装脚本，安装完第一次启动时由 [`ensure_default_origins`] 补进 config.json。
 pub const TRUSTED_ORIGINS_ENV: &str = "CLOUDFILE_TRUSTED_ORIGINS";
 
-/// 环境里声明的默认受信任服务，规范化后返回（非法项丢弃，不阻断启动）。
-pub fn seeded_origins() -> Vec<String> {
+/// 环境里声明的默认服务，按 `(origin, service_path)` 返回。
+///
+/// 修改逻辑（2026-10-26）：服务地址是「origin + 部署路径」两段，例如
+/// `http://host/seafile` → origin `http://host`、path `/seafile`。
+/// 只把 origin 写进 allowed_origins 会丢掉 `/seafile`，界面和服务调用都会指向门户根。
+pub fn seeded_services() -> Vec<(String, String)> {
     let raw = std::env::var(TRUSTED_ORIGINS_ENV).unwrap_or_default();
-    let mut out: Vec<String> = Vec::new();
+    let mut out: Vec<(String, String)> = Vec::new();
     for item in raw.split([';', ',']) {
         let item = item.trim();
         if item.is_empty() {
             continue;
         }
-        if let Ok(server) = origin(item) {
-            let text = server.to_string();
-            if !out.contains(&text) {
-                out.push(text);
+        if let Ok(pair) = address(item) {
+            if !out.contains(&pair) {
+                out.push(pair);
             }
         }
     }
@@ -160,12 +163,10 @@ pub fn seeded_origins() -> Vec<String> {
 
 /// 补齐内置服务：**只在当前一条服务都没有时**写入。
 ///
-/// 修改逻辑（2026-10-26）：原来要求「config.json 不存在」才写，导致从旧版升级上来、
-/// config.json 已经有了的机器永远拿不到内置服务（现场就是这样）。真正的判据应该是
-/// **信任列表为空** —— 一条都没有说明用户从没配置过，内置的两条就是他该看到的；
-/// 只要还剩一条，就说明用户自己做过选择，绝不再塞回去。
+/// 判据是**信任列表为空**：一条都没有说明用户从没配置过，内置的两条就是他该看到的；
+/// 只要还剩一条，就说明用户自己做过选择，绝不再塞回去（其余字段原样保留）。
 pub fn ensure_default_origins(root: &Path) -> Result<Vec<String>> {
-    let wanted = seeded_origins();
+    let wanted = seeded_services();
     if wanted.is_empty() {
         return Ok(Vec::new());
     }
@@ -178,9 +179,20 @@ pub fn ensure_default_origins(root: &Path) -> Result<Vec<String>> {
     if !cfg.allowed_origins.is_empty() {
         return Ok(Vec::new());
     }
-    cfg.allowed_origins = wanted.clone();
+    let mut added = Vec::new();
+    for (server, prefix) in wanted {
+        if !cfg.allowed_origins.contains(&server) {
+            cfg.allowed_origins.push(server.clone());
+        }
+        cfg.service_paths.insert(server.clone(), prefix.clone());
+        added.push(if prefix.is_empty() {
+            server
+        } else {
+            format!("{server}{prefix}/")
+        });
+    }
     storage::write(&path, &cfg)?;
-    Ok(wanted)
+    Ok(added)
 }
 
 pub fn config(root: &Path) -> Result<Config> {
