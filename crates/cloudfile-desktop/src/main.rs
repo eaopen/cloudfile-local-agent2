@@ -338,6 +338,7 @@ fn present_toast(app: &tauri::AppHandle, level: &str, text: &str) {
     }) else {
         return;
     };
+    #[cfg(not(target_os = "linux"))]
     let _ = window.set_ignore_cursor_events(true);
     if let Some(monitor) = window
         .current_monitor()
@@ -356,7 +357,14 @@ fn present_toast(app: &tauri::AppHandle, level: &str, text: &str) {
         "toast",
         json!({"level": if level == "warning" {"warning"} else {"info"}, "text": text}),
     );
+    #[cfg(not(target_os = "linux"))]
     let _ = window.show();
+    // GTK creates the GdkWindow when shown. Tao panics if cursor passthrough
+    // is requested on an unrealized, initially hidden Linux toast.
+    #[cfg(target_os = "linux")]
+    if window.show().is_ok() {
+        let _ = window.set_ignore_cursor_events(true);
+    }
     let handle = app.clone();
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(3_500));
@@ -1201,6 +1209,7 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
             for label in ["float", "toast"] {
                 if let Some(extra) = app.get_webview_window(label) {
                     let _ = extra.set_always_on_top(true);
+                    #[cfg(not(target_os = "linux"))]
                     if label == "toast" {
                         let _ = extra.set_ignore_cursor_events(true);
                     }

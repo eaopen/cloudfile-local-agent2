@@ -76,6 +76,8 @@ impl Sandbox {
         std::fs::create_dir_all(home.join("AppData/Local")).unwrap();
         let local_app_data = Some(if cfg!(windows) {
             home.join("AppData/Local")
+        } else if cfg!(target_os = "linux") {
+            home.join(".local/share")
         } else {
             home.join("Library/Application Support")
         });
@@ -96,6 +98,11 @@ impl Sandbox {
         let mut command = Command::new(binary);
         command.env("HOME", &self.home);
         command.env("USERPROFILE", &self.home);
+        // Linux 的 XDG 路径也必须隔离，不能继承桌面会话中的真实用户目录。
+        if cfg!(target_os = "linux") {
+            command.env("XDG_DATA_HOME", self.home.join(".local/share"));
+            command.env("XDG_CONFIG_HOME", self.home.join(".config"));
+        }
         if let Some(local) = &self.local_app_data {
             command.env("LOCALAPPDATA", local);
         }
@@ -144,6 +151,8 @@ impl Sandbox {
                 .clone()
                 .unwrap()
                 .join("CloudFileAgent/native-host")
+        } else if cfg!(target_os = "linux") {
+            self.home.join(".config/google-chrome/NativeMessagingHosts")
         } else {
             self.home
                 .join("Library/Application Support/Google/Chrome/NativeMessagingHosts")

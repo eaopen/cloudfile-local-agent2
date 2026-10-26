@@ -37,7 +37,7 @@
 
 ## 并行：安装、维护与升级
 
-- 开发 Host 独立；Windows/macOS 普通用户绿色运行，无 Go/.NET/Python 目标机运行依赖。
+- macOS/Linux 共用 Rust Host，Windows 保持固定控制器 Host；普通用户绿色运行，无 Go/.NET/Python 目标机运行依赖。
 - Rust→Rust 更新：签名清单、SHA-256、分版本目录、健康检查、活动任务阻断、原地安全切换与回退。
 - Windows 引导执行前必须可信：随发行包提供 bootstrap EXE，或部署方固定 EXE 的 SHA-256；不能仅检查下载字节数就执行。
 - Windows .NET 一次性替换：用户确认、旧 Host Manifest 备份、工作文件不覆盖、验证新版、允许回退；不做 Go→Rust 迁移。

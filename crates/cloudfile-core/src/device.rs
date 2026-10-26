@@ -92,7 +92,8 @@ fn trusted(root: &Path, server: &str) -> Result<()> {
     }
     Ok(())
 }
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+// Linux 复用设备签名契约，通过 Secret Service 保存密钥，不接受明文降级。
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 fn entry(alias: &str) -> Result<keyring::Entry> {
     if !uuid(alias) {
         bail!("invalid key alias");
@@ -100,7 +101,7 @@ fn entry(alias: &str) -> Result<keyring::Entry> {
     Ok(keyring::Entry::new("com.cloudfile.agent22.device", alias)?)
 }
 fn read_key(alias: &str) -> Result<SigningKey> {
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     {
         let bytes = zeroize::Zeroizing::new(
             entry(alias)?
@@ -109,10 +110,10 @@ fn read_key(alias: &str) -> Result<SigningKey> {
         );
         Ok(SigningKey::from_slice(&bytes)?)
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         let _ = alias;
-        bail!("设备密钥仅支持 Windows/macOS");
+        bail!("设备密钥仅支持 Windows/macOS/Linux");
     }
 }
 fn public(key: &SigningKey) -> Value {
@@ -135,12 +136,12 @@ pub fn begin(root: &Path, server: &str) -> Result<()> {
     }
     let key = SigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
     let alias = uuid::Uuid::new_v4().to_string();
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     entry(&alias)?
         .set_secret(&key.to_bytes())
         .context("无法保存到系统凭据库")?;
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    bail!("设备配对仅支持 Windows/macOS");
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    bail!("设备配对仅支持 Windows/macOS/Linux");
     storage::write(
         &path(root, server, true)?,
         &Pairing {
@@ -354,7 +355,10 @@ pub fn decode(response: reqwest::blocking::Response) -> Result<Value> {
     Ok(serde_json::from_slice(&data)?)
 }
 
-#[cfg(all(test, any(target_os = "macos", target_os = "windows")))]
+#[cfg(all(
+    test,
+    any(target_os = "macos", target_os = "windows", target_os = "linux")
+))]
 mod tests {
     use super::*;
     use p256::ecdsa::signature::Verifier;
