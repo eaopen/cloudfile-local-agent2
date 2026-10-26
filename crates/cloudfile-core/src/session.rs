@@ -133,6 +133,48 @@ pub fn untrust(root: &Path, raw: String) -> Result<()> {
     storage::write(&root.join("config.json"), &cfg)
 }
 
+/// 部署方内置的受信任服务（`;` 或 `,` 分隔的 origin 列表）。
+///
+/// 仓库里**不写死任何客户地址**（开源发布不带内网门户）；发版脚本把部署默认值写进
+/// 通道里的安装脚本，安装完第一次启动时由 [`ensure_default_origins`] 补进 config.json。
+pub const TRUSTED_ORIGINS_ENV: &str = "CLOUDFILE_TRUSTED_ORIGINS";
+
+/// 环境里声明的默认受信任服务，规范化后返回（非法项丢弃，不阻断启动）。
+pub fn seeded_origins() -> Vec<String> {
+    let raw = std::env::var(TRUSTED_ORIGINS_ENV).unwrap_or_default();
+    let mut out: Vec<String> = Vec::new();
+    for item in raw.split([';', ',']) {
+        let item = item.trim();
+        if item.is_empty() {
+            continue;
+        }
+        if let Ok(server) = origin(item) {
+            let text = server.to_string();
+            if !out.contains(&text) {
+                out.push(text);
+            }
+        }
+    }
+    out
+}
+
+/// 首次初始化时补齐内置服务：**只在 config.json 还不存在时**写入。
+/// 之后用户删掉某个服务是明确的意愿，启动时不再强行加回来。
+pub fn ensure_default_origins(root: &Path) -> Result<Vec<String>> {
+    let path = root.join("config.json");
+    if path.exists() {
+        return Ok(Vec::new());
+    }
+    let wanted = seeded_origins();
+    if wanted.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut cfg = Config::default();
+    cfg.allowed_origins = wanted.clone();
+    storage::write(&path, &cfg)?;
+    Ok(wanted)
+}
+
 pub fn config(root: &Path) -> Result<Config> {
     let p = root.join("config.json");
     if !p.exists() {

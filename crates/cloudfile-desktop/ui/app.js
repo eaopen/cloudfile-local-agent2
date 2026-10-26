@@ -751,6 +751,8 @@ async function loadSettings() {
   document.querySelector('#host-extension-id').textContent = (setup && setup.extension_id) || '';
   document.querySelector('#version').textContent = `CloudFile Agent · ${current.version}`;
   document.querySelector('#sidebar-version').textContent = `v${current.version}`;
+  // 徽标跟着真实版本走（原来写死「AGENT 2.2 · 开发版」，正式版里既过时又误导）。
+  document.querySelector('#agent-badge').textContent = `AGENT ${current.version}`;
   document.querySelector('#install-path').textContent = `安装目录：${current.install_root}`;
 
   const registration = current.registered_host;

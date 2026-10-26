@@ -1047,6 +1047,15 @@ fn self_test() -> i32 {
 
 fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
     let root = storage::root()?;
+    // 修改逻辑（2026-10-26）：启动时就把用户要用的两个目录准备好。
+    //  1) 内置受信任服务（部署方通过 CLOUDFILE_TRUSTED_ORIGINS 下发，只在首次初始化时写入）；
+    //  2) 工作副本目录 —— 以前要等到第一次打开文件才创建，用户点「打开工作目录」时是空的/不存在。
+    if let Ok(added) = session::ensure_default_origins(&root) {
+        if !added.is_empty() {
+            eprintln!("CloudFile desktop: seeded trusted origins: {}", added.join(", "));
+        }
+    }
+    let _ = settings::ensure_workspace(&root);
     let lock_path = root.join("desktop.lock");
     let _lock = match storage::lock(&lock_path) {
         Ok(lock) => lock,

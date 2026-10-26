@@ -433,6 +433,14 @@ fn run_install(root: &Path, host: &str, args: &[String]) -> anyhow::Result<()> {
     // 先判「装得进去」再下载：别下完几 MB 才发现目录不可写（Go 的 :usable 也是这个顺序）。
     let install = update::install_root(&std::env::current_exe()?);
     ensure_install_root(&install)?;
+    // 修改逻辑（2026-10-26）：安装进程继承部署方注入的 CLOUDFILE_TRUSTED_ORIGINS，
+    // 只有在这一步才拿得到（任务中心是登录后另起的进程，环境变量不会跟过去）。
+    // 只在 config.json 不存在时写 —— 已装机器不会被重置。
+    if let Ok(seeded) = session::ensure_default_origins(&install) {
+        if !seeded.is_empty() {
+            println!("已写入内置受信任服务：{}", seeded.join(", "));
+        }
+    }
 
     let (source, policy, probes) = resolve_source(root, args)?;
     let dir = hostreg::manifest_dir()?;

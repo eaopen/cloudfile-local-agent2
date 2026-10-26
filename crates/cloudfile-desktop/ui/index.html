@@ -9,7 +9,7 @@
 <body>
 <aside>
   <div class="brand"><span class="brand-mark" aria-hidden="true"></span> CloudFile</div>
-  <div class="badge">AGENT 2.2 · 开发版</div>
+  <div class="badge" id="agent-badge">AGENT</div>
   <nav aria-label="主导航">
     <button class="nav-item selected" data-view="tasks" aria-current="page"><span aria-hidden="true">▤</span>本地任务<span id="attention-count" class="nav-count" hidden></span></button>
     <button class="nav-item" data-view="services"><span aria-hidden="true">◇</span>服务连接<span id="service-dot" class="connection-dot" hidden></span></button>
@@ -76,7 +76,7 @@
   </div>
   <div id="view-setup" class="page-view" hidden>
     <section class="panel">
-      <div class="section-heading"><div><h2>首次安装与连接检查</h2><p class="hint">此页只协助安装；服务授权与配对由用户操作，不会静默信任未知服务器。</p></div>
+      <div class="section-heading"><div><h2>首次安装与连接检查</h2><p class="hint">此页只协助检查安装。内置服务已自动添加，无需手动配置；其他服务请到「服务连接」页由你自行添加。</p></div>
       <div id="setup-counts"></div></div>
       <ol class="setup-steps" id="setup-steps"></ol>
       <div class="row">
