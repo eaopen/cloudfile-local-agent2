@@ -592,12 +592,30 @@ function renderTask(task) {
     );
   }
 
-  if (task.group === 'done' && !working) {
+  // 已完成和待处理的任务都能删：待处理往往就是「卡住的垃圾任务」，不删会一直占着列表。
+  // 但删之前必须说清会丢什么 —— 未确认的上传记录、冲突副本、独占授权都不可恢复。
+  if ((task.group === 'done' || task.group === 'needs-attention') && !working) {
     buttons.append(
       button(
         '删除',
         async () => {
-          if (!window.confirm(`删除任务「${task.file_name}」？\n本地已下载的文件会一并删除，空目录也会清理。`)) return;
+          const lines = [
+            `删除任务「${task.file_name}」？`,
+            '本地已下载的文件会一并删除，空目录也会清理。',
+          ];
+          if (task.pending_upload) {
+            lines.push('这个任务的上传结果还没确认：删除后就无法再查询原上传结果了。');
+          }
+          if (task.conflict) {
+            lines.push('还没选择的冲突副本也会一起删掉。');
+          }
+          if (task.exclusive && task.has_lease) {
+            lines.push('独占授权仍在你手上：删除不会自动释放，需要到网页上签入或释放。');
+          }
+          if (task.needs_review) {
+            lines.push('任务状态本来就读不出来，删除后不再保留任何本地记录。');
+          }
+          if (!window.confirm(lines.join('\n'))) return;
           await action(task, 'delete_task');
           say('任务已删除，本地文件也已清理。');
         },
