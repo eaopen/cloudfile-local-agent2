@@ -1,4 +1,4 @@
-//! CloudFile Agent 2.2 desktop process.
+//! CloudFile desktop (任务中心) process.
 //!
 //! One resident process owns every task, lease and publication intent. The tray
 //! menu, the draggable entry and the light notice are all views onto that same
@@ -232,6 +232,45 @@ fn display_key(window: &tauri::WebviewWindow) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+/// 悬浮球的落点：**拖过的按记住的位置恢复**（并夹进当前屏幕，换分辨率不会飘到屏幕外），
+/// 没拖过就给一个明确默认位置 —— 右侧靠边、垂直居中，不压任务栏也不挡标题栏。
+///
+/// 修改逻辑（2026-10-27）：原来没有默认位置，只有「记住过才恢复」，第一次出现完全交给
+/// 系统决定（常在左上角，压着标题栏）；而且恢复时不夹紧，换显示器后可能整块留在屏幕外。
+fn place_float(window: &tauri::WebviewWindow, saved: Option<settings::FloatPosition>) {
+    let Ok(size) = window.outer_size() else {
+        return;
+    };
+    let monitor = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| window.primary_monitor().ok().flatten());
+    let Some(monitor) = monitor else {
+        return;
+    };
+    let area = monitor.position();
+    let screen = monitor.size();
+    let width = size.width as i32;
+    let height = size.height as i32;
+    let margin = 24;
+    let (x, y) = match saved {
+        Some(position) => (
+            position
+                .x
+                .clamp(area.x, area.x + screen.width as i32 - width),
+            position
+                .y
+                .clamp(area.y, area.y + screen.height as i32 - height),
+        ),
+        None => (
+            area.x + screen.width as i32 - width - margin,
+            area.y + (screen.height as i32 - height) / 2,
+        ),
+    };
+    let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+}
+
 /// Stores where the entry came to rest, keyed by the display it landed on.
 fn persist_float_position(app: &tauri::AppHandle) {
     let state = app.state::<State>();
@@ -308,10 +347,10 @@ async fn float_sync(
         if !was_visible {
             // Only restore on the hidden-to-shown transition, never during a drag.
             let display = display_key(&window);
-            if let Ok(Some(saved)) = settings::position(&state.root, &display) {
-                let _ = window
-                    .set_position(tauri::LogicalPosition::new(saved.x as f64, saved.y as f64));
-            }
+            place_float(
+                &window,
+                settings::position(&state.root, &display).ok().flatten(),
+            );
             let _ = window.show();
         }
     } else if was_visible {
@@ -726,8 +765,10 @@ fn restart_app(app: tauri::AppHandle, state: tauri::State<'_, State>) -> Result<
         return Err(format!("新版本目录里没有任务中心：{}", binary.display()));
     }
     let mut command = std::process::Command::new(&binary);
+    // 修改逻辑（2026-10-27）：升级重启是**用户点出来的**，新实例必须出现在前台。
+    // 之前这里带着 --autostart，而 --autostart 在有托盘时会隐藏窗口 —— 用户看到的就是
+    // 「重启后任务中心不见了，只剩右下角托盘图标」。
     command
-        .arg("--autostart")
         .arg("--await-instance")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -881,7 +922,10 @@ fn refresh_tray(state: &State, app: &tauri::AppHandle) {
         )
     };
     if let Some(tray) = app.tray_by_id("main") {
-        let _ = tray.set_tooltip(Some(format!("CloudFile Agent 2.2 · {summary}")));
+        let _ = tray.set_tooltip(Some(format!(
+            "CloudFile Agent {} · {summary}",
+            cloudfile_core::VERSION
+        )));
     }
     if let Ok(row) = state.guard_row.lock() {
         if let Some(item) = row.as_ref() {
@@ -896,7 +940,7 @@ fn refresh_tray(state: &State, app: &tauri::AppHandle) {
 }
 
 const USAGE: &str = "\
-CloudFile Agent 2.2 desktop
+CloudFile Agent desktop
 
 Usage: cloudfile-desktop [--self-test] [--autostart]
 
@@ -1102,7 +1146,7 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
             let tray = TrayIconBuilder::with_id("main")
                 .icon(icon)
                 .icon_as_template(cfg!(target_os = "macos"))
-                .tooltip("CloudFile Agent 2.2")
+                .tooltip(format!("CloudFile Agent {}", cloudfile_core::VERSION))
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "open" => show(app),
