@@ -747,7 +747,6 @@ async fn save_cloud(state: tauri::State<'_, State>, task_id: String) -> Result<V
     let root = state.root.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let result = upload::save(&root, &task_id).map_err(|error| error.to_string())?;
-        if result["state"] == "published" {}
         Ok::<Value, String>(result)
     })
     .await
@@ -760,7 +759,6 @@ async fn recover_upload(state: tauri::State<'_, State>, task_id: String) -> Resu
     let root = state.root.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let result = upload::recover(&root, &task_id).map_err(|error| error.to_string())?;
-        if result["state"] == "published" {}
         Ok::<Value, String>(result)
     })
     .await
