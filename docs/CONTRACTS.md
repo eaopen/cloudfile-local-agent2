@@ -33,3 +33,8 @@ CloudFile Hub/Server 复用设备签名挑战和受控 API，不能把 OAuth/OID
 ## 兼容验证方式
 
 开发用隔离 Host + Chrome 独立配置。正式接管一次性替代 Windows .NET Host，需验证旧真实用户工作副本不会被静默覆盖。没有 Go 发行用户，无需为 Go 制作迁移器。
+
+
+## 与 Generic Local Bridge 并行演进
+
+仅以[Bridge 兼容合同](BRIDGE_COMPAT_V1.md)作为后续适配边界；现有 Host、Chrome、文件 V2/Journal/Guard 仍是本版本的有效合同，不因 Bridge Profile 计划改变。
