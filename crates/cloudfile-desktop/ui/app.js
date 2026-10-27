@@ -119,7 +119,7 @@ function renderWelcome() {
     const note = document.createElement('p');
     note.className = 'ready-note';
     note.textContent =
-      '暂时没有编辑任务。普通编辑的修改默认不自动上传，需要时在任务里点「立即上传」；独占编辑始终由你手动提交。';
+      '暂时没有编辑任务。修改保存在本机后不会自动上传，需要时在任务里点「立即上传」；独占编辑始终由你手动提交。';
     card.append(note);
   } else {
     const steps = document.createElement('div');
@@ -433,7 +433,7 @@ function openButton(task) {
   );
 }
 
-function renderOptimistic(buttons, task, automatic, working) {
+function renderOptimistic(buttons, task, working) {
   buttons.append(openButton(task));
   if (task.pending_upload) {
     buttons.append(button('查询原上传结果', () => action(task, 'recover_upload'), { disabled: working }));
@@ -445,40 +445,6 @@ function renderOptimistic(buttons, task, automatic, working) {
       disabled: working || task.needs_review || !task.local_changed,
     }));
   }
-  // 自动上传的总开关在配置文件里（settings.json 的 auto_upload），默认关闭（内测）。
-  // 总开关开了以后，任务默认自动上传；单个文件可以手动关掉、之后再打开，只影响它自己。
-  // 总开关关着就不给按钮 —— 免得有人在这里把内测能力打开。
-  const master = Boolean(task.auto_upload_master);
-  const paused = Boolean(automatic && automatic.pause_reason);
-  if (master) {
-    buttons.append(
-      button(
-        paused ? '恢复自动上传' : automatic && automatic.enabled ? '暂停自动上传' : '开启自动上传',
-        async () => {
-          try {
-            await invoke('set_auto_upload', {
-              taskId: task.task_id,
-              enabled: !(automatic && automatic.enabled) || paused,
-            });
-            await refresh();
-          } catch (error) {
-            say(String(error));
-          }
-        },
-        { secondary: true, disabled: working || task.needs_review || task.pending_upload },
-      ),
-    );
-  }
-  const autoHint = document.createElement('small');
-  autoHint.className = 'hint';
-  autoHint.textContent = !master
-    ? '自动上传总开关未开启：本地修改不会自动回传；需要时点「立即上传」手动上传。'
-    : paused
-      ? '自动上传已暂停：本地修改不会回传；处理完待确认的上传后会自动恢复。'
-      : automatic && automatic.enabled
-        ? '自动上传已开启：本机保存稳定后自动回传云端；也可以只对这个文件暂停。'
-        : '这个文件的自动上传已手动关闭；本地修改不会回传，点「开启自动上传」可恢复。';
-  buttons.append(autoHint);
 }
 
 function renderExclusive(buttons, task, working) {
@@ -530,8 +496,7 @@ function renderTask(task) {
   name.textContent = task.file_name;
   const status = document.createElement('span');
   const working = busy.has(task.task_id) || task.uploading;
-  const automatic = task.auto_upload;
-  status.textContent = taskUX.status(task, automatic, working);
+  status.textContent = taskUX.status(task, working);
   const mode = document.createElement('small');
   mode.className = 'hint';
   mode.textContent = taskUX.modeLabel(task);
@@ -548,19 +513,12 @@ function renderTask(task) {
     info.append(warning);
   }
 
-  if (automatic && automatic.pause_reason && !task.exclusive) {
-    const reason = document.createElement('p');
-    reason.className = 'upload-error';
-    reason.textContent = automatic.pause_reason;
-    info.append(reason);
-  }
-
   const buttons = document.createElement('div');
   buttons.className = 'actions';
   if (task.exclusive) {
     renderExclusive(buttons, task, working);
   } else if (task.can_upload) {
-    renderOptimistic(buttons, task, automatic, working);
+    renderOptimistic(buttons, task, working);
   } else {
     buttons.append(openButton(task));
     const hint = document.createElement('small');

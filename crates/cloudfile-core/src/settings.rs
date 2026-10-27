@@ -53,11 +53,6 @@ pub struct Settings {
     /// Whether the user completed the optional first-run browser setup guide.
     #[serde(default)]
     pub setup_completed: bool,
-    /// 自动上传的默认开关（settings.json 里的 `auto_upload`）。
-    /// `None` = 没配置 = **关闭**：本地编辑默认不会自动回传，需要时在任务里单独开启，
-    /// 单任务开关写在自己的 auto-upload.json 里，这里只决定新任务的起点。
-    #[serde(default)]
-    pub auto_upload: Option<bool>,
     /// Directory for new working copies, initialized on first app startup.
     pub workspace_root: Option<String>,
     /// Explicit local openers, evaluated before detection and the OS default.
@@ -76,7 +71,6 @@ impl Default for Settings {
             float_hidden_when_empty: true,
             autostart: false,
             setup_completed: false,
-            auto_upload: None,
             workspace_root: None,
             open_rules: Vec::new(),
             float_positions: BTreeMap::new(),

@@ -19,7 +19,7 @@
     }
     return '';
   }
-  function status(task, automatic, working, now = Date.now()) {
+  function status(task, working, now = Date.now()) {
     // An uncertain publish takes priority over everything else. Never imply
     // that an expired ticket or a missing lease erased a pending write.
     if (task.pending_upload) {
@@ -47,16 +47,8 @@
         ? '本地已有修改 · 可提交版本，或签入后释放独占'
         : '独占编辑中 · 无待提交的本地修改';
     }
-    if (automatic && automatic.pause_reason) return '自动回传已暂停 · 本地文件仍保留';
-    if (task.local_changed) {
-      return automatic?.enabled
-        ? '本地已有修改 · 等待保存稳定后自动回传'
-        : '本地已有修改 · 自动回传未启用';
-    }
-    if (automatic?.last_synced_at) {
-      return '云端已确认新版本 · ' +
-        new Date(automatic.last_synced_at * 1000).toLocaleTimeString();
-    }
+    // 自动上传已整体移除（2026-10-27）：本地改完不会自己往外写，只能由用户手动上传。
+    if (task.local_changed) return '本地已有修改 · 尚未上传，可在任务里点「立即上传」';
     return '本地内容与上次确认的云端版本一致';
   }
   function releaseWarning(task) {

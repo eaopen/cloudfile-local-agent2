@@ -9,8 +9,8 @@
 //! user is asked from the same window they already use.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 use cloudfile_core::{
-    apps, auto_upload, autostart, browser, device, exclusive, extension, guard, hostreg, ipc,
-    journal, native, paired_session, session, settings, storage, update, upload, wire,
+    apps, autostart, browser, device, exclusive, extension, guard, hostreg, ipc, journal, native,
+    paired_session, session, settings, storage, update, upload, wire,
 };
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -71,7 +71,6 @@ fn summaries(root: &Path, uploading: &Mutex<HashSet<String>>) -> anyhow::Result<
             .and_then(|path| session::digest(&path))
             .map(|digest| digest != task.baseline_digest);
         let pending = journal::pending(root, &task.task_id);
-        let automatic = auto_upload::settings(root, &task.task_id);
         let lease = journal::lease(root, &task.task_id);
         let acknowledged = journal::lease_acknowledged(root, &task.task_id);
         let closed = journal::closed(root, &task.task_id);
@@ -87,8 +86,7 @@ fn summaries(root: &Path, uploading: &Mutex<HashSet<String>>) -> anyhow::Result<
                 .to_string()
             })
         });
-        let needs_review =
-            changed.is_err() || pending.is_err() || automatic.is_err() || lease.is_err();
+        let needs_review = changed.is_err() || pending.is_err() || lease.is_err();
         let local_changed = changed.as_ref().copied().unwrap_or(false);
         let is_uploading = busy.contains(&task.task_id);
         let has_pending = pending.ok().flatten().is_some();
@@ -131,7 +129,7 @@ fn summaries(root: &Path, uploading: &Mutex<HashSet<String>>) -> anyhow::Result<
             "authorization_expires_at":cloudfile_core::v2_edit::ticket_expires_at(root, &task.task_id),
             "conflict":has_conflict,
             "conflict_reason":conflict_reason,
-            "auto_upload":automatic.ok(),"auto_upload_master":auto_upload::master_enabled(root),"uploading":is_uploading,
+            "uploading":is_uploading,
             "pending_upload":has_pending,"pending_action":action}));
     }
     let count = |group: &str| tasks.iter().filter(|task| task["group"] == group).count();
@@ -762,9 +760,7 @@ async fn save_cloud(state: tauri::State<'_, State>, task_id: String) -> Result<V
     let root = state.root.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let result = upload::save(&root, &task_id).map_err(|error| error.to_string())?;
-        if result["state"] == "published" {
-            let _ = auto_upload::confirmed(&root, &task_id);
-        }
+        if result["state"] == "published" {}
         Ok::<Value, String>(result)
     })
     .await
@@ -777,9 +773,7 @@ async fn recover_upload(state: tauri::State<'_, State>, task_id: String) -> Resu
     let root = state.root.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let result = upload::recover(&root, &task_id).map_err(|error| error.to_string())?;
-        if result["state"] == "published" {
-            let _ = auto_upload::confirmed(&root, &task_id);
-        }
+        if result["state"] == "published" {}
         Ok::<Value, String>(result)
     })
     .await
@@ -820,17 +814,6 @@ fn service_status(state: tauri::State<'_, State>) -> Result<Value, String> {
 #[tauri::command]
 fn untrust_origin(state: tauri::State<'_, State>, origin: String) -> Result<(), String> {
     session::untrust(&state.root, origin).map_err(|error| error.to_string())
-}
-
-/// 单任务开关：关掉/恢复某个文件的自动上传。总开关（settings.json 的 auto_upload）
-/// 关闭时界面不给入口，core 也会拒绝打开。
-#[tauri::command]
-fn set_auto_upload(
-    state: tauri::State<'_, State>,
-    task_id: String,
-    enabled: bool,
-) -> Result<(), String> {
-    auto_upload::set_enabled(&state.root, &task_id, enabled).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1112,7 +1095,6 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
             open_extension_dir,
             update_extension,
             untrust_origin,
-            set_auto_upload,
             autostart_set,
             check_update,
             run_update,
@@ -1210,11 +1192,8 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
             let handle = app.handle().clone();
             let auto_root = root.clone();
             let auto_handle = handle.clone();
-            let auto_busy = uploading.clone();
             let auto_notice = handle.clone();
             std::thread::spawn(move || {
-                let started = std::time::Instant::now();
-                let mut observer = auto_upload::Observer::default();
                 let mut last_renew = std::time::Instant::now();
                 let mut reauth_warned = HashSet::<(String, i64)>::new();
                 loop {
@@ -1252,67 +1231,6 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
                             }
                         }
                         last_renew = std::time::Instant::now();
-                    }
-                    let notices = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
-                    let writer = notices.clone();
-                    let mut changed = false;
-                    let result = observer.scan_with(
-                        &auto_root,
-                        started.elapsed().as_millis() as u64,
-                        |id, digest| {
-                            changed = true;
-                            if let Ok(mut busy) = auto_busy.lock() {
-                                busy.insert(id.to_string());
-                            }
-                            let _ = auto_handle.emit("tasks-changed", ());
-                            let result = upload::save_observed(&auto_root, id, digest);
-                            if let Ok(value) = &result {
-                                let name = session::load(&auto_root, id)
-                                    .map(|task| task.file_name)
-                                    .unwrap_or_default();
-                                // A cloud save is only ever announced after the
-                                // server confirmed it.
-                                let notice = match value["state"].as_str() {
-                                    Some("published") => {
-                                        ("info".to_string(), format!("{name}：已保存到云端"))
-                                    }
-                                    Some("unchanged") => {
-                                        ("info".to_string(), format!("{name}：与云端基线一致"))
-                                    }
-                                    _ => (
-                                        "warning".to_string(),
-                                        format!("{name}：上传结果未确认，请在任务中心检查"),
-                                    ),
-                                };
-                                if let Ok(mut list) = writer.lock() {
-                                    list.push(notice);
-                                }
-                            }
-                            if let Ok(mut busy) = auto_busy.lock() {
-                                busy.remove(id);
-                            }
-                            result
-                        },
-                    );
-                    if result.is_err() {
-                        eprintln!("CloudFile automatic upload storage requires review");
-                        let _ = auto_handle.emit("tasks-changed", ());
-                    }
-                    if changed {
-                        let _ = auto_handle.emit("tasks-changed", ());
-                    }
-                    let preferences = settings::load(&auto_root).unwrap_or_default();
-                    if let Ok(list) = notices.lock() {
-                        for (level, text) in list.iter() {
-                            let allowed = if level == "warning" {
-                                preferences.notify_on_review
-                            } else {
-                                preferences.notify_on_saved
-                            };
-                            if allowed {
-                                present_toast(&auto_notice, level, text);
-                            }
-                        }
                     }
                     std::thread::sleep(std::time::Duration::from_secs(2));
                 }
