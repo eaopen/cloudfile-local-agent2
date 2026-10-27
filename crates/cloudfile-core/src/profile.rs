@@ -241,11 +241,31 @@ fn check_bound_file_service(root: &Path, profile: &ApplicationProfile) -> Result
     Ok(server)
 }
 
+/// Both a bare application origin and the actual public discovery URL work.
+/// Etech Web and similar reverse proxies publish their EAP API under a prefix
+/// (for example /prod-api/); that prefix is transport routing, never part of
+/// profile_id or the trusted ApplicationProfile origin.
+fn discovery_target(address: &str) -> Result<(String, String)> {
+    if session::origin(address).is_ok() {
+        return Ok((address.to_string(), format!("{address}{DISCOVERY_PATH}")));
+    }
+    let parsed = endpoint(address)?;
+    let origin = parsed.origin().ascii_serialization();
+    session::origin(&origin)?;
+    let prefix = parsed.path().strip_suffix(DISCOVERY_PATH)
+        .context("expected the exact ApplicationProfile discovery path")?;
+    if !session::valid_service_path(prefix)
+        || address != format!("{origin}{prefix}{DISCOVERY_PATH}")
+    {
+        bail!("non-canonical ApplicationProfile discovery URL");
+    }
+    Ok((origin, address.to_string()))
+}
+
 pub fn sync(root: &Path, address: &str) -> Result<Value> {
-    // The caller explicitly supplies an app origin. No Host/EXE fields, auth
-    // tokens, request cookies or browser-injected URLs are accepted here.
-    session::origin(address)?;
-    let url = format!("{address}{DISCOVERY_PATH}");
+    // User-initiated CLI only, no cookies or browser-supplied Host/EXE fields.
+    // Public reverse proxies may expose the fixed endpoint below a prefix.
+    let (app_origin, url) = discovery_target(address)?;
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(8))
         .redirect(reqwest::redirect::Policy::none())
@@ -274,7 +294,7 @@ pub fn sync(root: &Path, address: &str) -> Result<Value> {
     }
     let profile: ApplicationProfile = serde_json::from_slice(&bytes)?;
     validate(&profile, crate::now())?;
-    if profile.origin != address {
+    if profile.origin != app_origin {
         bail!("Profile origin does not match the explicitly selected application");
     }
     let file_server = check_bound_file_service(root, &profile)?;
@@ -284,7 +304,7 @@ pub fn sync(root: &Path, address: &str) -> Result<Value> {
     let _lock = storage::lock(&root.join("application-profiles.lock"))?;
     if path.is_file() {
         let old: BoundProfile = storage::read(&path)?;
-        if old.source_origin != address
+        if old.source_origin != app_origin
             || old.profile.provider != profile.provider
             || old.profile.environment != profile.environment
         {
@@ -306,7 +326,7 @@ pub fn sync(root: &Path, address: &str) -> Result<Value> {
     storage::write(
         &path,
         &BoundProfile {
-            source_origin: address.to_string(),
+            source_origin: app_origin,
             fetched_at: crate::now(),
             profile,
         },
@@ -441,6 +461,35 @@ mod tests {
             .services
             .insert("files".into(), "https://new.example.test/seafile".into());
         assert!(check_bound_file_service(&root, &changed).is_err());
+    }
+
+    #[test]
+    fn discovery_accepts_original_origin_and_actual_reverse_proxy_endpoint() {
+        assert_eq!(
+            discovery_target("https://portal.example.test").unwrap(),
+            ("https://portal.example.test".into(),
+             "https://portal.example.test/admin-api/local-bridge/profile/v1".into())
+        );
+        assert_eq!(
+            discovery_target("http://portal.example.test/prod-api/admin-api/local-bridge/profile/v1").unwrap(),
+            ("http://portal.example.test".into(),
+             "http://portal.example.test/prod-api/admin-api/local-bridge/profile/v1".into())
+        );
+        assert_eq!(
+            discovery_target("http://localhost:8080/proxy-api/admin-api/local-bridge/profile/v1").unwrap().0,
+            "http://localhost:8080"
+        );
+        for bad in [
+            "https://portal.example.test/prod-api",
+            "https://portal.example.test/prod-api/admin-api/local-bridge/profile/v2",
+            "https://portal.example.test/prod-api/admin-api/local-bridge/profile/v1?redirect=1",
+            "https://portal.example.test/prod-api/admin-api/local-bridge/profile/v1#frag",
+            "https://user@portal.example.test/prod-api/admin-api/local-bridge/profile/v1",
+            "https://portal.example.test/x/../prod-api/admin-api/local-bridge/profile/v1",
+            "file:///tmp/admin-api/local-bridge/profile/v1",
+        ] {
+            assert!(discovery_target(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]
