@@ -751,8 +751,9 @@ fn spawn_desktop(desktop: Option<&Path>) -> anyhow::Result<bool> {
         anyhow::bail!("找不到 {}，请重新运行安装包里的 install.cmd", DESKTOP_NAME);
     };
     let mut command = std::process::Command::new(desktop);
+    // 不带 --autostart：那是登录项用的（有托盘时隐藏窗口）。用户点「打开任务中心」
+    // 就是要看到窗口，带上它只会得到「只有一个托盘图标、没有窗口」。
     command
-        .arg("--autostart")
         .arg("--await-instance")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())

@@ -59,6 +59,17 @@ fn help_lists_the_login_item_flag() {
 }
 
 #[test]
+fn help_lists_the_restart_handoff_flag() {
+    // 升级重启只传 --await-instance：它必须出现在帮助里，也就必须留在参数白名单里。
+    // 2026-10-27 现场事故：去掉重启命令里的 --autostart 后，这个参数变成「第一个参数」
+    // 被当成未知参数 exit(2)，而 stderr 是 null —— 用户点了「立即重启」什么都没发生。
+    let output = desktop(&["--help"]);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--await-instance"), "{stdout}");
+}
+
+#[test]
 fn help_lists_the_self_test_flag() {
     let output = desktop(&["--help"]);
     let stdout = String::from_utf8_lossy(&output.stdout);

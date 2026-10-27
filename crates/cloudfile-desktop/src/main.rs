@@ -778,7 +778,20 @@ fn restart_app(app: tauri::AppHandle, state: tauri::State<'_, State>) -> Result<
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x0000_0008);
     }
-    command.spawn().map_err(|_| "无法启动新版本".to_string())?;
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("无法启动新版本：{error}"))?;
+    // 新实例要先等老进程释放 desktop.lock（最多 10 秒），所以「几百毫秒内就退出的」
+    // 一定是坏消息：参数被拒、缺 WebView2Loader.dll、目录被删……
+    // 原来这里不看结果直接 app.exit(0)，用户看到的就是「点和没点一样，界面上什么都没了」。
+    // 现在先确认它还活着；已经死了就把退出码交回界面，并把启动日志的位置告诉用户。
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    if let Ok(Some(status)) = child.try_wait() {
+        return Err(format!(
+            "新版本启动后立即退出（{status}）：详见 {}",
+            state.root.join("desktop-launch.log").display()
+        ));
+    }
     app.exit(0);
     Ok(json!({"state": "restarting", "version": version}))
 }
@@ -942,7 +955,7 @@ fn refresh_tray(state: &State, app: &tauri::AppHandle) {
 const USAGE: &str = "\
 CloudFile Agent desktop
 
-Usage: cloudfile-desktop [--self-test] [--autostart]
+Usage: cloudfile-desktop [--self-test] [--autostart] [--await-instance]
 
   --version     print the build version
   --component   print the local component contract as JSON
@@ -951,7 +964,42 @@ Usage: cloudfile-desktop [--self-test] [--autostart]
   --help, -h    print this message
   --autostart   start resident in the tray without opening the window; the login
                 item passes this so logging in never steals focus
+  --await-instance
+                wait up to 10s for the previous instance to release the desktop
+                lock; the upgrade restart and the extension's open-task-center
+                button pass this so the new instance is not dropped silently
 ";
+
+/// 启动时允许出现的「横杠参数」，只放真正会被传进来的两个：
+/// 登录项传 `--autostart`，升级重启 / 「打开任务中心」传 `--await-instance`。
+///
+/// 修改逻辑（2026-10-27）：这里原来写成 `argument != "--autostart"` 的硬编码判断。
+/// 2.0.8 为了「重启后回到前台」把重启命令里的 `--autostart` 去掉了，于是新实例的
+/// **第一个参数**变成 `--await-instance`，直接落进「未知参数」分支 `exit(2)`；
+/// 而这条链路的 stderr 是 null（分离进程），用户看到的就是任务中心和托盘一起消失、
+/// 没有任何提示。2.0.9 的现场故障就是这个。
+const LAUNCH_FLAGS: [&str; 2] = ["--autostart", "--await-instance"];
+
+/// 参数是否属于已知启动参数。
+fn is_launch_flag(argument: &str) -> bool {
+    LAUNCH_FLAGS.contains(&argument)
+}
+
+/// 启动阶段的失败必须留痕：常驻进程是分离启动的（stdin/stdout/stderr 都是 null），
+/// 参数被拒或初始化失败时外面什么都看不到。写一行到安装根，现场一眼能查。
+fn record_launch_failure(message: &str) {
+    let Ok(root) = cloudfile_core::storage::root() else {
+        return;
+    };
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(root.join("desktop-launch.log"))
+    {
+        use std::io::Write;
+        let _ = writeln!(file, "{message}");
+    }
+}
 
 /// Share one alpha mark with the desktop UI. macOS templates follow the system
 /// menu-bar appearance; other platforms retain the Agent blue for visibility.
@@ -1004,9 +1052,10 @@ fn main() {
             print!("{USAGE}");
             return;
         }
-        Some(argument) if argument.starts_with('-') && argument != "--autostart" => {
+        Some(argument) if argument.starts_with('-') && !is_launch_flag(argument) => {
             // Guessing at an unknown flag would start a second resident agent.
             eprintln!("unknown argument {argument}\n\n{USAGE}");
+            record_launch_failure(&format!("refused to start: unknown argument {argument}"));
             std::process::exit(2);
         }
         _ => {}
@@ -1016,6 +1065,7 @@ fn main() {
     let await_instance = args.iter().any(|value| value == "--await-instance");
     if let Err(error) = run(autostart, await_instance) {
         eprintln!("CloudFile desktop: {error}");
+        record_launch_failure(&format!("startup failed: {error:#}"));
     }
 }
 
@@ -1372,6 +1422,21 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
         })
         .run(tauri::generate_context!())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod launch_flag_tests {
+    use super::is_launch_flag;
+
+    #[test]
+    fn handoff_flags_are_accepted_and_strangers_are_not() {
+        // 升级重启只传 --await-instance（2026-10-27 起不再带 --autostart），
+        // 它必须被当成已知参数，否则新实例会静默 exit(2)。
+        assert!(is_launch_flag("--await-instance"));
+        assert!(is_launch_flag("--autostart"));
+        assert!(!is_launch_flag("--definitely-not-a-flag"));
+        assert!(!is_launch_flag("--await"));
+    }
 }
 
 #[cfg(test)]
