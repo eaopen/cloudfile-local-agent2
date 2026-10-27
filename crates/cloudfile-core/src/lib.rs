@@ -8,6 +8,8 @@ pub mod ipc;
 pub mod journal;
 pub mod legacy_seafile;
 pub mod native;
+/// Runtime-neutral ApplicationProfile V1: optional metadata only, no file permission changes.
+pub mod profile;
 pub mod protocol_registration;
 pub mod session;
 pub mod settings;

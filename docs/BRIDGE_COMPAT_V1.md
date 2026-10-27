@@ -20,7 +20,7 @@
 
 不要增加 CloudFile Rust Agent 私有 Profile 版本或将 `runtime=local-bridge` 写回应用 Profile。可复用通用 V1 数据合同/校验器或其固定版本测试样例，但不建立对 Bridge **运行进程**的依赖。安装/更新信任源和设备凭据仍由本机受信配置管理。
 
-**当前仓库尚未实现 Profile V1 消费、Bridge IPC 任务聚合或自动切流。** 本次文档确认演进方向，不修改 Cargo、Host/CLI、V2 编辑引擎、工作副本或生产安装。
+**更新说明：** `feat/consume-application-profile-v1-20261027` 已添加独立的可选在线 Profile 同步、缓存和品牌显示代码（合并、发行与实机验收另确认）。Bridge IPC 任务聚合与自动切流仍未实现；原 V2 文件引擎与 Chrome/Host 路由不变。参见 [Agent Profile V1](PROFILE_DIRECT_V1.md)。
 
 ## 桥接对照（未来的只读 IPC 起点）
 

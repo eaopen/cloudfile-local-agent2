@@ -87,6 +87,7 @@ pub fn status(root: &Path) -> Value {
         "platform": std::env::consts::OS,
         "capabilities": capabilities(root),
         "applications": apps::names(),
+        "application_profiles": crate::profile::summaries(root),
         "release_channel": "development",
         "workspace_root": crate::settings::workspace_root(root).to_string_lossy(),
         "can_open_workspace": configured(root),

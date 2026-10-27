@@ -10,6 +10,12 @@
 安装与发行约束见 [docs/RELEASE.md](docs/RELEASE.md)。
 旧仓库 `eaopen/cloudfile-local-agent` 的 `agent-rust` 只作只读回退参考，Rust 代码只在本仓库继续。
 
+## 应用 Profile V1（可选，不依赖 Local Bridge）
+
+新增 `--sync-app-profile <application-origin>`：从已明确选定的企业应用 Origin 获取 `/admin-api/local-bridge/profile/v1`，仅在 Profile 的 CloudFile 服务已存在于本机受信服务时缓存。`--list-app-profiles` 可查看已绑定实例及过期状态。Profile 用于任务中心显示所属应用名称，绝不改变设备配对、CloudFile 文件权限、Journal/Guard 或更新信任公钥。
+
+上线仍需实际服务器验证；详情见 [Profile 直连合同](docs/PROFILE_DIRECT_V1.md)。原有浏览器/Host/文件编辑不依赖 Profile，也不要求 Local Bridge 安装。
+
 ## 当前 MVP 实现
 
 - Tauri 任务中心、托盘、可拖动悬浮入口、非抢焦点轻提示、服务配置、设备连接、本地打开与修改状态。

@@ -470,7 +470,7 @@ function renderTask(task) {
   mode.textContent = taskUX.modeLabel(task);
   const source = document.createElement('small');
   source.className = 'task-source';
-  source.textContent = [task.service, task.remote_path].filter(Boolean).join(' · ');
+  source.textContent = [task.application_name || task.service, task.remote_path].filter(Boolean).join(' · ');
   info.append(name, mode, status);
   if (source.textContent) info.append(source);
   const reference = taskUX.referenceHint(task.file_name);
