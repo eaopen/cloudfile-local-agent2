@@ -68,6 +68,20 @@ pub fn origin(raw: &str) -> Result<Url> {
     }
     Ok(u)
 }
+/// 服务端给的仓库内路径必须是「/a/b/c」这种形式：绝对、无空段、无 `.` / `..` 段、无反斜杠。
+///
+/// 修改逻辑（2026-10-27）：原来用 `remote.contains("..")` 判断穿越，把**名字里带两个点**的
+/// 合法路径也一起拒了 —— 现场有个目录就叫 `..临时存档`，于是「服务端文件元数据无效」。
+/// 穿越要看的是「整段是不是 `..`」，不是子串。
+pub fn safe_remote_path(path: &str) -> bool {
+    path.starts_with('/')
+        && !path.contains('\\')
+        && path
+            .split('/')
+            .skip(1)
+            .all(|part| !part.is_empty() && part != "." && part != "..")
+}
+
 pub fn valid_service_path(prefix: &str) -> bool {
     prefix.is_empty()
         || (prefix.starts_with('/')
@@ -874,5 +888,20 @@ mod tests {
             .join("view")
             .join(library_short(LAYOUT_REPO))
             .exists());
+    }
+
+    #[test]
+    fn remote_paths_may_contain_dots_but_never_traverse() {
+        // 现场那个目录真的就叫 `..临时存档`：名字里带两个点不是穿越。
+        assert!(safe_remote_path("/..临时存档/顾文涛/TN3系列机型.xls"));
+        assert!(safe_remote_path("/a/b.c/d..e.txt"));
+        assert!(safe_remote_path("/a/..b/c"));
+        // 整段是 `.` 或 `..`、空段、相对路径、反斜杠，全部拒绝。
+        assert!(!safe_remote_path("/a/../b"));
+        assert!(!safe_remote_path("/a/.."));
+        assert!(!safe_remote_path("/a/."));
+        assert!(!safe_remote_path("/a//b"));
+        assert!(!safe_remote_path("a/b"));
+        assert!(!safe_remote_path("/a\\b"));
     }
 }

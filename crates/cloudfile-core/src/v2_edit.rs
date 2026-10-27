@@ -239,8 +239,7 @@ pub fn open(root: &Path, uri: &str) -> Result<Task> {
         .ok_or_else(|| anyhow::anyhow!("文件长度不明"))?;
     if !valid_id(&file_id)
         || uuid::Uuid::parse_str(&repo_id).is_err()
-        || !remote.starts_with('/')
-        || remote.contains("..")
+        || !session::safe_remote_path(&remote)
         || !supported_open_mode(&mode)
         || size > crate::device::MAX_FILE
     {
