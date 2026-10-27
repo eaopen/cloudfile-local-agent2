@@ -76,7 +76,12 @@ pub fn status(root: &Path) -> Value {
     // 先把已有任务搬过去一次。标记一致时这里只是一次很小的文件读取。
     let mut value = json!({
         "ok": true,
-        "version": FAMILY_VERSION,
+        // 修改逻辑（2026-10-27）：`version` 必须是**真实构建版本**。原来它放的是
+        // FAMILY_VERSION（"2.2.0" 这个协议族标记），扩展就直接显示成
+        // 「Agent2 已就绪 · v2.2.0」，还让「可升级：v2.2.0 → v2.0.5」这种倒挂文案出现。
+        // 族标记保留在 `family_version`，只有真正关心协议的调用方才看它。
+        "version": crate::VERSION,
+        "family_version": FAMILY_VERSION,
         "build_version": crate::VERSION,
         "agent_family": "agent2",
         "platform": std::env::consts::OS,
@@ -532,7 +537,9 @@ mod tests {
         let (_dir, base) = crate::storage::test_root();
         let value = status(base.as_path());
         assert_eq!(value["agent_family"], "agent2");
-        assert_eq!(value["version"], FAMILY_VERSION);
+        // version 是构建版本；family_version 才是协议族标记（别再混用）。
+        assert_eq!(value["version"], crate::VERSION);
+        assert_eq!(value["family_version"], FAMILY_VERSION);
         // 修改逻辑（2026-10-26）：正式版版本号从 2.0.0 重新起算，这里不再钉死 "2.2.0"。
         // 要守的是「构建版本仍属 2.x 这条产品线」，与具体的构建号无关。
         assert!(
