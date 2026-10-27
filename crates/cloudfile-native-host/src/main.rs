@@ -7,7 +7,7 @@
 //! a scripting runtime on the target machine.
 use anyhow::Context;
 use cloudfile_core::{
-    apps, autostart, device, guard, hostreg, ipc, native, paired_session, selftest, session,
+    apps, autostart, device, guard, hostreg, ipc, native, paired_session, profile, selftest, session,
     storage, update, wire,
 };
 use serde_json::{json, Value};
@@ -28,6 +28,8 @@ Usage: cloudfile-native-host [command]
   --version                      print the build version
   --component                    print the local component contract as JSON
   --status                       print agent, registration and exit state as JSON
+  --sync-app-profile <origin>    fetch/verify V1 app metadata for an already trusted file service
+  --list-app-profiles            list optional locally bound application profiles
   --register-host                register the Chrome host for the current user
   --unregister-host              remove the host this agent registered
   --rollback-host                restore the previous host registration
@@ -158,6 +160,19 @@ fn run_command(args: &[String]) -> anyhow::Result<()> {
             });
             println!("{}", serde_json::to_string_pretty(&value)?);
         }
+        "--sync-app-profile" => {
+            if args.len() != 2 {
+                anyhow::bail!("--sync-app-profile requires exactly one canonical app origin");
+            }
+            let value = profile::sync(&root, &args[1])?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        }
+        "--list-app-profiles" => {
+            if args.len() != 1 {
+                anyhow::bail!("--list-app-profiles does not accept arguments");
+            }
+            println!("{}", serde_json::to_string_pretty(&profile::summaries(&root))?);
+        }
         "--status" => {
             let binary = host_binary()?;
             let dir = hostreg::manifest_dir()?;
@@ -176,6 +191,7 @@ fn run_command(args: &[String]) -> anyhow::Result<()> {
                 "autostart": autostart::enabled(),
                 "autostart_mechanism": autostart::mechanism().map(|item| item.id()),
                 "applications": apps::names(),
+                "application_profiles": profile::summaries(&root),
                 "runtime": {
                     // The desktop shell needs WebView2 on Windows; on macOS the
                     // system WebKit is always present, so `null` there means the

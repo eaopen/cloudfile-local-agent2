@@ -10,7 +10,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 use cloudfile_core::{
     apps, autostart, browser, device, exclusive, extension, guard, hostreg, ipc, journal, native,
-    paired_session, session, settings, storage, update, upload, wire,
+    paired_session, profile, session, settings, storage, update, upload, wire,
 };
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -62,6 +62,8 @@ fn host_binary() -> Option<PathBuf> {
 /// stay a pure renderer.
 fn summaries(root: &Path, uploading: &Mutex<HashSet<String>>) -> anyhow::Result<Value> {
     let mut tasks = Vec::new();
+    // Optional application brand is a read-only label, never a task owner or authorization.
+    let application_profiles = profile::labels(root);
     let busy = uploading
         .lock()
         .map_err(|_| anyhow::anyhow!("上传状态不可用"))?
@@ -114,7 +116,10 @@ fn summaries(root: &Path, uploading: &Mutex<HashSet<String>>) -> anyhow::Result<
         } else {
             "done"
         };
+        let application = profile::label_for_file_server(&application_profiles, &task.server);
         tasks.push(json!({"task_id":task.task_id,"file_name":task.file_name,
+            "application_profile_id": application.map(|p| p.profile_id.as_str()),
+            "application_name": application.map(|p| p.application_name.as_str()),
             "mode":native::mode_label(&task.mode),"internal_mode":task.mode,
             "service":task.server,"remote_path":task.remote_path,
             "group":group,
