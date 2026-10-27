@@ -229,7 +229,13 @@ fn check_bound_file_service(root: &Path, profile: &ApplicationProfile) -> Result
     if !cfg.allowed_origins.iter().any(|known| known == &server) {
         bail!("CloudFile service is not already trusted by this Agent");
     }
-    if cfg.service_paths.get(&server).map(String::as_str).unwrap_or("") != path {
+    if cfg
+        .service_paths
+        .get(&server)
+        .map(String::as_str)
+        .unwrap_or("")
+        != path
+    {
         bail!("profile CloudFile path differs from the already trusted service");
     }
     Ok(server)
