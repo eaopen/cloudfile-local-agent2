@@ -185,7 +185,7 @@ Chrome 扩展需要用户自己在 `chrome://extensions` 确认安装；不能�
 
 ## Chrome 与 Agent 目标架构
 
-单扩展兼容、Agent 通道隔离及 Windows 兼容边界见 [架构与兼容契约](docs/AGENT_EXTENSION_ARCHITECTURE.md)。
+单扩展多通道、通用 Local Bridge、文件能力扩展及 Windows 兼容边界见 [架构与兼容契约](docs/AGENT_EXTENSION_ARCHITECTURE.md)。
 这是分阶段实施的目标设计；当前安装仍使用原有机制，不代表双通道并存已经实现。
 
 ## Chrome 开发联调
