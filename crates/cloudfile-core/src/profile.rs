@@ -469,16 +469,25 @@ mod tests {
     fn discovery_accepts_original_origin_and_actual_reverse_proxy_endpoint() {
         assert_eq!(
             discovery_target("https://portal.example.test").unwrap(),
-            ("https://portal.example.test".to_string(),
-             "https://portal.example.test/admin-api/local-bridge/profile/v1".to_string())
+            (
+                "https://portal.example.test".to_string(),
+                "https://portal.example.test/admin-api/local-bridge/profile/v1".to_string()
+            )
         );
         assert_eq!(
-            discovery_target("http://portal.example.test/prod-api/admin-api/local-bridge/profile/v1").unwrap(),
-            ("http://portal.example.test".to_string(),
-             "http://portal.example.test/prod-api/admin-api/local-bridge/profile/v1".to_string())
+            discovery_target(
+                "http://portal.example.test/prod-api/admin-api/local-bridge/profile/v1"
+            )
+            .unwrap(),
+            (
+                "http://portal.example.test".to_string(),
+                "http://portal.example.test/prod-api/admin-api/local-bridge/profile/v1".to_string()
+            )
         );
         assert_eq!(
-            discovery_target("http://localhost:8080/proxy-api/admin-api/local-bridge/profile/v1").unwrap().0,
+            discovery_target("http://localhost:8080/proxy-api/admin-api/local-bridge/profile/v1")
+                .unwrap()
+                .0,
             "http://localhost:8080"
         );
         for bad in [
