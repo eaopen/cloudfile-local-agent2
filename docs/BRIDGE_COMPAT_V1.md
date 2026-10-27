@@ -8,6 +8,20 @@
 - Local Bridge 是通用能力路由/统一任务中心；可认识 CloudFile 的受限适配器；不应依赖任何上层企业应用的业务对象或用户名格式。
 - 上层应用通过自己提供的 ApplicationProfile 与 TaskContext 接入，Agent2 不应针对某个项目名称或 Profile 添加文件权限例外。
 
+## 当前直连 Agent2 与未来 Bridge 共用 Profile V1
+
+**现役运行时是 CloudFile Rust Agent2，不是 Local Bridge。** 上层应用可从现在开始声明 [通用 ApplicationProfile V1](https://github.com/eaopen/local-bridge/blob/dev/docs/APPLICATION_PROFILE_V1.md)，但不能因此要求安装 Bridge 才能打开或编辑文件。当前网页/Chrome/Host 直连 CloudFile Rust Agent2 的全部文件操作保持原样。
+
+一份应用 Profile 的 `profile_id`、`origin`、`application`、`services` 和 `channels` 跨版本稳定，文件通道 `module=cloudfile` 及 `cloudfile.file.view/edit/exclusive` 表达**逻辑文件能力**而不是可执行程序或 Host 名称。
+
+- **现在**：CloudFile Agent2 直接执行文件操作。Profile V1 读取/应用尚需作为*可选增量*实现：只处理合法受信的应用名称、来源、能力声明和实例关联，不能借由 Profile 升级文件访问授权或修改原任务状态。现有客户端没有 Profile 仍能使用。
+- **过渡期**：Bridge 可独立安装，读取相同 Profile V1，提供只读任务聚合与 AI/MCP 增强；Agent2 仍独占文件执行权。不能对未知上传或活动 Guard 跨 Host 自动重试。
+- **未来**：本机 LocalBinding 选择 Bridge 的 `cloudfile` adapter 路由新任务；已有任务由 Agent2 原 Journal 继续完成，云端文件身份和权限不变。上层应用无需换 Profile。
+
+不要增加 CloudFile Rust Agent 私有 Profile 版本或将 `runtime=local-bridge` 写回应用 Profile。可复用通用 V1 数据合同/校验器或其固定版本测试样例，但不建立对 Bridge **运行进程**的依赖。安装/更新信任源和设备凭据仍由本机受信配置管理。
+
+**当前仓库尚未实现 Profile V1 消费、Bridge IPC 任务聚合或自动切流。** 本次文档确认演进方向，不修改 Cargo、Host/CLI、V2 编辑引擎、工作副本或生产安装。
+
 ## 桥接对照（未来的只读 IPC 起点）
 
 | Bridge 目标能力 | Agent2 既有来源 | 当前允许的迁移 |
