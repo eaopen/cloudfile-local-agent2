@@ -584,10 +584,24 @@ pub fn stage(root: &Path, version: &str, os: &str, files: &[(Binary, Vec<u8>)]) 
         fill(&target, os, files)?;
         return Ok(target);
     }
-    let staging = bin_dir(root).join(format!(".staging-{version}-{}", uuid::Uuid::new_v4()));
-    storage::private_dir(&staging)?;
+    let bin = bin_dir(root);
+    let staging = bin.join(format!(".staging-{version}-{}", uuid::Uuid::new_v4()));
+    // 修改逻辑（2026-10-27）：这里原来只抛 "拒绝访问。/os error 5"，现场根本看不出是哪个目录。
+    // 安装目录常见于「老版本由管理员装过，普通用户对 bin\ 没有写权限」，必须说清路径。
+    storage::private_dir(&staging).with_context(|| {
+        format!(
+            "无法在 {} 下创建安装目录（拒绝访问通常是权限不足或杀软拦截）",
+            bin.display()
+        )
+    })?;
     fill(&staging, os, files)?;
-    fs::rename(&staging, &target)?;
+    fs::rename(&staging, &target).with_context(|| {
+        format!(
+            "无法把暂存目录改成正式目录：{} -> {}",
+            staging.display(),
+            target.display()
+        )
+    })?;
     Ok(target)
 }
 
@@ -603,7 +617,8 @@ fn fill(dir: &Path, os: &str, files: &[(Binary, Vec<u8>)]) -> Result<()> {
         if fs::read(&path).is_ok_and(|current| &current == bytes) {
             continue;
         }
-        storage::write_bytes(&path, bytes)?;
+        storage::write_bytes(&path, bytes)
+            .with_context(|| format!("写入 {} 失败（权限不足或被安全软件拦截）", path.display()))?;
         set_executable(&path)?;
     }
     if files.iter().any(|(kind, _)| *kind == Binary::Desktop) {

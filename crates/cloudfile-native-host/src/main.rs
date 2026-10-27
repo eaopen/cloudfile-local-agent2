@@ -532,6 +532,20 @@ fn ensure_install_root(install: &Path) -> anyhow::Result<()> {
     std::fs::write(&probe, b"ok")
         .with_context(|| format!("安装目录不可写：{}", install.display()))?;
     let _ = std::fs::remove_file(&probe);
+    // 版本目录都建在 bin\ 下面：这个子目录如果是老版本（管理员安装）留下的，
+    // 普通用户可能只能读不能写，装到一半才报「拒绝访问」。提前探测并说清楚怎么办。
+    let bin = update::bin_dir(install);
+    std::fs::create_dir_all(&bin)
+        .with_context(|| format!("创建安装目录失败：{}", bin.display()))?;
+    let bin_probe = bin.join(".cf-write-test");
+    std::fs::write(&bin_probe, b"ok").with_context(|| {
+        format!(
+            "安装目录的 bin 子目录不可写：{}\n\
+             请以管理员身份重新运行 install.cmd，或先删除该目录再重装。",
+            bin.display()
+        )
+    })?;
+    let _ = std::fs::remove_file(&bin_probe);
     Ok(())
 }
 
