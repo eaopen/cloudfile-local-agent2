@@ -28,7 +28,7 @@ Usage: cloudfile-native-host [command]
   --version                      print the build version
   --component                    print the local component contract as JSON
   --status                       print agent, registration and exit state as JSON
-  --sync-app-profile <origin>    fetch/verify V1 app metadata for an already trusted file service
+  --sync-app-profile <url>       sync V1 app metadata from app origin or explicit public discovery URL
   --list-app-profiles            list optional locally bound application profiles
   --register-host                register the Chrome host for the current user
   --unregister-host              remove the host this agent registered
@@ -162,7 +162,7 @@ fn run_command(args: &[String]) -> anyhow::Result<()> {
         }
         "--sync-app-profile" => {
             if args.len() != 2 {
-                anyhow::bail!("--sync-app-profile requires exactly one canonical app origin");
+                anyhow::bail!("--sync-app-profile requires one canonical origin or discovery URL");
             }
             let value = profile::sync(&root, &args[1])?;
             println!("{}", serde_json::to_string_pretty(&value)?);
