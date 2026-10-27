@@ -99,9 +99,9 @@ pub struct ProfileLabel {
 fn identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
-        && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_')
-        })
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
 }
 
 fn endpoint(raw: &str) -> Result<Url> {
@@ -152,9 +152,7 @@ pub fn validate(profile: &ApplicationProfile, now: u64) -> Result<()> {
     }
     if let Some(logo) = profile.application.logo_url.as_deref() {
         let parsed = endpoint(logo)?;
-        if parsed.scheme() == "http"
-            && parsed.origin().ascii_serialization() != profile.origin
-        {
+        if parsed.scheme() == "http" && parsed.origin().ascii_serialization() != profile.origin {
             bail!("HTTP logo must be hosted on the application origin");
         }
     }
@@ -187,17 +185,18 @@ pub fn validate(profile: &ApplicationProfile, now: u64) -> Result<()> {
                 bail!("native channel requires a capability module ID, not a command");
             }
             ChannelKind::Web
-                if channel.module.is_some()
-                    || !channel.entry.as_deref().is_some_and(web_entry) =>
+                if channel.module.is_some() || !channel.entry.as_deref().is_some_and(web_entry) =>
             {
                 bail!("web channel requires an origin-relative path");
             }
             _ => {}
         }
     }
-    if profile.update.as_ref().is_some_and(|update| {
-        !identifier(&update.track) || !identifier(&update.source_id)
-    }) {
+    if profile
+        .update
+        .as_ref()
+        .is_some_and(|update| !identifier(&update.track) || !identifier(&update.source_id))
+    {
         bail!("invalid ApplicationProfile update label");
     }
     Ok(())
@@ -214,7 +213,8 @@ fn profile_path(root: &Path, id: &str) -> Result<std::path::PathBuf> {
 /// service, replace update keys, add OAuth cookies, or authorize a write.
 fn check_bound_file_service(root: &Path, profile: &ApplicationProfile) -> Result<String> {
     if !profile.channels.iter().any(|c| {
-        c.enabled && c.kind == ChannelKind::Native
+        c.enabled
+            && c.kind == ChannelKind::Native
             && c.module.as_deref() == Some("cloudfile")
             && c.capabilities.iter().any(|id| id == "cloudfile.file.view")
     }) {
@@ -248,7 +248,10 @@ pub fn sync(root: &Path, address: &str) -> Result<Value> {
         .timeout(Duration::from_secs(8))
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
-    let response = client.get(&url).send().context("Profile discovery unavailable")?;
+    let response = client
+        .get(&url)
+        .send()
+        .context("Profile discovery unavailable")?;
     if response.status() != reqwest::StatusCode::OK {
         bail!("Profile discovery failed (HTTP {})", response.status());
     }
@@ -261,7 +264,9 @@ pub fn sync(root: &Path, address: &str) -> Result<Value> {
         bail!("Profile endpoint did not return JSON");
     }
     let mut bytes = Vec::new();
-    response.take(MAX_PROFILE_BYTES + 1).read_to_end(&mut bytes)?;
+    response
+        .take(MAX_PROFILE_BYTES + 1)
+        .read_to_end(&mut bytes)?;
     if bytes.len() as u64 > MAX_PROFILE_BYTES {
         bail!("Profile response is too large");
     }
@@ -331,7 +336,11 @@ pub fn labels(root: &Path) -> Vec<ProfileLabel> {
         let now = crate::now();
         // Expired metadata may still label an existing task, but never grants
         // new capabilities or permission to refresh authorization.
-        if validate(&record.profile, now.min(record.profile.expires_at.saturating_sub(1))).is_err()
+        if validate(
+            &record.profile,
+            now.min(record.profile.expires_at.saturating_sub(1)),
+        )
+        .is_err()
         {
             continue;
         }
@@ -351,13 +360,16 @@ pub fn labels(root: &Path) -> Vec<ProfileLabel> {
 }
 
 pub fn summaries(root: &Path) -> Value {
-    json!(labels(root).iter().map(|p| json!({
-        "profile_id":p.profile_id,
-        "application_name":p.application_name,
-        "environment":p.environment,
-        "expires_at":p.expires_at,
-        "stale":p.stale,
-    })).collect::<Vec<_>>())
+    json!(labels(root)
+        .iter()
+        .map(|p| json!({
+            "profile_id":p.profile_id,
+            "application_name":p.application_name,
+            "environment":p.environment,
+            "expires_at":p.expires_at,
+            "stale":p.stale,
+        }))
+        .collect::<Vec<_>>())
 }
 
 /// Only use a brand when a CloudFile origin resolves to *one* application
@@ -366,7 +378,9 @@ pub fn label_for_file_server<'a>(
     profiles: &'a [ProfileLabel],
     server: &str,
 ) -> Option<&'a ProfileLabel> {
-    let mut hits = profiles.iter().filter(|profile| profile.file_server == server);
+    let mut hits = profiles
+        .iter()
+        .filter(|profile| profile.file_server == server);
     match (hits.next(), hits.next()) {
         (Some(first), None) => Some(first),
         _ => None,
@@ -389,7 +403,8 @@ mod tests {
             "channels": [{"id": "files", "title": "Files", "kind": "native",
                 "module": "cloudfile", "capabilities": ["cloudfile.file.view"]}],
             "update": {"track": "dev", "source_id": "trusted-dev"}
-        })).unwrap()
+        }))
+        .unwrap()
     }
 
     #[test]
@@ -415,18 +430,26 @@ mod tests {
             "https://files.example.test"
         );
         let mut changed = p;
-        changed.services.insert("files".into(), "https://new.example.test/seafile".into());
+        changed
+            .services
+            .insert("files".into(), "https://new.example.test/seafile".into());
         assert!(check_bound_file_service(&root, &changed).is_err());
     }
 
     #[test]
     fn report_is_ambiguous_if_two_profiles_reference_one_fileserver() {
         let a = ProfileLabel {
-            profile_id: "a-dev".into(), application_name: "A".into(),
-            environment: "dev".into(), file_server: "https://files.example.test".into(),
-            expires_at: 99999, stale: false,
+            profile_id: "a-dev".into(),
+            application_name: "A".into(),
+            environment: "dev".into(),
+            file_server: "https://files.example.test".into(),
+            expires_at: 99999,
+            stale: false,
         };
-        let b = ProfileLabel { profile_id: "b-dev".into(), ..a.clone() };
+        let b = ProfileLabel {
+            profile_id: "b-dev".into(),
+            ..a.clone()
+        };
         assert!(label_for_file_server(&[a, b], "https://files.example.test").is_none());
     }
 }

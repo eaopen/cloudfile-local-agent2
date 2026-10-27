@@ -7,8 +7,8 @@
 //! a scripting runtime on the target machine.
 use anyhow::Context;
 use cloudfile_core::{
-    apps, autostart, device, guard, hostreg, ipc, native, paired_session, profile, selftest, session,
-    storage, update, wire,
+    apps, autostart, device, guard, hostreg, ipc, native, paired_session, profile, selftest,
+    session, storage, update, wire,
 };
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -171,7 +171,10 @@ fn run_command(args: &[String]) -> anyhow::Result<()> {
             if args.len() != 1 {
                 anyhow::bail!("--list-app-profiles does not accept arguments");
             }
-            println!("{}", serde_json::to_string_pretty(&profile::summaries(&root))?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&profile::summaries(&root))?
+            );
         }
         "--status" => {
             let binary = host_binary()?;
