@@ -1204,6 +1204,31 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
                     std::thread::sleep(std::time::Duration::from_secs(2));
                 }
             });
+            // 启动后自检一次更新：有新版就轻提示一下（不弹窗、不打断），
+            // 具体升级仍由用户在「设置 → 检查更新」里决定。
+            let update_handle = handle.clone();
+            let update_root = root.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                let probe = cloudfile_core::native::check_update(&update_root);
+                let available = probe
+                    .get("update_available")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                let latest = probe
+                    .get("latest_version")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                if available && !latest.is_empty() {
+                    present_toast(
+                        &update_handle,
+                        "info",
+                        &format!("发现新版本 v{latest}：可在设置里点「检查更新」升级"),
+                    );
+                    let _ = update_handle.emit("update-available", latest);
+                }
+            });
             let guard_handle = handle.clone();
             std::thread::spawn(move || loop {
                 let state = guard_handle.state::<State>();
@@ -1275,6 +1300,12 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
                         }
                         Err(error) => wire::error(&error.to_string()),
                     },
+                    // 扩展弹窗点「打开任务中心」：进程已经在跑就直接切前台，
+                    // 绝不重复开第二个（单实例锁会让第二个静默退出，用户以为没反应）。
+                    wire::Request::OpenTaskCenter {} => {
+                        show(&handle);
+                        json!({"ok":true})
+                    }
                     wire::Request::Focus { task_id } => {
                         if session::load(&root, &task_id).is_ok() {
                             show(&handle);

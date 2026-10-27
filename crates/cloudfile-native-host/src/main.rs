@@ -743,6 +743,25 @@ fn registration_target(
 
 /// 装完立刻启动任务中心：否则用户重启之前右下角什么都没有。
 /// 桌面是 GUI 子系统程序，读写的都是自己的私有目录，启动它不会弹控制台。
+/// 启动任务中心但**不杀**已在运行的实例：给「打开任务中心」用。
+/// 已经在跑的那份会通过 IPC 被切到前台（见 desktop 的 OpenTaskCenter），
+/// 这里只在「一个都没跑」时才会真的拉起新进程。
+fn spawn_desktop(desktop: Option<&Path>) -> anyhow::Result<bool> {
+    let Some(desktop) = desktop.filter(|path| path.is_file()) else {
+        anyhow::bail!("找不到 {}，请重新运行安装包里的 install.cmd", DESKTOP_NAME);
+    };
+    let mut command = std::process::Command::new(desktop);
+    command
+        .arg("--autostart")
+        .arg("--await-instance")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    cloudfile_core::childproc::hide(&mut command);
+    command.spawn()?;
+    Ok(true)
+}
+
 fn launch_desktop(desktop: Option<&Path>) -> anyhow::Result<bool> {
     let Some(desktop) = desktop.filter(|path| path.is_file()) else {
         eprintln!("警告：找不到 {DESKTOP_NAME}，任务中心没能自动启动；装好后手动双击即可。");
@@ -851,6 +870,16 @@ fn run_stdio() -> anyhow::Result<()> {
             Ok(wire::Request::Status {}) => native::status(&root),
             Ok(wire::Request::Tasks {}) => native::task_summary(&root),
             Ok(wire::Request::CheckUpdate {}) => native::check_update(&root),
+            // 「打开任务中心」：常驻进程在跑 → 由它切前台；没跑 → 这里拉起（不杀任何东西）。
+            Ok(wire::Request::OpenTaskCenter {}) => {
+                match ipc::call(&root, wire::Request::OpenTaskCenter {}) {
+                    Ok(value) => value,
+                    Err(_) => match spawn_desktop(desktop_binary().ok().as_deref()) {
+                        Ok(_) => json!({"ok":true,"launched":true}),
+                        Err(error) => wire::error(&error.to_string()),
+                    },
+                }
+            }
             Ok(wire::Request::Update {}) => start_detached("--update", &root, "agent"),
             Ok(wire::Request::UpdateExtension {}) => {
                 start_detached("--update-extension", &root, "extension")

@@ -28,6 +28,9 @@ pub enum Request {
     Tasks {},
     #[serde(rename = "focus_task")]
     Focus { task_id: String },
+    /// 打开（或把已经在跑的任务中心切到前台）。扩展弹窗用它代替「再启一个进程」。
+    #[serde(rename = "open_task_center")]
+    OpenTaskCenter {},
     /// Lightweight version probe the extension repeats periodically.
     #[serde(rename = "check_update")]
     CheckUpdate {},

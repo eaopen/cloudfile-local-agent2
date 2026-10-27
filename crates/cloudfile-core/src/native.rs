@@ -19,6 +19,7 @@ const CAP_OPEN_URI: &str = "open_uri";
 const CAP_TASK_SUMMARY: &str = "task_summary";
 const CAP_FOCUS_TASK: &str = "focus_task";
 const CAP_CHECK_UPDATE: &str = "check_update";
+const CAP_OPEN_TASK_CENTER: &str = "open_task_center";
 const CAP_OPEN_WORKSPACE: &str = "open_workspace";
 const CAP_QUERY_LOCAL_FILE: &str = "query_local_file";
 const CAP_QUERY_LOCAL_FOLDER: &str = "query_local_folder";
@@ -56,6 +57,7 @@ pub fn capabilities(root: &Path) -> Vec<String> {
     ];
     list.push(CAP_FOCUS_TASK.to_string());
     list.push(CAP_CHECK_UPDATE.to_string());
+    list.push(CAP_OPEN_TASK_CENTER.to_string());
     if update_configured(root) {
         list.push(CAP_UPDATE.to_string());
     }
