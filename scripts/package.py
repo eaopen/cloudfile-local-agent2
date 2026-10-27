@@ -45,6 +45,17 @@ shutil.copy2(root/'README.md',stage/'README.md')
  '  更新通道要求规范 origin（http://host/dir 或 https://host/dir，不带尾斜杠），\n'
  '  Agent 自身的升级必须有签名清单；明文 http 是默认支持的，不需要额外开关。\n',
  encoding='utf-8')
+if sys.platform=='linux':
+ shutil.copy2(root/'docs/LINUX.md',stage/'LINUX.md')
+ shutil.copy2(root/'crates/cloudfile-desktop/icons/icon.png',stage/'cloudfile-agent.png')
+ (stage/'INSTALL.txt').write_text(
+  'CloudFile Agent Linux 开发包（Ubuntu 24.04 x86_64）\n\n'
+  '先安装 LINUX.md 所列运行库，并在普通用户的图形桌面会话中解压到固定目录。\n'
+  '运行 ./cloudfile-native-host --register-host，再运行 ./cloudfile-native-host --self-test。\n'
+  '运行 ./cloudfile-desktop 打开任务中心；浏览器扩展由用户在 Chrome 加载。\n'
+  'Linux/macOS 共用 com.cloudfile.agent2；不需要 sudo 注册。\n'
+  '设备密钥依赖已解锁的 Secret Service，不回退到明文文件。\n'
+  '当前开发包无 Linux 自动升级通道或登录自启。\n',encoding='utf-8')
 archive=stage.with_suffix('.zip')
 with zipfile.ZipFile(archive,'w',zipfile.ZIP_DEFLATED) as z:
  for path in sorted(stage.rglob('*')):

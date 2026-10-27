@@ -9,7 +9,11 @@ use std::process::Command;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn desktop(arguments: &[&str]) -> std::process::Output {
+    // 自检可能创建本机目录；始终使用隔离根，避免 Linux 验收触碰真实任务。
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().canonicalize().unwrap();
     Command::new(env!("CARGO_BIN_EXE_cloudfile-desktop"))
+        .env("CLOUDFILE_AGENT2_HOME", home.join("CloudFileAgent"))
         .args(arguments)
         .output()
         .unwrap()

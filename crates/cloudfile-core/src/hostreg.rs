@@ -7,12 +7,9 @@
 //! program. A registration from an older CloudFile Agent is ours: an explicit
 //! install upgrades it without a second confirmation.
 //!
-//! Development and production identities stay separate on POSIX: the dev build
-//! registers `com.cloudfile.agent22.dev` and never touches the hosts the
-//! shipped macOS agent uses. **Windows 是例外**，因为扩展在 Windows 上只分给控制器
-//! 一个槽位 `com.cloudfile.current_agent`（见 [`HOST`]）。占这个槽位必须是显式动作：
-//! `install` 不会静默替换别的程序的 manifest，要 `--takeover`，而它会先备份成
-//! `<host>.previous.json`、可用 `--rollback-host` 还原。
+//! macOS/Linux share `com.cloudfile.agent2`; Windows retains its fixed controller
+//! slot `com.cloudfile.current_agent`. Registration backs up recognized CloudFile
+//! manifests and requires explicit takeover for unrelated programs.
 use crate::storage;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -20,7 +17,7 @@ use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Isolated development host. Registered by this agent only.
+/// Historical Rust dev identity retained for explicit CLI registration and tests.
 pub const DEV_HOST: &str = "com.cloudfile.agent22.dev";
 
 /// **本平台**上真正注册的 Host ID。
@@ -29,15 +26,15 @@ pub const DEV_HOST: &str = "com.cloudfile.agent22.dev";
 /// `cloudfile-chrome-extension/background.js` 的 `preferredNative()` 在 Windows 上**只**向这一个
 /// Host 发消息，且 `tests/agent2-routing.cjs` 用两条用例把它钉死了
 /// （`Windows never probes Go Hosts when its fixed Host is missing`、
-/// `a future Windows Go controller uses the same Host ID`）。也就是说 Windows 上的控制器
+/// `a Windows Rust controller uses the same Host ID`）。也就是说 Windows 上的控制器
 /// 只分到一个槽位，谁当控制器谁就得占它 —— 否则扩展直接回「本机 Agent 未就绪」。
 ///
-/// 非 Windows 仍用开发身份 [`DEV_HOST`]：macOS 上扩展找的是 `com.cloudfile.agent2`（Go 的 Host），
-/// Rust MVP 不去抢它。
+/// Go Agent 已在发布前废弃。macOS/Linux 使用同一个 Rust Host，
+/// 两个系统在各自用户目录注册，不需要用不同名称隔离。
 pub const HOST: &str = if cfg!(windows) {
     "com.cloudfile.current_agent"
 } else {
-    DEV_HOST
+    "com.cloudfile.agent2"
 };
 
 /// Hosts the shipped agents own. Listed so takeover can be explicit and
@@ -45,11 +42,7 @@ pub const HOST: &str = if cfg!(windows) {
 ///
 /// 注意：Windows 上 [`HOST`] 就在这个列表里（控制器槽位只有那一个）。这不矛盾 ——
 /// 列表的用途是「替换别人的注册必须显式」，而 `install` + `--takeover` 正是那条显式路径。
-pub const LEGACY_HOSTS: &[&str] = &[
-    "com.cloudfile.agent2",
-    "com.cloudfile.current_agent",
-    "com.cloudfile.local_agent",
-];
+pub const LEGACY_HOSTS: &[&str] = &["com.cloudfile.agent2", "com.cloudfile.current_agent"];
 
 pub const DESCRIPTION: &str = "CloudFile Agent 2.2 Native Host";
 
@@ -139,11 +132,13 @@ pub fn default_manifest_dir(
 ) -> Result<PathBuf> {
     match os {
         "macos" => Ok(home.join("Library/Application Support/Google/Chrome/NativeMessagingHosts")),
+        // Linux Chrome 使用当前用户配置目录，与 macOS/Windows 注册互相隔离。
+        "linux" => Ok(home.join(".config/google-chrome/NativeMessagingHosts")),
         "windows" => {
             let local = local_app_data.context("LOCALAPPDATA is unavailable")?;
             Ok(local.join("CloudFileAgent").join("native-host"))
         }
-        _ => bail!("native host registration supports Windows and macOS only"),
+        _ => bail!("native host registration supports Windows, macOS and Linux only"),
     }
 }
 
@@ -435,7 +430,11 @@ mod tests {
             default_manifest_dir("windows", home, Some(local)).unwrap(),
             local.join("CloudFileAgent/native-host")
         );
-        assert!(default_manifest_dir("linux", home, Some(local)).is_err());
+        assert_eq!(
+            default_manifest_dir("linux", home, None).unwrap(),
+            home.join(".config/google-chrome/NativeMessagingHosts")
+        );
+        assert!(default_manifest_dir("unknown", home, None).is_err());
         assert!(default_manifest_dir("windows", home, None).is_err());
     }
 
@@ -451,9 +450,7 @@ mod tests {
         }
         #[cfg(not(windows))]
         {
-            // macOS 上扩展找的是 Go 的 `com.cloudfile.agent2`；Rust MVP 用开发身份，不去抢。
-            assert_eq!(HOST, DEV_HOST);
-            assert_ne!(HOST, "com.cloudfile.agent2");
+            assert_eq!(HOST, "com.cloudfile.agent2");
         }
         // 自检与注册必须查同一个名字（lib.rs 的 HOST 只是转出）。
         assert_eq!(crate::HOST, HOST);

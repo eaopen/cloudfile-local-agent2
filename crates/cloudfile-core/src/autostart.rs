@@ -195,6 +195,8 @@ pub fn install(root: &Path, program: &Path) -> Result<LoginItem> {
     if !program.is_absolute() {
         bail!("login item program must be an absolute path");
     }
+    // Linux 尚未提供登录项后端，不创建只供 Windows/macOS 使用的参数。
+    #[cfg(any(target_os = "macos", windows))]
     let arguments = vec![LOGIN_ARGUMENT.to_string()];
     #[cfg(target_os = "macos")]
     let item = {

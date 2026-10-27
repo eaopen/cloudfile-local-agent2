@@ -19,8 +19,8 @@ import shutil
 import re
 import sys
 
-DEV_HOST = 'com.cloudfile.agent22.dev'
-# macOS development builds use an isolated Rust Host; Windows must retain
+DEV_HOST = 'com.cloudfile.agent2'
+# macOS/Linux share the Rust Host; Windows must retain
 # the fixed controller Host that cloudfile-core::hostreg::HOST registers.
 MACOS_UPSTREAM_HOST = 'com.cloudfile.agent2'
 WINDOWS_HOST = 'com.cloudfile.current_agent'
@@ -69,7 +69,7 @@ def main():
     if not background.is_file():
         sys.exit(f"error: missing {background}")
     s = background.read_text()
-    # Rewrite only macOS Agent2 routing. Windows always uses current_agent.
+    # Validate the shared macOS/Linux Host. Windows always uses current_agent.
     upstream = re.compile(
         r"(?m)^const\s+AGENT2_HOST\s*=\s*['\"]"
         + re.escape(MACOS_UPSTREAM_HOST)
@@ -98,7 +98,7 @@ def main():
     m['name'] = 'CloudFile Agent 2.2 Dev'
     p.write_text(json.dumps(m, ensure_ascii=False, indent=2))
 
-    print(f'{target}\n  source: {source} ({origin})\n  macOS dev Host: {DEV_HOST}\n  Windows Host: {WINDOWS_HOST}')
+    print(f'{target}\n  source: {source} ({origin})\n  macOS/Linux Rust Host: {DEV_HOST}\n  Windows Host: {WINDOWS_HOST}')
 
 
 if __name__ == '__main__':

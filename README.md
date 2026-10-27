@@ -24,8 +24,8 @@
 - 发布确认后推进基线，可继续编辑再次保存。响应丢失先查询原 Intent；重试发送原快照，不替换成后来修改的内容。
 - **大文件 CDC 分块上传（可选，默认关闭）**：≥16 MiB 的快照先按 Seafile 原生 CDC（Rabin，6/8/10 MiB）切分，用服务端已存在的原生块做签名 missing-block 计划；只有确实节省 ≥4 MiB 且复用 ≥25% 时才改走 `*-block-plan` / `*-block-stage` / `*-block-publish`，否则仍用已验证的全量传输。独占与普通本地编辑两条路径共用同一套计划与回退逻辑。
 - **本机安装、升级与回退均由自带程序完成**：`cloudfile-native-host` 同时是 CLI，注册 Host、登录项、下载校验、版本目录切换、回退与清理都不需要目标机器安装 Python 或 Rust 工具链。
-- 密钥存储在 macOS Keychain / Windows Credential Manager；采用 Rust P-256 签名，不依赖旧 Agent。当前是系统保护的可读密钥，不宣称 CNG/硬件不可导出密钥。
-- 独立用户目录 `CloudFileAgent`（Windows 默认 `D:\CloudFileAgent`，没有可用 D 盘时才是 `%LOCALAPPDATA%\CloudFileAgent`）、开发 Host `com.cloudfile.agent22.dev`。
+- 密钥存储在 macOS Keychain / Windows Credential Manager / Linux Secret Service；采用 Rust P-256 签名，不依赖旧 Agent。当前是系统保护的可读密钥，不宣称 CNG/硬件不可导出密钥。
+- 独立用户目录 `CloudFileAgent`（Windows 默认 `D:\CloudFileAgent`，没有可用 D 盘时才是 `%LOCALAPPDATA%\CloudFileAgent`）、macOS/Linux Host `com.cloudfile.agent2`。
 - 开发版新工作副本默认放在 `D:\CloudFileAgent\workspace\<任务 ID>\`（没有可用 D 盘时退回用户主目录 `~\CloudFileAgent\workspace\<任务 ID>\`），可在任务中心更改；首次打开目录时自动创建。修改目录只影响新任务，已有任务仍使用原位置。密钥、任务记录、Intent 与上传快照继续保存在私有 `CloudFileAgent22` 目录。
 
 本地应用 Ctrl/Cmd+S 只写磁盘，**不会自动上传**：普通编辑需要在任务中心点「立即上传」，独占编辑必须显式「提交版本」或「签入并释放」。发生网络中断、冲突或未确认回执时保持待确认状态，保留工作副本与原上传快照；不会盲目重发。
@@ -194,10 +194,9 @@ python3 scripts/prepare-extension.py --extension-src ../cloudfile-chrome-extensi
 未指定时先找同级 `../cloudfile-chrome-extension`、再找上级 `../../cloudfile-chrome-extension`，
 都找不到就报错退出。开发副本始终写入 `dist/`，不提交、不回写共享扩展仓库。
 
-打包脚本只将 **macOS 开发版的 `AGENT2_HOST`** 指向 `com.cloudfile.agent22.dev`。
-Windows `CURRENT_HOST` 必须保留 `com.cloudfile.current_agent`，与 Rust 当前平台注册一致。
-共享扩展的 `LEGACY_GO` Host 也不更改；上游路由契约变化时打包直接失败，不覆盖上一次产物。
-开发阶段应手动加载本脚本生成的隔离扩展副本；普通更新通道下载的共享扩展不保证指向 macOS 开发 Host。
+打包脚本验证 macOS/Linux 的 `AGENT2_HOST` 为 `com.cloudfile.agent2`，
+Windows `CURRENT_HOST` 为 `com.cloudfile.current_agent`，与 Rust 当前平台注册一致。
+未发布 Go Agent 已废弃，扩展不探测其 Host。开发副本由用户手动加载；数据目录与设备密钥保持原样。
 
 
 使用独立的 Chrome 配置文件（开发副本沿用现有扩展 ID，不能与正式扩展装在同一配置文件）。在扩展管理页以开发者模式加载 `dist/chrome-extension-agent22`，然后：
@@ -219,14 +218,11 @@ Host 注册只影响当前用户。旧 CloudFile Agent 的注册在显式安装/
 
 ### Host 名（为什么 Windows 上是 `com.cloudfile.current_agent`）
 
-扩展在 Windows 上**只**向 `com.cloudfile.current_agent` 发消息，且它的用例明确禁止回落到其它 Host
-（`cloudfile-chrome-extension/tests/agent2-routing.cjs`：`Windows never probes Go Hosts when its fixed
-Host is missing`、`a future Windows Go controller uses the same Host ID`）。也就是说 Windows 上的控制器
-**只有一个槽位**，谁当控制器谁就得占它——名字写错，扩展只会回「本机 Agent 未就绪」，与 Agent 装没装无关。
+扩展在 Windows 上只向 `com.cloudfile.current_agent` 发消息；既有 .NET 与 Rust 客户端共用这个固定控制器 Host，缺失时不跨 Host 重试。
+macOS/Linux 共用 `com.cloudfile.agent2`；未发布 Go Agent 已废弃，不保留其路由。
 
-因此 `hostreg::HOST` 按平台取值：Windows → `com.cloudfile.current_agent`，其它平台 → `com.cloudfile.agent22.dev`
-（macOS 上扩展找的是 Go 的 `com.cloudfile.agent2`，Rust MVP 不去抢）。Windows 上占这个槽位必须是**显式**动作：
-`--register-host` 不 overwrite 别人的注册，需要 `--takeover`，且先备份、可还原。
+注册只影响当前用户。用户显式安装/升级 Rust Agent 时，已识别的旧 CloudFile 注册会先备份再替换；
+其它程序的注册仍要求显式 `--takeover`，并可通过 `--rollback-host` 还原。
 
 清单里的 `path` 写**普通绝对路径**：`canonicalize()` 在 Windows 上给出的 `\\?\` verbatim 前缀会被剥掉，
 与 Go 侧写出的形状一致（UNC 的 `\\?\UNC\...` 保留，剥了会变成非法路径）。
@@ -276,6 +272,10 @@ Rust 测试与开发扩展打包测试，并生成开发 ZIP 上传 Artifact；
 
 ## 验证状态
 
+Linux 开发适配与安装条件见 [Linux 桌面开发版](docs/LINUX.md)。使用与 macOS 一致的 Rust Host、
+Google Chrome 和 Secret Service；以 Ubuntu 24.04 x86_64 为验收基线。
+Ubuntu 20.04、Linux 自动升级和登录自启不在当前支持范围内。
+
 验证命令：`cargo test --workspace --locked --no-fail-fast`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo fmt --all --check`、`node --test scripts/prepare-extension.test.cjs`。前三项同时是 CI 门禁；系统凭据往返测试需要外部条件，默认忽略。
 其中 `cloudfile-native-host/tests/cli_contract.rs` 与 `cloudfile-desktop/tests/cli_contract.rs` 直接运行真实二进制，并把 `HOME`（Windows 另加 `LOCALAPPDATA`）重定向到临时目录，因此注册、接管、回退、卸载、健康检查与协议自检都不触碰开发机上的真实 Chrome 注册。
 
@@ -312,7 +312,7 @@ grant. No SeaDrive engine or file-system driver is bundled.
 本仓库保留 CloudFile V2 的本地查看、普通编辑、独占编辑实现，并迁入
 `cloudfile-local-agent/agent-rust/agent22` 的 Windows 首次安装引导、
 Native Host 注册/回退、自动启动兜底、扩展自更新、离线检查以及签名升级工具。
-Windows Host 使用 `com.cloudfile.current_agent`；非 Windows 使用开发 Host。
+Windows Host 使用 `com.cloudfile.current_agent`；macOS/Linux 使用 `com.cloudfile.agent2`。
 本机扩展 ID 由产品常量提供，不再要求用户自行输入。
 
 部署时需要在「服务连接」添加组织提供的服务地址；**不会自动信任旧仓里的
