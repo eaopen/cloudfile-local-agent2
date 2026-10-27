@@ -12,12 +12,10 @@
   <div class="badge" id="agent-badge">AGENT</div>
   <nav aria-label="主导航">
     <button class="nav-item selected" data-view="tasks" aria-current="page"><span aria-hidden="true">▤</span>本地任务<span id="attention-count" class="nav-count" hidden></span></button>
-    <button class="nav-item" data-view="services"><span aria-hidden="true">◇</span>服务连接<span id="service-dot" class="connection-dot" hidden></span></button>
     <button class="nav-item" data-view="settings"><span aria-hidden="true">⚙</span>设置</button>
     <button class="nav-item" data-view="setup"><span aria-hidden="true">↗</span>安装引导</button>
   </nav>
   <div class="sidebar-footer">
-    <div id="connection-state" class="connection-state">正在读取连接状态…</div>
     <div id="sidebar-version" class="version"></div>
     <div class="version" id="exit-state"></div>
   </div>
@@ -47,15 +45,6 @@
     </details>
   </div>
 
-  <div id="view-services" class="page-view" hidden>
-    <section class="panel"><div class="section-heading"><div><h2>已添加的服务</h2><p class="hint">设备连接状态按服务分别显示。</p></div></div><ul id="origins"></ul></section>
-    <section class="panel"><h2>添加 CloudFile 服务</h2><p class="hint">使用组织提供的完整网盘地址，例如 https://files.example.com/seafile/。</p>
-      <form id="trust" class="inline-form"><input id="origin" type="url" required placeholder="输入 CloudFile 服务地址" aria-label="CloudFile 服务地址"><button>添加服务</button></form>
-      <p class="field-note">添加后，在浏览器登录该服务并发起本地编辑，网页会引导完成设备配对。</p>
-    </section>
-    <div class="subtle-note">浏览器显示“Agent 已就绪”表示本机通信正常；设备是否配对以服务列表为准。</div>
-  </div>
-
   <div id="view-settings" class="page-view" hidden>
     <section class="panel"><h2>偏好设置</h2><p class="hint">管理提醒、悬浮入口和工作副本位置。</p>
       <form id="settings" class="settings-form">
@@ -76,20 +65,27 @@
   </div>
   <div id="view-setup" class="page-view" hidden>
     <section class="panel">
-      <div class="section-heading"><div><h2>首次安装与连接检查</h2><p class="hint">此页只协助检查安装。内置服务已自动添加，无需手动配置；其他服务请到「服务连接」页由你自行添加。</p></div>
+      <div class="section-heading"><div><h2>首次安装与连接检查</h2><p class="hint">此页只协助检查本机组件是否就位。服务地址已内置，无需配置。</p></div>
       <div id="setup-counts"></div></div>
       <ol class="setup-steps" id="setup-steps"></ol>
       <div class="row">
         <button id="setup-run">安装或修复本机组件</button>
-        <button class="secondary" id="setup-extension">打开 Chrome 扩展管理页</button>
         <button class="secondary" id="setup-open-dir">打开扩展目录</button>
         <button class="secondary" id="setup-finish">完成，进入任务中心</button>
       </div>
       <div id="setup-log" class="technical" hidden></div>
       <section class="panel" id="setup-extension-help" hidden>
-        <h3>安装扩展（需要你在 Chrome 中确认）</h3>
-        <p class="hint">打开 chrome://extensions，启用开发者模式并选择“加载已解压的扩展程序”。</p>
-        <label class="field">扩展目录 <input id="setup-ext-dir" readonly aria-label="扩展目录"></label>
+        <h3>在 Chrome 里装这个扩展</h3>
+        <ol class="setup-howto">
+          <li>打开 Chrome，在地址栏输入 <code>chrome://extensions</code> 后回车（浏览器不再允许从外部直接弹出这一页，需要手动输入或粘贴）。</li>
+          <li>打开页面右上角的「开发者模式」。</li>
+          <li>点左上角「加载已解压的扩展程序」，选中下面这个目录。</li>
+          <li>回到这里点「完成」；扩展列表里出现 CloudFile 即装好。</li>
+        </ol>
+        <div class="field-block">
+          <span class="hint">扩展目录（可直接复制）</span>
+          <code id="setup-ext-dir" class="path-value" role="textbox" aria-label="扩展目录"></code>
+        </div>
         <p>扩展 ID：<code id="setup-ext-id"></code></p>
       </section>
     </section>

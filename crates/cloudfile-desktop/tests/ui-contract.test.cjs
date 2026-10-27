@@ -102,7 +102,8 @@ test('all literal JS element IDs and navigation views exist in the HTML', () => 
     [],
     'app.js references missing HTML IDs'
   );
-  for (const name of ['tasks', 'services', 'settings', 'setup']) {
+  // 服务连接页已删除（服务地址内置，不需要界面配置）。
+  for (const name of ['tasks', 'settings', 'setup']) {
     assert.ok(declaredIds.has('view-' + name));
     assert.match(html, new RegExp('data-view="' + name + '"'));
   }
@@ -111,21 +112,6 @@ test('all literal JS element IDs and navigation views exist in the HTML', () => 
 test('task centre binds all controls before connecting to any service', () => {
   const { ctx } = fakeApp([]);
   assert.doesNotThrow(() => vm.runInContext('wire()', ctx));
-});
-
-test('added services render without losing per-service remove action', async () => {
-  const services = [
-    { origin: 'https://files.example.com', service_url: 'https://files.example.com/seafile', state: 'unpaired', default: false },
-    { origin: 'https://cloud.example.com', service_url: 'https://cloud.example.com', state: 'paired', default: false },
-  ];
-  const { ctx, elements } = fakeApp(services);
-  await vm.runInContext('renderOrigins()', ctx);
-  const rows = elements.get('origins').children;
-  assert.equal(rows.length, 2);
-  assert.equal(rows[0].children[0].children[0].textContent, services[0].service_url);
-  assert.equal(rows[1].children[0].children[0].textContent, services[1].service_url);
-  assert.ok(rows[0].children.some(child => child.className === 'row'));
-  assert.ok(rows[1].children.some(child => child.className === 'row'));
 });
 
 test('settings load renders autostart state and host state without missing elements', async () => {
@@ -147,9 +133,11 @@ test('setup status renders first-run steps without registering an external servi
     autostart_enabled: false, extension_version: null, extension_dir: '/test/extension',
     extension_id: 'abcdefghijklmnopabcdefghijklmnop', setup_completed: false
   })`, ctx);
-  assert.equal(elements.get('setup-steps').children.length, 6);
-  assert.equal(elements.get('setup-ext-dir').value, '/test/extension');
-  assert.match(elements.get('setup-steps').children[1].children[1].children[1].textContent, /尚未添加服务/);
+  // 服务地址内置后引导少了一步（不再有「受信任的 CloudFile 服务」）。
+  assert.equal(elements.get('setup-steps').children.length, 5);
+  assert.equal(elements.get('setup-ext-dir').textContent, '/test/extension');
+  assert.doesNotMatch(html, /服务连接/);
+  assert.doesNotMatch(html, /打开 Chrome 扩展管理页/);
 });
 
 

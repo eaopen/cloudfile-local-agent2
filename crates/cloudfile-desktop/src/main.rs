@@ -573,24 +573,6 @@ fn setup_finish(state: tauri::State<'_, State>) -> Result<Value, String> {
         .map_err(|error| error.to_string())
 }
 
-/// 打开扩展管理页，并把要选的目录一起返回（界面上显示成可复制的只读文本）。
-#[tauri::command]
-fn open_extension_page(state: tauri::State<'_, State>) -> Result<Value, String> {
-    let dir = extension_dir(&state.root);
-    if extension::installed_version(&dir).is_none() {
-        return Err(format!(
-            "扩展还没部署到 {}；请先点「一键完成」，或手动把扩展包解压到该目录",
-            dir.display()
-        ));
-    }
-    let chrome = browser::open_extensions_page().map_err(|error| format!("{error:#}"))?;
-    Ok(json!({
-        "directory": dir.to_string_lossy(),
-        "extension_id": hostreg::EXTENSION_ID,
-        "chrome": chrome.map(|path| path.to_string_lossy().into_owned()),
-    }))
-}
-
 /// 在资源管理器里打开扩展目录（比手抄路径可靠）。
 #[tauri::command]
 fn open_extension_dir(state: tauri::State<'_, State>) -> Result<String, String> {
@@ -807,19 +789,6 @@ fn service_status(state: tauri::State<'_, State>) -> Result<Value, String> {
             "origin":origin,
         }))
         .collect::<Vec<_>>()))
-}
-
-/// 移除一条受信任服务，
-/// 这里只是把拒绝原因原样带回界面。
-#[tauri::command]
-fn untrust_origin(state: tauri::State<'_, State>, origin: String) -> Result<(), String> {
-    session::untrust(&state.root, origin).map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-fn trust_origin(state: tauri::State<'_, State>, origin: String) -> Result<(), String> {
-    session::trust(&state.root, origin)
-        .map_err(|_| "请输入完整服务地址，例如 https://files.example.com".into())
 }
 
 #[tauri::command]
@@ -1091,17 +1060,14 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
             setup_state,
             setup_apply,
             setup_finish,
-            open_extension_page,
             open_extension_dir,
             update_extension,
-            untrust_origin,
             autostart_set,
             check_update,
             run_update,
             update_state,
             restart_app,
             open_workspace,
-            trust_origin,
             trusted_origins,
             open_task,
             delete_task,

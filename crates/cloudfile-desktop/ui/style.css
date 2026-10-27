@@ -77,3 +77,10 @@ body.toast-body{background:transparent;display:block;overflow:hidden;padding:6px
 .dialog-card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px 22px;max-width:520px;width:100%;box-shadow:0 18px 48px rgba(15,23,42,.24)}
 .dialog-card h2{margin:0 0 8px;font-size:15px}
 .dialog-card p{margin:0;font-size:12.5px;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere}
+/* 安装扩展的四步说明与可复制的目录块（2026-10-27）。浏览器不再允许程序直接打开
+   扩展管理页，所以这一步必须写成能照着做的文字；目录可能很长，用块级 code 换行显示。 */
+.setup-howto{margin:10px 0 4px;padding-left:20px;font-size:12px;line-height:1.8;color:var(--muted)}
+.setup-howto code{font:12px/1.6 "SFMono-Regular",Consolas,monospace;background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:1px 5px}
+.field-block{margin-top:12px;display:flex;flex-direction:column;gap:6px}
+.path-value{display:block;font:12px/1.7 "SFMono-Regular",Consolas,monospace;color:var(--text);background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:9px 11px;white-space:pre-wrap;overflow-wrap:anywhere;cursor:copy}
+.path-value:hover{border-color:var(--muted)}

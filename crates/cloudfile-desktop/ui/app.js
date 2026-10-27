@@ -32,7 +32,6 @@ let setup = null;
 
 const VIEWS = {
   tasks: ['本地任务', '查看编辑进度，处理需要确认的任务。'],
-  services: ['服务连接', '管理 CloudFile 服务，查看设备连接状态。'],
   settings: ['设置', '按你的习惯安排本地工作。'],
   setup: ['安装引导', '检查本机 Host、工作目录、浏览器扩展与服务连接。'],
 };
@@ -93,16 +92,13 @@ function renderWelcome() {
   const description = document.createElement('p');
   description.textContent = ready
     ? '从 CloudFile 网页选择文件，点击“本地编辑”。文件会在本机打开，编辑进度与需要处理的事项将在这里显示。'
-    : '完成服务与浏览器连接后，就能使用熟悉的 Office、CAD 等本机应用处理文件。';
+    : '完成浏览器扩展安装后，就能使用熟悉的 Office、CAD 等本机应用处理文件。';
   const actions = document.createElement('div');
   actions.className = 'welcome-actions';
+  // 服务地址已内置，界面上不再有「服务连接」页；这里只引导浏览器连接这一步。
   if (ready) {
     actions.append(button('打开工作目录', openWorkspace));
-    actions.append(button('查看服务连接', () => setView('services'), { secondary: true }));
-  } else if (!services.length) {
-    actions.append(button('添加 CloudFile 服务', () => {
-      setView('services'); document.querySelector('#origin').focus();
-    }));
+    actions.append(button('查看安装引导', () => setView('setup'), { secondary: true }));
   } else if (!registered) {
     actions.append(button('检查浏览器连接', () => {
       setView('setup');
@@ -112,7 +108,6 @@ function renderWelcome() {
       document.querySelector('#task-help').open = true;
       document.querySelector('#task-help').scrollIntoView({ block: 'nearest' });
     }));
-    actions.append(button('管理服务', () => setView('services'), { secondary: true }));
   }
   card.append(icon, heading, description, actions);
   if (ready) {
@@ -125,9 +120,8 @@ function renderWelcome() {
     const steps = document.createElement('div');
     steps.className = 'setup-steps';
     for (const [index, title, description, complete] of [
-      [1, '添加服务', services.length ? '已保存组织网盘地址' : '填写组织提供的网盘地址', services.length > 0],
-      [2, '检查浏览器连接', registered ? '本机连接组件已注册' : '安装扩展并连接本机 Agent', registered],
-      [3, '从网页开始编辑', paired ? '设备已配对' : '登录网盘，首次编辑时完成配对', paired],
+      [1, '安装浏览器扩展', registered ? '本机连接组件已注册' : '在 Chrome 里加载扩展并连接本机 Agent', registered],
+      [2, '从网页开始编辑', paired ? '设备已配对' : '登录网盘，首次编辑时自动完成配对', paired],
     ]) {
       const step = document.createElement('div');
       step.className = complete ? 'step complete' : 'step';
@@ -157,18 +151,6 @@ const SETUP_STEPS = [
     title: '安装 Agent',
     hint: '任务中心已经在运行，二进制就位',
     state: (s) => ({ ok: true, detail: `v${s.version} · ${s.install_root}` }),
-  },
-  {
-    key: 'trusted',
-    title: '受信任的 CloudFile 服务',
-    hint: '请在「服务连接」添加组织提供的服务器地址',
-    state: (s) => ({
-      ok: s.trusted_ready,
-      detail:
-        s.trusted_ready
-          ? `${s.trusted_count} 个服务已配置`
-          : '尚未添加服务，请前往「服务连接」设置',
-    }),
   },
   {
     key: 'workspace',
@@ -247,8 +229,9 @@ function renderSetup(state) {
   ratio.append(value, caption);
   document.querySelector('#setup-counts').replaceChildren(ratio);
 
-  setupHelp.hidden = !state.extension_version;
-  document.querySelector('#setup-ext-dir').value = state.extension_dir;
+  // 安装扩展是**必须由用户手动完成的**一步（浏览器不让我们代劳），所以说明一直显示。
+  setupHelp.hidden = false;
+  document.querySelector('#setup-ext-dir').textContent = state.extension_dir;
   document.querySelector('#setup-ext-id').textContent = state.extension_id;
   document.querySelector('#host-extension-id').textContent = state.extension_id;
   document.querySelector('#setup-finish').textContent = state.setup_completed
@@ -311,26 +294,11 @@ async function runSetup() {
         ? `${failed.length} 步没成功，原因见上面的记录；修好后可以再点一次「一键完成」。`
         : '五步都完成了；最后在 Chrome 里加载扩展，然后点「完成，进入任务中心」。',
     );
-    if (state.extension_version) setupHelp.hidden = false;
+    setupHelp.hidden = false;
   } catch (error) {
     say(String(error));
   } finally {
     button.disabled = false;
-  }
-}
-
-async function openExtensionPage() {
-  try {
-    const result = await invoke('open_extension_page');
-    setupHelp.hidden = false;
-    document.querySelector('#setup-ext-dir').value = result.directory;
-    say(
-      result.chrome
-        ? `已用 ${result.chrome} 打开扩展管理页；开启开发者模式后选择上面的目录。`
-        : '已把扩展管理页交给默认浏览器；若打不开，请在 Chrome 地址栏输入 chrome://extensions。',
-    );
-  } catch (error) {
-    say(String(error));
   }
 }
 
@@ -346,7 +314,7 @@ async function finishSetup() {
   try {
     await invoke('setup_finish');
     showView('tasks');
-    await Promise.all([loadSettings(), renderOrigins(), refresh(), renderExitState()]);
+    await Promise.all([loadSettings(), refresh(), renderExitState()]);
     say('安装引导已完成。之后可以从左侧「安装引导」重新打开做修复。');
   } catch (error) {
     say(String(error));
@@ -638,6 +606,9 @@ async function refresh() {
   refreshing = true;
   try {
     const result = await invoke('task_summary');
+    // 服务连接页已删除，但欢迎卡仍需要「设备是否已配对」这一个状态；
+    // 服务地址本身是内置的，这里只读状态，不提供任何配置入口。
+    services = await invoke('service_status').catch(() => services);
     renderSummary(result);
     // The entry mirrors the same list, so a task can never be visible in one
     // view and hidden in the other.
@@ -727,88 +698,26 @@ async function loadSettings() {
   return current;
 }
 
-async function renderOrigins() {
-  const values = await invoke('service_status');
-  services = values;
-  const paired = values.some((service) => service.state === 'paired');
-  const connection = document.querySelector('#connection-state');
-  connection.textContent = paired ? '● 设备已连接' : values.length ? '○ 设备尚未连接' : '○ 尚未添加服务';
-  connection.classList.toggle('connected', paired);
-  document.querySelector('#service-dot').hidden = !paired;
-  const list = document.querySelector('#origins');
-  list.replaceChildren();
-  for (const service of values) {
-    const item = document.createElement('li');
-    const label = document.createElement('div');
-    label.className = 'service-info';
-    const stateTextMap = {
-      paired: '已连接设备',
-      pending: '等待 Chrome 完成配对',
-      unpaired: '尚未连接设备',
-    };
-    const address = document.createElement('strong'); address.textContent = service.service_url;
-    const state = document.createElement('span'); state.className = `service-status ${service.state}`;
-    state.textContent = stateTextMap[service.state] || service.state;
-    label.append(address, state);
-    item.append(label);
-    const actions = document.createElement('div');
-    actions.className = 'row';
-    if (service.state !== 'paired') {
-      const element = document.createElement('button');
-      element.textContent = '连接说明';
-      element.className = 'secondary';
-      element.onclick = async () => {
-        try {
-          setView('tasks');
-          document.querySelector('#task-help').open = true;
-          say('在 Chrome 登录此 CloudFile 服务，选择文件并点击“本地编辑”，按网页提示完成设备连接。');
-        } catch (error) {
-          say(String(error));
-        }
-      };
-      actions.append(element);
-    }
-    // 默认项不给按钮：能不能删由核心层判定，界面上连入口都不留。
-    if (!service.default) {
-      actions.append(
-        button(
-          '移除',
-          async () => {
-            try {
-              await invoke('untrust_origin', { origin: service.origin });
-              say('已移除该服务。');
-              await renderOrigins();
-            } catch (error) {
-              say(String(error));
-            }
-          },
-          { secondary: true },
-        ),
-      );
-    }
-    item.append(actions);
-    list.append(item);
-  }
-  if (!values.length) {
-    const empty = document.createElement('li'); empty.className = 'hint';
-    empty.textContent = '尚未添加服务。在下方填写组织提供的网盘地址即可开始。'; list.append(empty);
-  }
-  renderWelcome();
-}
-
 function wire() {
   for (const item of document.querySelectorAll('[data-view]')) {
     item.onclick = () => setView(item.dataset.view);
   }
   document.querySelector('#setup-run').onclick = runSetup;
-  document.querySelector('#setup-extension').onclick = openExtensionPage;
   document.querySelector('#setup-open-dir').onclick = openExtensionDir;
   document.querySelector('#setup-finish').onclick = finishSetup;
-  document.querySelector('#setup-ext-dir').onclick = (event) => event.target.select();
+  document.querySelector('#setup-ext-dir').onclick = async () => {
+    // 浏览器不让程序自动打开扩展管理页，这一步只能靠用户复制路径后再手动粘贴选择。
+    const text = document.querySelector('#setup-ext-dir').textContent || '';
+    try {
+      await navigator.clipboard.writeText(text);
+      say('扩展目录已复制，粘贴到 Chrome 的「加载已解压的扩展程序」里即可。');
+    } catch {
+      say(`扩展目录：${text}`);
+    }
+  };
 
   document.querySelector('#refresh').onclick = () => {
     refresh();
-    renderOrigins().catch((error) => say(String(error)));
     renderExitState();
   };
 
@@ -843,20 +752,6 @@ function wire() {
       await invoke('settings_set', { workspaceRoot: '' });
       await loadSettings();
       say('已恢复默认工作目录。');
-    } catch (error) {
-      say(String(error));
-    }
-  };
-
-  document.querySelector('#trust').onsubmit = async (event) => {
-    event.preventDefault();
-    try {
-      await invoke('trust_origin', {
-        origin: document.querySelector('#origin').value.trim(),
-      });
-      document.querySelector('#origin').value = '';
-      say('服务地址已保存；设备连接状态见服务列表。');
-      await renderOrigins();
     } catch (error) {
       say(String(error));
     }
@@ -1051,7 +946,6 @@ async function start() {
   }
   await Promise.all([
     loadSettings().catch((error) => say(String(error))),
-    renderOrigins().catch((error) => say(String(error))),
     refresh(),
   ]);
   renderExitState();
@@ -1072,7 +966,6 @@ async function start() {
   setInterval(() => {
     refresh();
     renderExitState();
-    renderOrigins().catch(() => {});
   }, 10000);
 }
 
