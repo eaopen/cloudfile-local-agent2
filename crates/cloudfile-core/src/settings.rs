@@ -37,7 +37,12 @@ impl FloatPosition {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+// 修改逻辑（2026-10-27）：**不再拒绝未知字段**。
+// 2.0.0–2.0.3 把 `auto_upload` 写进过 settings.json（保存设置时整struct序列化），
+// 2.0.4 删掉这个字段后，deny_unknown_fields 会让所有升级上来的机器读不出偏好，
+// 连 native-host 都起不来（"无法确定安装目录"）。偏好文件宁可宽容：多出来的键忽略即可，
+// 真正的坏数据（JSON 语法错、schema 不符）仍然会被 validate() 拦住。
+#[serde(default)]
 pub struct Settings {
     pub schema: u32,
     /// Lightweight toast after a working copy is saved locally.
@@ -415,7 +420,14 @@ mod tests {
             configured_workspace_root(root),
             Some(PathBuf::from(WORKSPACE))
         );
-        plant(&path(root), br#"{"schema":1,"upload":true}"#);
+        // 老版本写过的多余键（例如已删除的 auto_upload）只是被忽略，不能因此读不出偏好。
+        plant(
+            &path(root),
+            br#"{"schema":1,"upload":true,"auto_upload":null}"#,
+        );
+        assert!(load(root).is_ok());
+        // 真正的坏数据仍然拒绝。
+        plant(&path(root), b"not json");
         assert!(load(root).is_err());
     }
 }
