@@ -252,7 +252,9 @@ fn discovery_target(address: &str) -> Result<(String, String)> {
     let parsed = endpoint(address)?;
     let origin = parsed.origin().ascii_serialization();
     session::origin(&origin)?;
-    let prefix = parsed.path().strip_suffix(DISCOVERY_PATH)
+    let prefix = parsed
+        .path()
+        .strip_suffix(DISCOVERY_PATH)
         .context("expected the exact ApplicationProfile discovery path")?;
     if !session::valid_service_path(prefix)
         || address != format!("{origin}{prefix}{DISCOVERY_PATH}")
@@ -467,13 +469,13 @@ mod tests {
     fn discovery_accepts_original_origin_and_actual_reverse_proxy_endpoint() {
         assert_eq!(
             discovery_target("https://portal.example.test").unwrap(),
-            ("https://portal.example.test".into(),
-             "https://portal.example.test/admin-api/local-bridge/profile/v1".into())
+            ("https://portal.example.test".to_string(),
+             "https://portal.example.test/admin-api/local-bridge/profile/v1".to_string())
         );
         assert_eq!(
             discovery_target("http://portal.example.test/prod-api/admin-api/local-bridge/profile/v1").unwrap(),
-            ("http://portal.example.test".into(),
-             "http://portal.example.test/prod-api/admin-api/local-bridge/profile/v1".into())
+            ("http://portal.example.test".to_string(),
+             "http://portal.example.test/prod-api/admin-api/local-bridge/profile/v1".to_string())
         );
         assert_eq!(
             discovery_target("http://localhost:8080/proxy-api/admin-api/local-bridge/profile/v1").unwrap().0,
