@@ -89,6 +89,25 @@ pub fn status(root: &Path) -> Value {
         "platform": std::env::consts::OS,
         "capabilities": capabilities(root),
         "applications": apps::names(),
+        // 已配置的服务（origin + 门户内的部署路径）。扩展的「安装帮助」需要拿它拼
+        // <origin>/cloudfile-updates/help.html —— 之前它去翻 manifest 的
+        // externally_connectable，而那是 http://*/* 通配，永远匹配不到具体域名。
+        "services": crate::session::config(root)
+            .map(|config| {
+                config
+                    .allowed_origins
+                    .iter()
+                    .map(|origin| {
+                        let prefix = config
+                            .service_paths
+                            .get(origin)
+                            .cloned()
+                            .unwrap_or_default();
+                        json!({"origin": origin, "service_url": format!("{origin}{prefix}")})
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
         "application_profiles": crate::profile::summaries(root),
         "release_channel": "development",
         "workspace_root": crate::settings::workspace_root(root).to_string_lossy(),
