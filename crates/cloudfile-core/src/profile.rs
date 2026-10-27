@@ -229,11 +229,7 @@ fn check_bound_file_service(root: &Path, profile: &ApplicationProfile) -> Result
     if !cfg.allowed_origins.iter().any(|known| known == &server) {
         bail!("CloudFile service is not already trusted by this Agent");
     }
-    if cfg
-        .service_paths
-        .get(&server)
-        .is_some_and(|known| !known.is_empty() && known != &path)
-    {
+    if cfg.service_paths.get(&server).map(String::as_str).unwrap_or("") != path {
         bail!("profile CloudFile path differs from the already trusted service");
     }
     Ok(server)
@@ -429,6 +425,11 @@ mod tests {
             check_bound_file_service(&root, &p).unwrap(),
             "https://files.example.test"
         );
+        let (_unbound, unbound_root) = storage::test_root();
+        session::trust(&unbound_root, "https://files.example.test".into()).unwrap();
+        // An origin-only enrollment cannot authorize a distinct /seafile deployment.
+        let profile_with_subpath = sample();
+        assert!(check_bound_file_service(&unbound_root, &profile_with_subpath).is_err());
         let mut changed = p;
         changed
             .services
