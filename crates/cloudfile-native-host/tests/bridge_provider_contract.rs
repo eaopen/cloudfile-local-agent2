@@ -63,10 +63,12 @@ fn bridge_mcp_provider_is_read_only_and_uses_json_lines() {
         serde_json::from_str(answers[2]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(status["agent_family"], "agent2");
     assert_eq!(status["file_actions_exposed"], false);
+    assert_eq!(status["storage_scope"], "bridge_provider_private");
     let counts: Value =
         serde_json::from_str(answers[3]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(counts["total"], 0);
     assert_eq!(counts["pending_intents"], 0);
+    assert_eq!(counts["legacy_agent2_tasks_included"], false);
     assert_eq!(answers[4]["result"]["isError"], true);
     assert!(!body.contains(home.to_string_lossy().as_ref()));
     assert!(!body.contains("device_key"));
