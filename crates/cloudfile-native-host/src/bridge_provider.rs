@@ -2,13 +2,13 @@
 //! This is NOT Chrome Native Messaging: Chrome still uses the original framed
 //! protocol and the current Agent2 Desktop/Journal/Guard remain authoritative.
 //! V1 exposes only sanitized, local-OS-user read-only status and task counts.
+use anyhow::Context;
 use anyhow::{bail, Result};
 use cloudfile_core::{journal, session, storage, update};
-use anyhow::Context;
-use std::path::PathBuf;
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Read, Write};
 use std::path::Path;
+use std::path::PathBuf;
 
 const PROTOCOL: &str = "2025-06-18";
 const MAX_LINE: u64 = 64 * 1024;

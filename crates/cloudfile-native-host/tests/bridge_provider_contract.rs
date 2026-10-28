@@ -16,7 +16,10 @@ fn bridge_mcp_provider_is_read_only_and_uses_json_lines() {
         .env("HOME", &home)
         .env("USERPROFILE", &home)
         .env("LOCALAPPDATA", &local)
-        .env("CLOUDFILE_BRIDGE_PROVIDER_HOME", home.join("bridge-provider-state"))
+        .env(
+            "CLOUDFILE_BRIDGE_PROVIDER_HOME",
+            home.join("bridge-provider-state"),
+        )
         .env("CLOUDFILE_AGENT2_HOME", home.join("legacy-cloudfile-state"))
         .env("CLOUDFILE_AGENT2_NO_DRIVE_PREFERENCE", "1")
         .stdin(Stdio::piped())
