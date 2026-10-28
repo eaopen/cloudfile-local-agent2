@@ -84,6 +84,10 @@ Provider 的 `installed / available` 仅表示组件可被 Bridge 连接；文�
 
 Bridge 已有用户显式注册的 `mcp_provider` 机制，可使用固定绝对路径 + 固定 `--bridge-provider` 参数；P0 只公布 `cloudfile_status`、可脱敏的 `cloudfile_task_counts`。短会话可以承受 Bridge 当前 90 秒超时，不做文件打开/上传/独占动作。现有 Bridge 自带 `cloudfile.status` 探针在此阶段保持兼容，避免一次性切掉可用路径。
 
+**安装路径的真实兼容点**：Agent2 安装使用 `bin/<version>/cloudfile-native-host`（按版本目录切换），而 Bridge 目前 `provider add` 会把路径 `canonicalize` 后固化为绝对文件位置。直接注册版本目录里的 Host **会在升级/裁剪旧版本后失效**。DEV 只读实验可以暂用明确版本路径；正式方案应由 Bridge 的 CloudFile 专用适配器只读解析当前用户已注册且所有权可信的 **Agent2 Host Manifest/注册项**，在每次打开短会话时定位活动二进制，并验证 `agent_family` / 组件协议，不扩大通用 MCP Provider 的任意程序发现能力。另一种备选是 Agent2 自有稳定 launcher，但它需要额外验证签名升级与 Windows 杀软兼容；P0 不因这项未来稳定化而重写安装器。
+
+Provider 状态查询优先复用轻量 `--component` 或纯本地投影，避免直接调用会进行联网检查的完整 `native::status`；任务列表读取要有合理上限，不让大任务目录扫描拖慢 Bridge 首屏。
+
 这一步在独立分支只新增入口/测试，不改 `run_stdio` 默认 Chrome 模式，不改原 `status`、`open_uri`、`task_summary`、Host Manifest、安装/升级、工作目录、Journal 和服务端协议。即使 Provider 缺失、安装失败、Bridge 不在，Agent2 正式文件主链不变。
 
 ### P1：只读任务汇总
