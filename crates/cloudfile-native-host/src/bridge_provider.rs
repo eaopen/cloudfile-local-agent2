@@ -63,7 +63,8 @@ fn status() -> Value {
         "journal_version":update::JOURNAL_VERSION,
         "component_installed":true,
         "file_actions_exposed":false,
-        "file_authorization":"not_checked"
+        "file_authorization":"not_checked",
+        "storage_scope":"bridge_provider_private"
     })
 }
 fn counts(root: &Path) -> Result<Value> {
@@ -100,6 +101,7 @@ fn counts(root: &Path) -> Result<Value> {
         "other":other,
         "pending_intents":pending,
         "cloud_publish_verified":false,
+        "legacy_agent2_tasks_included":false,
         "task_completion_inferred":false
     }))
 }
