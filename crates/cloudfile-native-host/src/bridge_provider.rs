@@ -107,8 +107,7 @@ fn summaries(root: &Path) -> Result<Value> {
         let journal = journal::snapshot(root, &task.task_id)?;
         let pending = journal.pending.is_some();
         let conflict = v2_edit::conflict(root, &task.task_id).is_some();
-        let held_checkout =
-            journal.lease.is_some() || v2_edit::has_checkout(root, &task.task_id);
+        let held_checkout = journal.lease.is_some() || v2_edit::has_checkout(root, &task.task_id);
         let (status, stage) = if pending {
             ("unknown", "original_publish_unconfirmed")
         } else if conflict {
@@ -281,7 +280,10 @@ mod tests {
         for (tool, args) in [
             ("cloudfile_status", json!({"path":"/tmp/private"})),
             ("cloudfile_task_counts", json!({"repo_id":"secret"})),
-            ("cloudfile_task_summaries", json!({"path":"/private/contents"})),
+            (
+                "cloudfile_task_summaries",
+                json!({"path":"/private/contents"}),
+            ),
             ("cloudfile_commit", json!({})),
         ] {
             let response = handle(
@@ -329,21 +331,29 @@ mod tests {
         assert_eq!(original["data_owner"], "cloudfile-agent2");
         let serialized = original.to_string();
         for sensitive in [
-            "sensitive-drawing", "confidential", "internal.example",
-            "private-library", "private-session", "device_id",
+            "sensitive-drawing",
+            "confidential",
+            "internal.example",
+            "private-library",
+            "private-session",
+            "device_id",
         ] {
             assert!(!serialized.contains(sensitive), "{sensitive} leaked");
         }
         // An original pending publish is *unknown*, never failed/retried.
-        storage::write(&dir.join("journal.json"), &json!({
-            "schema":1,
-            "pending":{
-                "intent_id":"6dbd191c-dedf-497f-8142-c010b46dcdb3",
-                "action":"commit","base_file_id":"base-id",
-                "content_digest":"private-digest","snapshot_size":100
-            },
-            "receipt":null,"lease":null,"lease_ack":false,"closed":false
-        })).unwrap();
+        storage::write(
+            &dir.join("journal.json"),
+            &json!({
+                "schema":1,
+                "pending":{
+                    "intent_id":"6dbd191c-dedf-497f-8142-c010b46dcdb3",
+                    "action":"commit","base_file_id":"base-id",
+                    "content_digest":"private-digest","snapshot_size":100
+                },
+                "receipt":null,"lease":null,"lease_ack":false,"closed":false
+            }),
+        )
+        .unwrap();
         let pending = summaries(root).unwrap();
         assert_eq!(pending["items"][0]["status"], "unknown");
         assert_eq!(pending["items"][0]["stage"], "original_publish_unconfirmed");
