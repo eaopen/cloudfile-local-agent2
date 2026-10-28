@@ -303,7 +303,8 @@ mod tests {
     #[test]
     fn summaries_reuse_original_file_tasks_without_disclosing_names_or_paths() {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path();
+        let canonical = temp.path().canonicalize().unwrap();
+        let root = canonical.as_path();
         let id = "a".repeat(64);
         let task = session::Task {
             device_id: None,
