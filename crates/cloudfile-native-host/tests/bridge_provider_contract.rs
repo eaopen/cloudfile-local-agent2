@@ -41,9 +41,16 @@ fn bridge_mcp_provider_is_read_only_and_uses_json_lines() {
     }
     drop(input);
     let output = child.wait_with_output().unwrap();
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let body = String::from_utf8(output.stdout).unwrap();
-    let answers: Vec<Value> = body.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    let answers: Vec<Value> = body
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
     assert_eq!(answers.len(), 5, "notification must not receive a reply");
     assert_eq!(answers[0]["result"]["protocolVersion"], "2025-06-18");
     assert_eq!(answers[1]["result"]["tools"].as_array().unwrap().len(), 2);
@@ -52,13 +59,11 @@ fn bridge_mcp_provider_is_read_only_and_uses_json_lines() {
         assert!(answer.get("error").is_none());
     }
     let status: Value =
-        serde_json::from_str(answers[2]["result"]["content"][0]["text"].as_str().unwrap())
-            .unwrap();
+        serde_json::from_str(answers[2]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(status["agent_family"], "agent2");
     assert_eq!(status["file_actions_exposed"], false);
     let counts: Value =
-        serde_json::from_str(answers[3]["result"]["content"][0]["text"].as_str().unwrap())
-            .unwrap();
+        serde_json::from_str(answers[3]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(counts["total"], 0);
     assert_eq!(counts["pending_intents"], 0);
     assert_eq!(answers[4]["result"]["isError"], true);

@@ -95,7 +95,9 @@ fn handle(input: &Value, root: &Path) -> Option<Value> {
     }
     let output = match input["method"].as_str() {
         Some("initialize") => {
-            let requested = input["params"]["protocolVersion"].as_str().unwrap_or(PROTOCOL);
+            let requested = input["params"]["protocolVersion"]
+                .as_str()
+                .unwrap_or(PROTOCOL);
             let version = if matches!(requested, "2025-03-26" | "2025-06-18" | "2025-11-25") {
                 requested
             } else {
@@ -113,9 +115,8 @@ fn handle(input: &Value, root: &Path) -> Option<Value> {
             let params = input["params"].as_object();
             let valid = params.is_some_and(|p| {
                 p.len() == 2
-                    && p.get("arguments").is_some_and(|v| {
-                        v.as_object().is_some_and(|args| args.is_empty())
-                    })
+                    && p.get("arguments")
+                        .is_some_and(|v| v.as_object().is_some_and(|args| args.is_empty()))
             });
             if !valid {
                 content(json!({"code":"invalid_tool_arguments"}), true)
@@ -143,7 +144,9 @@ pub fn serve() -> Result<()> {
     let mut output = io::stdout().lock();
     loop {
         let mut line = Vec::new();
-        let count = (&mut input).take(MAX_LINE + 1).read_until(b'\n', &mut line)?;
+        let count = (&mut input)
+            .take(MAX_LINE + 1)
+            .read_until(b'\n', &mut line)?;
         if count == 0 {
             break;
         }
@@ -172,17 +175,25 @@ mod tests {
         let input = json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
             "params":{"name":"cloudfile_status","arguments":{}}});
         let answer = handle(&input, root.path()).unwrap();
-        let status: Value = serde_json::from_str(
-            answer["result"]["content"][0]["text"].as_str().unwrap()
-        ).unwrap();
+        let status: Value =
+            serde_json::from_str(answer["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(status["provider_id"], "cloudfile");
         assert_eq!(status["file_actions_exposed"], false);
         assert_eq!(status["file_authorization"], "not_checked");
-        for sensitive in ["working_copy", "token", "secret", "device_key", "local_path"] {
+        for sensitive in [
+            "working_copy",
+            "token",
+            "secret",
+            "device_key",
+            "local_path",
+        ] {
             assert!(status.get(sensitive).is_none());
         }
-        let listed = handle(&json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
-            root.path()).unwrap();
+        let listed = handle(
+            &json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+            root.path(),
+        )
+        .unwrap();
         assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 2);
     }
     #[test]
@@ -193,12 +204,20 @@ mod tests {
             ("cloudfile_task_counts", json!({"repo_id":"secret"})),
             ("cloudfile_commit", json!({})),
         ] {
-            let response = handle(&json!({"jsonrpc":"2.0","id":9,"method":"tools/call",
-                "params":{"name":tool,"arguments":args}}),root.path()).unwrap();
+            let response = handle(
+                &json!({"jsonrpc":"2.0","id":9,"method":"tools/call",
+                "params":{"name":tool,"arguments":args}}),
+                root.path(),
+            )
+            .unwrap();
             assert_eq!(response["result"]["isError"], true);
         }
-        assert!(handle(&json!({"jsonrpc":"2.0",
-            "method":"notifications/initialized"}),root.path()).is_none());
+        assert!(handle(
+            &json!({"jsonrpc":"2.0",
+            "method":"notifications/initialized"}),
+            root.path()
+        )
+        .is_none());
     }
     #[test]
     fn empty_task_store_is_counted_without_claiming_published() {
