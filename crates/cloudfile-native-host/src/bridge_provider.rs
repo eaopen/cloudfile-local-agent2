@@ -3,7 +3,7 @@
 //! protocol and the current Agent2 Desktop/Journal/Guard remain authoritative.
 //! V1 exposes only sanitized, local-OS-user read-only status and task counts.
 use anyhow::{bail, Result};
-use cloudfile_core::{journal, session, storage, update};
+use cloudfile_core::{journal, session, storage, update, v2_edit};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Read, Write};
 use std::path::Path;
@@ -11,6 +11,7 @@ use std::path::Path;
 const PROTOCOL: &str = "2025-06-18";
 const MAX_LINE: u64 = 64 * 1024;
 const MAX_TASKS: usize = 2_000;
+const MAX_SUMMARIES: usize = 80;
 
 fn tools() -> Value {
     json!([
@@ -25,6 +26,13 @@ fn tools() -> Value {
             "name":"cloudfile_task_counts",
             "title":"CloudFile Agent2 local task counts",
             "description":"Read-only task counts by file mode; not a cloud-publish completion report",
+            "inputSchema":{"type":"object","properties":{},"additionalProperties":false},
+            "annotations":{"readOnlyHint":true}
+        },
+        {
+            "name":"cloudfile_task_summaries",
+            "title":"CloudFile Agent2 read-only task summaries",
+            "description":"Sanitized local file task states, no filenames, server paths, tokens or file writes",
             "inputSchema":{"type":"object","properties":{},"additionalProperties":false},
             "annotations":{"readOnlyHint":true}
         }
@@ -84,6 +92,70 @@ fn counts(root: &Path) -> Result<Value> {
         "task_completion_inferred":false
     }))
 }
+
+/// Local-only projection of the one Agent2 task store. This intentionally
+/// does not try to infer remote file publication from a local working copy.
+/// Never return file names, server, repo/path, tickets, or credentials.
+fn summaries(root: &Path) -> Result<Value> {
+    let tasks = session::tasks(root)?;
+    if tasks.len() > MAX_TASKS {
+        bail!("CloudFile task store exceeds Provider read-only limit");
+    }
+    let total = tasks.len();
+    let mut items = Vec::new();
+    for task in tasks {
+        let journal = journal::snapshot(root, &task.task_id)?;
+        let pending = journal.pending.is_some();
+        let conflict = v2_edit::conflict(root, &task.task_id).is_some();
+        let held_checkout =
+            journal.lease.is_some() || v2_edit::has_checkout(root, &task.task_id);
+        let (status, stage) = if pending {
+            ("unknown", "original_publish_unconfirmed")
+        } else if conflict {
+            ("needs_action", "remote_conflict")
+        } else if journal.closed {
+            ("completed", "checkin_confirmed")
+        } else if task.mode == "local-view" {
+            ("running", "local_view_available")
+        } else {
+            ("running", "local_edit_session")
+        };
+        items.push(json!({
+            "task_id":task.task_id,
+            "owner_module":"cloudfile",
+            "kind":"file",
+            "mode":task.mode,
+            "status":status,
+            "stage":stage,
+            "has_pending_intent":pending,
+            "has_conflict":conflict,
+            "has_checkout":held_checkout,
+            "available_actions":[],
+        }));
+    }
+    // Surface recovery/attention first. Stable sorting is deliberately not
+    // an additional business task ordering or remote status signal.
+    items.sort_by_key(|item| match item["status"].as_str() {
+        Some("unknown") => 0,
+        Some("needs_action") => 1,
+        Some("running") => 2,
+        _ => 3,
+    });
+    items.truncate(MAX_SUMMARIES);
+    let returned = items.len();
+    Ok(json!({
+        "provider_id":"cloudfile",
+        "schema_version":1,
+        "data_owner":"cloudfile-agent2",
+        "storage_scope":"agent2_shared",
+        "read_only":true,
+        "total":total,
+        "returned":returned,
+        "truncated":total > returned,
+        "items":items
+    }))
+}
+
 fn content(value: Value, is_error: bool) -> Value {
     json!({"content":[{"type":"text","text":value.to_string()}],"isError":is_error})
 }
@@ -130,6 +202,10 @@ fn handle(input: &Value, root: &Path) -> Option<Value> {
                         Ok(result) => content(result, false),
                         // Keep OS paths, private task/Journals and passwords out
                         // of JSON-RPC responses and ordinary model/CLI output.
+                        Err(_) => content(json!({"code":"task_store_unavailable"}), true),
+                    },
+                    Some("cloudfile_task_summaries") => match summaries(root) {
+                        Ok(result) => content(result, false),
                         Err(_) => content(json!({"code":"task_store_unavailable"}), true),
                     },
                     _ => content(json!({"code":"unknown_or_unapproved_tool"}), true),
@@ -197,7 +273,7 @@ mod tests {
             root.path(),
         )
         .unwrap();
-        assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 2);
+        assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 3);
     }
     #[test]
     fn only_empty_read_only_inputs_are_accepted() {
@@ -205,6 +281,7 @@ mod tests {
         for (tool, args) in [
             ("cloudfile_status", json!({"path":"/tmp/private"})),
             ("cloudfile_task_counts", json!({"repo_id":"secret"})),
+            ("cloudfile_task_summaries", json!({"path":"/private/contents"})),
             ("cloudfile_commit", json!({})),
         ] {
             let response = handle(
@@ -221,6 +298,58 @@ mod tests {
             root.path()
         )
         .is_none());
+    }
+
+    #[test]
+    fn summaries_reuse_original_file_tasks_without_disclosing_names_or_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let id = "a".repeat(64);
+        let task = session::Task {
+            device_id: None,
+            task_id: id.clone(),
+            file_name: "sensitive-drawing.dwg".into(),
+            mode: "exclusive-edit".into(),
+            server: "https://internal.example.test".into(),
+            repo_id: "private-library-id".into(),
+            remote_path: "/confidential/drawing.dwg".into(),
+            session_id: "private-session".into(),
+            baseline_file_id: "base-id".into(),
+            baseline_digest: "digest".into(),
+            size: 100,
+        };
+        let dir = session::task_dir(root, &id).unwrap();
+        storage::write(&dir.join("task.json"), &task).unwrap();
+        let original = summaries(root).unwrap();
+        assert_eq!(original["total"], 1);
+        assert_eq!(original["items"][0]["task_id"], id);
+        assert_eq!(original["items"][0]["status"], "running");
+        assert_eq!(original["items"][0]["available_actions"], json!([]));
+        assert_eq!(original["data_owner"], "cloudfile-agent2");
+        let serialized = original.to_string();
+        for sensitive in [
+            "sensitive-drawing", "confidential", "internal.example",
+            "private-library", "private-session", "device_id",
+        ] {
+            assert!(!serialized.contains(sensitive), "{sensitive} leaked");
+        }
+        // An original pending publish is *unknown*, never failed/retried.
+        storage::write(&dir.join("journal.json"), &json!({
+            "schema":1,
+            "pending":{
+                "intent_id":"6dbd191c-dedf-497f-8142-c010b46dcdb3",
+                "action":"commit","base_file_id":"base-id",
+                "content_digest":"private-digest","snapshot_size":100
+            },
+            "receipt":null,"lease":null,"lease_ack":false,"closed":false
+        })).unwrap();
+        let pending = summaries(root).unwrap();
+        assert_eq!(pending["items"][0]["status"], "unknown");
+        assert_eq!(pending["items"][0]["stage"], "original_publish_unconfirmed");
+        assert!(!pending.to_string().contains("private-digest"));
+        // Parsing failure is explicit rather than an empty/successful list.
+        storage::write(&dir.join("journal.json"), &json!({"schema":99})).unwrap();
+        assert!(summaries(root).is_err());
     }
     #[test]
     fn empty_task_store_is_counted_without_claiming_published() {
