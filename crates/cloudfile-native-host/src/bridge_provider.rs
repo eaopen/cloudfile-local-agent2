@@ -4,6 +4,8 @@
 //! V1 exposes only sanitized, local-OS-user read-only status and task counts.
 use anyhow::{bail, Result};
 use cloudfile_core::{journal, session, storage, update};
+use anyhow::Context;
+use std::path::PathBuf;
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Read, Write};
 use std::path::Path;
@@ -11,6 +13,26 @@ use std::path::Path;
 const PROTOCOL: &str = "2025-06-18";
 const MAX_LINE: u64 = 64 * 1024;
 const MAX_TASKS: usize = 2_000;
+
+/// The Bridge integration is a different product installation, not a second
+/// entry point into the existing CloudFile Chrome Host or its task data.
+/// It deliberately ignores CLOUDFILE_AGENT2_HOME and never defaults to D:\CloudFileAgent.
+fn provider_root() -> Result<PathBuf> {
+    let directory = match std::env::var_os("CLOUDFILE_BRIDGE_PROVIDER_HOME") {
+        Some(value) if !value.is_empty() => {
+            let directory = PathBuf::from(value);
+            if !directory.is_absolute() {
+                bail!("CloudFile Bridge Provider home must be an absolute path");
+            }
+            directory
+        }
+        _ => dirs::data_local_dir()
+            .context("local application data directory unavailable")?
+            .join("CloudFileBridgeProvider"),
+    };
+    storage::private_dir(&directory)?;
+    Ok(directory)
+}
 
 fn tools() -> Value {
     json!([
@@ -138,7 +160,7 @@ fn handle(input: &Value, root: &Path) -> Option<Value> {
     Some(json!({"jsonrpc":"2.0","id":id,"result":output}))
 }
 pub fn serve() -> Result<()> {
-    let root = storage::root()?;
+    let root = provider_root()?;
     let stdin = io::stdin();
     let mut input = stdin.lock();
     let mut output = io::stdout().lock();
