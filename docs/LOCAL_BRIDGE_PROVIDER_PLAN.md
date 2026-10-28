@@ -42,6 +42,12 @@ local-bridge provider remove cloudfile # 只解除 Bridge 注册，不删除 Age
 
 用户必须手动选择受信可执行程序。Bridge 当前会固定该可执行文件的绝对路径，而 Agent2 更新用版本目录：**升级后的定位/重绑定需要另行解决**。这个问题不能通过使用第二套空文件目录规避；也不需要默认接管旧 Chrome 的 Native Host Manifest。只读状态可先工作，真实运行版本与数据根必须一致。
 
+### P1 已在独立 Provider 分支新增（未合并 Agent2 dev）
+
+`cloudfile_task_summaries` 无参数、只读且最多返回 80 条脱敏任务摘要：仅包含原 Agent2 的 `task_id`、`mode`、`status`、阶段、待确认 Intent/冲突/Checkout 标识；不返回文件名、服务器地址、库 ID、远程/本地路径、票据或设备凭据。超过上限明确报告 `truncated`。原 Journal 中有未确认提交时映射为 `unknown`，冲突为 `needs_action`，确认完成的独占 Checkin 才可映射 `completed`；其他本地文件任务保守显示 `running`，不把本地保存等同于云端发布。损坏的 Journal 返回工具错误，不伪装为空任务列表。
+
+Bridge 初期仅在用户本地显式调用 `tasks list --cloudfile` 时读取该工具，**不自动开放给网站或模型**。旧 Agent2 主文件链、Tauri、原 Chrome Host/数据根不变。
+
 ## 避免竞争与迁移顺序
 
 | 阶段 | Bridge/Provider | 仍由 Agent2 负责 |
