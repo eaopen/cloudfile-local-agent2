@@ -103,7 +103,10 @@ fn main() {
         return;
     }
     if let Err(error) = run_command(&args) {
-        eprintln!("{error}");
+        // 修改逻辑（2026-10-28）：原来只打印最外层一条 context，现场看到的
+        // 「无法把暂存目录改成正式目录：…」没有后面那句 os error，等于没法定位。
+        // `{error:#}` 会把整条 cause 链都打出来。
+        eprintln!("{error:#}");
         std::process::exit(1);
     }
 }

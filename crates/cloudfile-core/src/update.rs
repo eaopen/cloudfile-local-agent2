@@ -595,14 +595,100 @@ pub fn stage(root: &Path, version: &str, os: &str, files: &[(Binary, Vec<u8>)]) 
         )
     })?;
     fill(&staging, os, files)?;
-    fs::rename(&staging, &target).with_context(|| {
+    move_into_place(&staging, &target)?;
+    Ok(target)
+}
+
+/// 把填好的暂存目录变成正式的版本目录。
+///
+/// 修改逻辑（2026-10-28）：客户机上 `fs::rename` 直接失败 ——
+/// 「无法把暂存目录改成正式目录：…\.staging-2.0.10-… -> …\bin\2.0.10」，
+/// 而安装根刚刚删干净、权限也不是原因。
+///
+/// 原因是 Windows 上**目录改名要求整棵树都没有打开的句柄**：三个刚写出来的 exe 正在被
+/// 杀毒软件/索引器扫描时就会得到 ERROR_ACCESS_DENIED / ERROR_SHARING_VIOLATION；
+/// 网络盘、被重定向或受管控的目录上，目录改名也可能直接被拒（哪怕在里面新建文件没问题）。
+///
+/// 所以这里两步走：
+///   1) 目标不存在 → 先试原子改名，带退避重试（扫描锁通常几百毫秒到几秒就放开）；
+///   2) 仍然失败（或目标已经存在）→ 逐**文件**搬。单文件改名只要求那个文件本身没被占用，
+///      而且 [`fill`] 会跳过内容相同的文件，所以重复安装几乎没有代价。
+/// 两段都失败时把各自的真实原因一起报出来，不再只剩一句「拒绝访问」。
+fn move_into_place(staging: &Path, target: &Path) -> Result<()> {
+    let mut rename_error: Option<std::io::Error> = None;
+    if !target.exists() {
+        for attempt in 0..4u32 {
+            match fs::rename(staging, target) {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    rename_error = Some(error);
+                    // 这期间目标被装好了（并发安装，或上一轮其实已经成功）：暂存目录是多余的。
+                    if dir_is_complete(target) {
+                        let _ = fs::remove_dir_all(staging);
+                        return Ok(());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        150 * u64::from(attempt + 1),
+                    ));
+                }
+            }
+        }
+    }
+
+    storage::private_dir(target).with_context(|| {
         format!(
-            "无法把暂存目录改成正式目录：{} -> {}",
-            staging.display(),
-            target.display()
+            "无法创建版本目录 {}（目录改名也失败：{}）",
+            target.display(),
+            explain_rename(&rename_error)
         )
     })?;
-    Ok(target)
+
+    let mut failed: Vec<String> = Vec::new();
+    let entries =
+        fs::read_dir(staging).with_context(|| format!("无法读取暂存目录 {}", staging.display()))?;
+    for entry in entries {
+        let entry = entry.with_context(|| format!("无法读取暂存目录 {}", staging.display()))?;
+        let destination = target.join(entry.file_name());
+        if let Err(error) = move_file(&entry.path(), &destination) {
+            failed.push(format!("{}（{error}）", destination.display()));
+        }
+    }
+    if failed.is_empty() {
+        let _ = fs::remove_dir(staging);
+        return Ok(());
+    }
+    bail!(
+        "安装文件落地失败：{}\n目录改名失败原因：{}",
+        failed.join("；"),
+        explain_rename(&rename_error)
+    )
+}
+
+/// 搬单个文件：改名失败时先重试几次（刚写出来的 exe 常被杀软/索引器短暂占用，
+/// 现场那种「目录改名 error 5」就是同一个原因），实在不行退回复制 + 删源（跨卷也走这里）。
+fn move_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    let mut last: Option<std::io::Error> = None;
+    for _ in 0..4u32 {
+        match fs::rename(source, destination) {
+            Ok(()) => return Ok(()),
+            Err(error) => last = Some(error),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    match fs::copy(source, destination) {
+        Ok(_) => {
+            let _ = fs::remove_file(source);
+            Ok(())
+        }
+        Err(_) => Err(last.unwrap_or_else(|| std::io::Error::other("rename failed"))),
+    }
+}
+
+fn explain_rename(error: &Option<std::io::Error>) -> String {
+    match error {
+        Some(error) => error.to_string(),
+        None => "目标目录已存在，未尝试改名".to_string(),
+    }
 }
 
 /// Writes the release artifacts into `dir`, leaving files whose bytes already
@@ -779,6 +865,38 @@ mod tests {
         }
         #[cfg(not(windows))]
         let _ = dir;
+    }
+
+    #[test]
+    fn a_staged_release_is_renamed_when_the_target_is_free() {
+        let (_temp, root) = storage::test_root();
+        let target = version_dir(&root, "9.9.8").unwrap();
+        let staging = bin_dir(&root).join(".staging-9.9.8-test");
+        storage::private_dir(&staging).unwrap();
+        fs::write(staging.join("cloudfile-desktop.exe"), b"desktop").unwrap();
+        move_into_place(&staging, &target).unwrap();
+        assert!(target.join("cloudfile-desktop.exe").is_file());
+        assert!(!staging.exists(), "暂存目录必须收掉");
+    }
+
+    #[test]
+    fn a_staged_release_merges_when_the_target_directory_exists() {
+        // 现场：`bin\<version>` 已经存在（上一轮半途而废，或并发安装），
+        // 目录改名必然失败 —— 这时必须逐文件搬进去，而不是让整个安装挂掉。
+        let (_temp, root) = storage::test_root();
+        let target = version_dir(&root, "9.9.9").unwrap();
+        storage::private_dir(&target).unwrap();
+        fs::write(target.join("leftover.txt"), b"partial").unwrap();
+        let staging = bin_dir(&root).join(".staging-9.9.9-test");
+        storage::private_dir(&staging).unwrap();
+        fs::write(staging.join("cloudfile-native-host.exe"), b"host").unwrap();
+        move_into_place(&staging, &target).unwrap();
+        assert!(target.join("cloudfile-native-host.exe").is_file());
+        assert!(!staging.exists(), "暂存目录必须收掉");
+        assert!(
+            target.join("leftover.txt").is_file(),
+            "合并不能顺手删掉别的文件"
+        );
     }
 
     #[test]

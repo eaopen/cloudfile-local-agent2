@@ -203,10 +203,33 @@ pub fn write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
     tmp.write_all(bytes)?;
     tmp.as_file().sync_all()?;
-    tmp.persist(path)?;
-    #[cfg(unix)]
-    fs::File::open(parent)?.sync_all()?;
-    Ok(())
+    // 修改逻辑（2026-10-28）：`persist` 在 Windows 上是「改名替换」，而**刚写出来的文件
+    // 常被杀软/索引器短暂占住**（它们打开时不带 FILE_SHARE_DELETE），改名于是拿到
+    // error 5 / 32。客户机安装失败就是这个原因：暂存目录里的 exe 刚落地就被扫描，
+    // 紧接着的改名一律拒绝访问。这里退避重试几次（内容已经落盘且 fsync 过，
+    // 只是名字还没换上），失败才把错误抛出去。
+    let mut last: Option<std::io::Error> = None;
+    for attempt in 0..8u32 {
+        match tmp.persist(path) {
+            Ok(_) => {
+                #[cfg(unix)]
+                fs::File::open(parent)?.sync_all()?;
+                return Ok(());
+            }
+            Err(error) => {
+                last = Some(error.error);
+                // persist 失败会把临时文件还回来，继续拿它重试（内容不用重写）。
+                tmp = error.file;
+                std::thread::sleep(std::time::Duration::from_millis(
+                    80 * u64::from(attempt + 1),
+                ));
+            }
+        }
+    }
+    Err(last
+        .map(anyhow::Error::from)
+        .unwrap_or_else(|| anyhow::anyhow!("persist failed")))
+    .with_context(|| format!("无法写入 {}（文件被占用或没有权限）", path.display()))
 }
 pub fn read<T: DeserializeOwned>(path: &Path) -> Result<T> {
     let meta = fs::symlink_metadata(path)?;
