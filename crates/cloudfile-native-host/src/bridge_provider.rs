@@ -2,37 +2,15 @@
 //! This is NOT Chrome Native Messaging: Chrome still uses the original framed
 //! protocol and the current Agent2 Desktop/Journal/Guard remain authoritative.
 //! V1 exposes only sanitized, local-OS-user read-only status and task counts.
-use anyhow::Context;
 use anyhow::{bail, Result};
 use cloudfile_core::{journal, session, storage, update};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Read, Write};
 use std::path::Path;
-use std::path::PathBuf;
 
 const PROTOCOL: &str = "2025-06-18";
 const MAX_LINE: u64 = 64 * 1024;
 const MAX_TASKS: usize = 2_000;
-
-/// The Bridge integration is a different product installation, not a second
-/// entry point into the existing CloudFile Chrome Host or its task data.
-/// It deliberately ignores CLOUDFILE_AGENT2_HOME and never defaults to D:\CloudFileAgent.
-fn provider_root() -> Result<PathBuf> {
-    let directory = match std::env::var_os("CLOUDFILE_BRIDGE_PROVIDER_HOME") {
-        Some(value) if !value.is_empty() => {
-            let directory = PathBuf::from(value);
-            if !directory.is_absolute() {
-                bail!("CloudFile Bridge Provider home must be an absolute path");
-            }
-            directory
-        }
-        _ => dirs::data_local_dir()
-            .context("local application data directory unavailable")?
-            .join("CloudFileBridgeProvider"),
-    };
-    storage::private_dir(&directory)?;
-    Ok(directory)
-}
 
 fn tools() -> Value {
     json!([
@@ -64,7 +42,8 @@ fn status() -> Value {
         "component_installed":true,
         "file_actions_exposed":false,
         "file_authorization":"not_checked",
-        "storage_scope":"bridge_provider_private"
+        "data_owner":"cloudfile-agent2",
+        "storage_scope":"agent2_shared"
     })
 }
 fn counts(root: &Path) -> Result<Value> {
@@ -101,7 +80,7 @@ fn counts(root: &Path) -> Result<Value> {
         "other":other,
         "pending_intents":pending,
         "cloud_publish_verified":false,
-        "legacy_agent2_tasks_included":false,
+        "shared_file_tasks":true,
         "task_completion_inferred":false
     }))
 }
@@ -162,7 +141,7 @@ fn handle(input: &Value, root: &Path) -> Option<Value> {
     Some(json!({"jsonrpc":"2.0","id":id,"result":output}))
 }
 pub fn serve() -> Result<()> {
-    let root = provider_root()?;
+    let root = storage::root()?;
     let stdin = io::stdin();
     let mut input = stdin.lock();
     let mut output = io::stdout().lock();

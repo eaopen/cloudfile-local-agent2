@@ -12,15 +12,12 @@ fn bridge_mcp_provider_is_read_only_and_uses_json_lines() {
     std::fs::create_dir_all(&local).unwrap();
     std::fs::create_dir_all(home.join("Library/Application Support")).unwrap();
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_cloudfile-bridge-provider"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_cloudfile-native-host"))
+        .arg("--bridge-provider")
         .env("HOME", &home)
         .env("USERPROFILE", &home)
         .env("LOCALAPPDATA", &local)
-        .env(
-            "CLOUDFILE_BRIDGE_PROVIDER_HOME",
-            home.join("bridge-provider-state"),
-        )
-        .env("CLOUDFILE_AGENT2_HOME", home.join("legacy-cloudfile-state"))
+        .env("CLOUDFILE_AGENT2_HOME", home.join("CloudFileAgent"))
         .env("CLOUDFILE_AGENT2_NO_DRIVE_PREFERENCE", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -66,17 +63,17 @@ fn bridge_mcp_provider_is_read_only_and_uses_json_lines() {
         serde_json::from_str(answers[2]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(status["agent_family"], "agent2");
     assert_eq!(status["file_actions_exposed"], false);
-    assert_eq!(status["storage_scope"], "bridge_provider_private");
+    assert_eq!(status["storage_scope"], "agent2_shared");
+    assert_eq!(status["data_owner"], "cloudfile-agent2");
     let counts: Value =
         serde_json::from_str(answers[3]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(counts["total"], 0);
     assert_eq!(counts["pending_intents"], 0);
-    assert_eq!(counts["legacy_agent2_tasks_included"], false);
+    assert_eq!(counts["shared_file_tasks"], true);
+    assert!(home.join("CloudFileAgent").is_dir());
+    assert!(!home.join("CloudFileBridgeProvider").exists());
     assert_eq!(answers[4]["result"]["isError"], true);
     assert!(!body.contains(home.to_string_lossy().as_ref()));
     assert!(!body.contains("device_key"));
     assert!(!body.contains("access_token"));
-    // The new Provider cannot silently create/read the first stack's storage.
-    assert!(home.join("bridge-provider-state").is_dir());
-    assert!(!home.join("legacy-cloudfile-state").exists());
 }
