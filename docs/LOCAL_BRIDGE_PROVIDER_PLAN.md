@@ -1,6 +1,6 @@
 # CloudFile Agent2 → Local Bridge：Provider 路线与完整迁移比较
 
-> 日期：2026-10-28；状态：**方案评估 / Provider 专用分支，仅文档，不改变运行时或正式发行**。
+> 日期：2026-10-28；状态：**已在 Provider 独立分支实现 P0 只读 MCP 入口，尚未合并 dev；不改变旧运行路径、桌面 UI 或正式发行**。
 > Agent2 基线：`adade250`（2.0.12）；Local Bridge 基线：`ace22302`（Web V2 Agent 统一后）。
 > 关联 [Agent2 Bridge 兼容合同](BRIDGE_COMPAT_V1.md)、[Agent2 #21](https://github.com/eaopen/cloudfile-local-agent2/issues/21)、[Bridge Migration](https://github.com/eaopen/local-bridge/blob/dev/docs/CLOUDFILE_TO_BRIDGE_MIGRATION.md) 和 [BridgeTask](https://github.com/eaopen/local-bridge/blob/dev/docs/BRIDGE_TASK_V1.md)。
 
@@ -11,6 +11,13 @@
 进一步分成两层：B0 **先只接 Provider，不迁核心代码**；B1 只有在同一份通用逻辑已经被两仓实际复用且重复维护产生问题时，才抽小块可移植合同。用户最终可以只有一个统一入口或安装体验，但**一个入口不等于一个二进制、一个进程或一个状态数据库**。
 
 CloudFile 是 `cloudfile` 文件能力 Provider，**不是** `runAgent(agent=workbuddy/codex/pi)` 的第四种大模型 Agent。文件能力使用 `cloudfile.task.*` / `cloudfile.file.*`，不把文件提交塞进 AI 任务执行接口。
+
+## 本轮明确的产品决策
+
+- **保留 Agent2 的 `dev` 不变**：文件 V2 主链、Tauri 任务中心、Windows/Mac 现有 Host/Chrome、安装/更新/工作区继续由 Agent2 维护；Provider 的功能提交只进入 `feat/local-bridge-provider` 分支。
+- **Local Bridge 保持轻量**：只做通用 MCP/HTTP/Native 通信、能力注册与任务摘要聚合，不接入 Agent2 的 Tauri 或文件上传、密钥、Guard、升级实现；本轮不要求启动 Bridge daemon。
+- **渐进迁移的是“通用职责”，不是整套 Rust 文件代码**。当统一任务中心/托盘/UI/安装引导确有真实价值且已验收后，才将对应通用壳层迁至 Bridge 的**可选 UI/发行组件**；Agent2 最终专注文件服务端票据、原生文件操作、Journal、Guard、工作副本和文件类型专属打开规则。
+- **保留独立回退**：只要 Bridge Provider 缺失、不可用或新能力失败，原 CloudFile Chrome → Native Host → Tauri/Desktop 继续完成所有文件任务，既有任务不跨 Provider 重交，不自动删除用户工作副本。
 
 ## 当前源码基线与能力差异
 
@@ -76,11 +83,27 @@ Provider 的 `installed / available` 仅表示组件可被 Bridge 连接；文�
 - `done` 只是 UI 分组；须由 Agent2 明确 `published/closed/opened` 等事实确认相应**操作**完成，不可把正在编辑但本地未修改的任务直接标为整条文件任务 completed。
 - `available_actions` 只能由 Agent2 基于真实状态计算；Bridge 不能靠扩展名、模型回复或网页按钮猜测 `commit/checkin` 是否可用。
 
+## 首次接入示例（仅 Bridge 本机 CLI，不自动开放网页权限）
+
+```sh
+# 使用用户手动确认的已安装版本路径；不要让网页或模型传可执行文件路径。
+local-bridge provider add cloudfile /absolute/installed/cloudfile-native-host --bridge-provider
+local-bridge provider tools cloudfile
+local-bridge provider call cloudfile cloudfile_status '{}'
+local-bridge provider call cloudfile cloudfile_task_counts '{}'
+# 从 Bridge 注销，不影响 CloudFile 程序、Chrome Host、工作副本及 Journal
+local-bridge provider remove cloudfile
+```
+
+两种工具均为**只读**；`cloudfile_status` 只返回组件版本/平台/协议，`cloudfile_task_counts` 只返回当前 OS 用户任务数量与按模式统计（含原 Journal pending 数）。均不公开文件名、本机路径、业务服务、设备私钥、票据、任务 ID，也**不推导**文件已发布或拥有写权限。任务目录不可读取时必须返回不可用，不能显示为 0 个任务。
+
+当前 Bridge 的通用 MCP Provider 注册与调用已足以执行这两个工具，**无需修改 Bridge 的运行时代码**。Bridge Web V2 不会自动获得 Provider 工具调用权限。CLI 调用是本机用户的显式操作，不能等同于任意网站、Agent 已获得文件权限。
+
 ## 初始实现边界（新分支）
 
 ### P0：只读 Provider，保持零侵入
 
-优先**在现有 `cloudfile-native-host` 二进制上增加显式 `--bridge-provider` 模式**，复用同一套 Agent2 Core 与私有数据目录，不先新建守护进程、Tauri 入口或文件账本。该模式输出 MCP stdio JSON-RPC（以换行分隔），与 Chrome Native Messaging 原有四字节长度帧是**两套明确隔离的启动模式**。
+**当前 Provider 分支已新增**现有 `cloudfile-native-host --bridge-provider` 独立入口，复用 Agent2 Core 与私有数据目录，不新建守护进程、Tauri 入口或文件账本。该模式输出 MCP stdio JSON-RPC（换行分隔），与 Chrome Native Messaging 的四字节长度帧是**两套隔离的启动模式**。从 Chrome 发起时仍必须带受信扩展身份，不能通过普通网页消息切换成 MCP 模式。
 
 Bridge 已有用户显式注册的 `mcp_provider` 机制，可使用固定绝对路径 + 固定 `--bridge-provider` 参数；P0 只公布 `cloudfile_status`、可脱敏的 `cloudfile_task_counts`。短会话可以承受 Bridge 当前 90 秒超时，不做文件打开/上传/独占动作。现有 Bridge 自带 `cloudfile.status` 探针在此阶段保持兼容，避免一次性切掉可用路径。
 
@@ -102,7 +125,7 @@ BridgeTask 先读取脱敏、当前本机用户许可的摘要；Bridge 不持�
 
 服务端 V2 限范围票据依然由原登录网页申请、由 Agent2 消费；Bridge 只能经过已批准来源转送，不修改权限、不能重复消费结果未知的票据。收到 `accepted` 不代表文件已打开、已上传或已 checkin。
 
-### P3：统一体验，非全量代码迁移
+### P3：通用壳层逐步迁到 Bridge，文件核心继续由 Agent2 管理
 
 可选将 Bridge 作为统一快捷入口，复用 Agent2 任务摘要，按 `focus_task` 跳转 Agent2 的详细任务中心。等真正降低用户操作后，再评估统一托盘/安装向导/通知入口。**统一安装包也可内含两个独立程序**，无需合并它们的签名、IPC/Journal 或退出/升级控制；Agent2 活动 Checkout/待确认 Intent 时不得被 Bridge 升级操作强制终止。
 
