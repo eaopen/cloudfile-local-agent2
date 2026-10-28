@@ -65,7 +65,8 @@ pub fn ensure(dir: &Path) -> Result<()> {
         return Ok(());
     }
     let path = loader_path(dir);
-    crate::storage::write_bytes(&path, LOADER)
+    // 加载器属于安装产物：等它（INSTALL_BUDGET），别用状态文件那份短预算。
+    crate::storage::write_bytes_within(&path, LOADER, crate::storage::INSTALL_BUDGET)
         .with_context(|| format!("无法把 {LOADER_FILE} 放进 {}", dir.display()))
 }
 

@@ -846,15 +846,31 @@ fn stage_release(release: &update::Release, install: &Path) -> anyhow::Result<(P
     let staged_host = staged.join(update::Binary::NativeHost.installed_name(os));
     let staged_desktop = staged.join(update::Binary::Desktop.installed_name(os));
     // 健康检查：新构建必须能起来并回答本地协议，否则一律不许留在版本目录里。
-    let healthy = update::probe(&staged_host)
-        .and_then(|reported| {
-            anyhow::ensure!(
-                reported == release.version,
-                "staged binary reports a different version"
-            );
-            update::probe_component(&staged_host).map(|_| ())
-        })
-        .and_then(|()| update::probe(&staged_desktop).map(|_| ()));
+    //
+    // 修改逻辑（2026-10-28）：这一步要**启动刚写出来的 exe**。企业杀软正扫着它时，
+    // CreateProcess 会直接给出「被占用」（os error 5/32），一次失败就把整个安装否掉太脆。
+    // 运行环境允许慢，所以这里也给它几次机会（最多再等约 7.5 秒）。
+    let mut healthy = Ok(());
+    for attempt in 0..6u32 {
+        healthy = update::probe(&staged_host)
+            .and_then(|reported| {
+                anyhow::ensure!(
+                    reported == release.version,
+                    "staged binary reports a different version"
+                );
+                update::probe_component(&staged_host).map(|_| ())
+            })
+            .and_then(|()| update::probe(&staged_desktop).map(|_| ()));
+        match &healthy {
+            Ok(()) => break,
+            Err(error) if attempt < 5 && mentions_busy(&format!("{error:#}")) => {
+                std::thread::sleep(std::time::Duration::from_millis(
+                    500 * u64::from(attempt + 1),
+                ));
+            }
+            Err(_) => break,
+        }
+    }
     if let Err(error) = healthy {
         // 只有这次新建的暂存目录才删：就地补齐的既有版本目录是这台机器上唯一的安装。
         if !existed {
@@ -863,6 +879,13 @@ fn stage_release(release: &update::Release, install: &Path) -> anyhow::Result<(P
         return Err(error);
     }
     Ok((install.to_path_buf(), staged_host))
+}
+
+/// 错误链里有没有 Windows 的「文件被占用」错误码（5 / 32 / 33）。
+fn mentions_busy(text: &str) -> bool {
+    ["(os error 5)", "(os error 32)", "(os error 33)"]
+        .iter()
+        .any(|needle| text.contains(needle))
 }
 
 fn run_stdio() -> anyhow::Result<()> {

@@ -198,6 +198,15 @@ pub fn write<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 /// Atomic byte write for payloads that are already serialized (for example a
 /// manifest copied verbatim during a rollback).
 pub fn write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
+    write_bytes_within(path, bytes, STATE_BUDGET)
+}
+
+/// 同 [`write_bytes`]，但可以指定等待预算。
+///
+/// 安装产物里的小文件（`WebView2Loader.dll`）也走这条路：它们属于「必须装上」的东西，
+/// 用 [`INSTALL_BUDGET`]；而配置/journal 这类状态文件用 [`STATE_BUDGET`]，
+/// 免得界面上的一次保存被卡十分钟。
+pub fn write_bytes_within(path: &Path, bytes: &[u8], budget: std::time::Duration) -> Result<()> {
     let parent = path.parent().context("missing parent")?;
     private_dir(parent)?;
     let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
@@ -208,28 +217,91 @@ pub fn write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     // error 5 / 32。客户机安装失败就是这个原因：暂存目录里的 exe 刚落地就被扫描，
     // 紧接着的改名一律拒绝访问。这里退避重试几次（内容已经落盘且 fsync 过，
     // 只是名字还没换上），失败才把错误抛出去。
-    let mut last: Option<std::io::Error> = None;
-    for attempt in 0..8u32 {
-        match tmp.persist(path) {
-            Ok(_) => {
-                #[cfg(unix)]
-                fs::File::open(parent)?.sync_all()?;
-                return Ok(());
+    // 落盘之后的最后一步是**改名**（persist）：Windows 上要求目标没有打开的句柄，
+    // 而刚写出来的文件正被安全软件/索引器读着是常态。等它（patient），而不是几秒后放弃。
+    let mut pending = Some(tmp);
+    patient("写入", path, budget, is_busy, || {
+        let file = pending.take().expect("temp file already consumed");
+        match file.persist(path) {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                // persist 失败会把临时文件还回来，下次重试继续用它（内容不用重写）。
+                pending = Some(error.file);
+                Err(error.error)
+            }
+        }
+    })?;
+    #[cfg(unix)]
+    fs::File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
+/// 状态类文件（配置、journal、任务）的等待预算。
+///
+/// 这些文件很小，安全软件扫它们通常只有几十毫秒；给两分钟足够跨过任何短暂占用，
+/// 又不至于让界面上的一次保存看起来像卡死。
+pub const STATE_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// 安装产物（十兆级的 exe）的等待预算。
+///
+/// 客户机上的企业 EDR / 云查杀 / 同步盘会**持续**打开刚写出来的可执行文件
+/// （云查杀、沙箱、上传审查），实测几秒到几十秒都有，而要求加白名单又推不动。
+/// 用户明确接受「慢一点没关系，必须装上」，所以这里给足十分钟。
+pub const INSTALL_BUDGET: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// 这个错误是不是「文件正被别的进程占着，等一等就会好」。
+///
+/// Windows：5 = ACCESS_DENIED、32 = SHARING_VIOLATION、33 = LOCK_VIOLATION。
+/// 现场（企业杀软实时防护、同步盘上传审查、DLP 加密）拿到的就是这几号 ——
+/// 它们**不是**权限配置问题，别去改目录 ACL，等它扫完就行。
+pub fn is_busy(error: &std::io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(5) | Some(32) | Some(33))
+        || error.kind() == std::io::ErrorKind::PermissionDenied
+}
+
+/// 反复重试一个可能「被占用」的文件操作，直到成功或预算用完。
+///
+/// 只重试 [`is_busy`]（或调用方另行指定的可重试错误），其余错误立刻抛出 ——
+/// 磁盘真的坏了、路径真的不存在，等十分钟也没有意义。
+/// 等待期间每 5 秒往 stderr 写一行进度：`install.cmd` 会把 stderr 显示给用户，
+/// 否则一小时都只看到「正在安装」，像卡死。
+pub fn patient<T>(
+    label: &str,
+    path: &Path,
+    budget: std::time::Duration,
+    retryable: fn(&std::io::Error) -> bool,
+    mut op: impl FnMut() -> std::io::Result<T>,
+) -> Result<T> {
+    let started = std::time::Instant::now();
+    let mut delay = 40u64;
+    let mut reported = 0u64;
+    loop {
+        match op() {
+            Ok(value) => {
+                let waited = started.elapsed().as_secs();
+                if waited >= 2 {
+                    eprintln!("{label}：等待 {waited}s 后完成（{}）", path.display());
+                }
+                return Ok(value);
+            }
+            Err(error) if retryable(&error) && started.elapsed() < budget => {
+                let waited = started.elapsed().as_secs();
+                if waited >= reported + 5 {
+                    reported = waited;
+                    eprintln!(
+                        "{label}：文件正被其他程序占用（多为安全软件正在扫描），继续等待，已等 {waited}s：{}",
+                        path.display()
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_millis(delay));
+                delay = (delay * 2).min(1_000);
             }
             Err(error) => {
-                last = Some(error.error);
-                // persist 失败会把临时文件还回来，继续拿它重试（内容不用重写）。
-                tmp = error.file;
-                std::thread::sleep(std::time::Duration::from_millis(
-                    80 * u64::from(attempt + 1),
-                ));
+                return Err(anyhow::Error::from(error))
+                    .with_context(|| format!("{label}失败：{}", path.display()));
             }
         }
     }
-    Err(last
-        .map(anyhow::Error::from)
-        .unwrap_or_else(|| anyhow::anyhow!("persist failed")))
-    .with_context(|| format!("无法写入 {}（文件被占用或没有权限）", path.display()))
 }
 pub fn read<T: DeserializeOwned>(path: &Path) -> Result<T> {
     let meta = fs::symlink_metadata(path)?;

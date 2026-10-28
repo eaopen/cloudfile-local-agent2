@@ -563,131 +563,49 @@ pub fn active_version(dir: &Path, host: &str) -> Result<Option<String>> {
         .map(str::to_string))
 }
 
-/// Writes a staging directory next to the final one, then renames it into
-/// place. A crash leaves either the old state or a `.staging` leftover, never
-/// a half installed version that the manifest could point at.
+/// 把这次下载到的产物写进 `bin/<version>`。
 ///
-/// A version directory that already exists but is **incomplete** (an older build
-/// staged it without the WebView2 loader, or files were removed) is filled in
-/// place instead: the running host usually lives in that very directory, and
-/// Windows refuses to delete or overwrite a running executable — while the
-/// missing piece is exactly the file nobody is holding.
+/// 修改逻辑（2026-10-28，第二次）：**不再用「暂存目录 + 改名」落地**。
+/// 客户机（企业杀软实时扫描）上写文件本身是成功的，死在最后一步
+/// `fs::rename(.staging-…, bin/<version>)` —— Windows 要求改目录名时整棵树都没有打开的
+/// 句柄，而三个刚写出来的 exe 正被扫着。白名单推不动，所以换设计而不是继续加长等待：
+///
+///   * 直接写进正式目录，**没有目录改名**这一步；
+///   * 每个文件写完立刻读回**逐字节比对**，不一致就重写（被隔离/替换也能自愈）；
+///   * 撞上「被占用」时用 [`storage::patient`] 长时间等待（默认十分钟，带进度输出）。
+///
+/// 语义仍然是原子的：`activate` 只在 `stage` 返回 Ok（每个字节都对上）之后才改 manifest，
+/// 所以崩在半路只会留下一个不完整的版本目录 —— 下次 `stage` 就地补齐，绝不会被激活。
 pub fn stage(root: &Path, version: &str, os: &str, files: &[(Binary, Vec<u8>)]) -> Result<PathBuf> {
     if !valid_version(version) {
         bail!("invalid version directory");
     }
     let target = version_dir(root, version)?;
-    if target.exists() {
-        if dir_is_complete(&target) {
-            bail!("that version is already installed");
-        }
-        fill(&target, os, files)?;
-        return Ok(target);
+    if target.exists() && dir_is_complete(&target) {
+        bail!("that version is already installed");
     }
-    let bin = bin_dir(root);
-    let staging = bin.join(format!(".staging-{version}-{}", uuid::Uuid::new_v4()));
-    // 修改逻辑（2026-10-27）：这里原来只抛 "拒绝访问。/os error 5"，现场根本看不出是哪个目录。
-    // 安装目录常见于「老版本由管理员装过，普通用户对 bin\ 没有写权限」，必须说清路径。
-    storage::private_dir(&staging).with_context(|| {
+    storage::private_dir(&target).with_context(|| {
         format!(
-            "无法在 {} 下创建安装目录（拒绝访问通常是权限不足或杀软拦截）",
-            bin.display()
+            "无法创建安装目录（权限不足或被安全软件拦截）：{}",
+            target.display()
         )
     })?;
-    fill(&staging, os, files)?;
-    move_into_place(&staging, &target)?;
+    fill(&target, os, files)?;
+    // 老版本失败时留下的 `.staging-*`（那时还靠「改名」落地）：顺手清掉，
+    // 别让客户机上一直挂着几个十几兆的垃圾目录。删不掉也不影响安装 —— 没有任何地方引用它们。
+    discard_staging(&bin_dir(root));
     Ok(target)
 }
 
-/// 把填好的暂存目录变成正式的版本目录。
-///
-/// 修改逻辑（2026-10-28）：客户机上 `fs::rename` 直接失败 ——
-/// 「无法把暂存目录改成正式目录：…\.staging-2.0.10-… -> …\bin\2.0.10」，
-/// 而安装根刚刚删干净、权限也不是原因。
-///
-/// 原因是 Windows 上**目录改名要求整棵树都没有打开的句柄**：三个刚写出来的 exe 正在被
-/// 杀毒软件/索引器扫描时就会得到 ERROR_ACCESS_DENIED / ERROR_SHARING_VIOLATION；
-/// 网络盘、被重定向或受管控的目录上，目录改名也可能直接被拒（哪怕在里面新建文件没问题）。
-///
-/// 所以这里两步走：
-///   1) 目标不存在 → 先试原子改名，带退避重试（扫描锁通常几百毫秒到几秒就放开）；
-///   2) 仍然失败（或目标已经存在）→ 逐**文件**搬。单文件改名只要求那个文件本身没被占用，
-///      而且 [`fill`] 会跳过内容相同的文件，所以重复安装几乎没有代价。
-/// 两段都失败时把各自的真实原因一起报出来，不再只剩一句「拒绝访问」。
-fn move_into_place(staging: &Path, target: &Path) -> Result<()> {
-    let mut rename_error: Option<std::io::Error> = None;
-    if !target.exists() {
-        for attempt in 0..4u32 {
-            match fs::rename(staging, target) {
-                Ok(()) => return Ok(()),
-                Err(error) => {
-                    rename_error = Some(error);
-                    // 这期间目标被装好了（并发安装，或上一轮其实已经成功）：暂存目录是多余的。
-                    if dir_is_complete(target) {
-                        let _ = fs::remove_dir_all(staging);
-                        return Ok(());
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        150 * u64::from(attempt + 1),
-                    ));
-                }
-            }
+/// 清掉旧版遗留的 `.staging-*` 目录（best effort）。
+fn discard_staging(bin: &Path) {
+    let Ok(entries) = fs::read_dir(bin) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with(".staging-") {
+            let _ = fs::remove_dir_all(entry.path());
         }
-    }
-
-    storage::private_dir(target).with_context(|| {
-        format!(
-            "无法创建版本目录 {}（目录改名也失败：{}）",
-            target.display(),
-            explain_rename(&rename_error)
-        )
-    })?;
-
-    let mut failed: Vec<String> = Vec::new();
-    let entries =
-        fs::read_dir(staging).with_context(|| format!("无法读取暂存目录 {}", staging.display()))?;
-    for entry in entries {
-        let entry = entry.with_context(|| format!("无法读取暂存目录 {}", staging.display()))?;
-        let destination = target.join(entry.file_name());
-        if let Err(error) = move_file(&entry.path(), &destination) {
-            failed.push(format!("{}（{error}）", destination.display()));
-        }
-    }
-    if failed.is_empty() {
-        let _ = fs::remove_dir(staging);
-        return Ok(());
-    }
-    bail!(
-        "安装文件落地失败：{}\n目录改名失败原因：{}",
-        failed.join("；"),
-        explain_rename(&rename_error)
-    )
-}
-
-/// 搬单个文件：改名失败时先重试几次（刚写出来的 exe 常被杀软/索引器短暂占用，
-/// 现场那种「目录改名 error 5」就是同一个原因），实在不行退回复制 + 删源（跨卷也走这里）。
-fn move_file(source: &Path, destination: &Path) -> std::io::Result<()> {
-    let mut last: Option<std::io::Error> = None;
-    for _ in 0..4u32 {
-        match fs::rename(source, destination) {
-            Ok(()) => return Ok(()),
-            Err(error) => last = Some(error),
-        }
-        std::thread::sleep(std::time::Duration::from_millis(200));
-    }
-    match fs::copy(source, destination) {
-        Ok(_) => {
-            let _ = fs::remove_file(source);
-            Ok(())
-        }
-        Err(_) => Err(last.unwrap_or_else(|| std::io::Error::other("rename failed"))),
-    }
-}
-
-fn explain_rename(error: &Option<std::io::Error>) -> String {
-    match error {
-        Some(error) => error.to_string(),
-        None => "目标目录已存在，未尝试改名".to_string(),
     }
 }
 
@@ -700,11 +618,11 @@ fn fill(dir: &Path, os: &str, files: &[(Binary, Vec<u8>)]) -> Result<()> {
             bail!("refusing to stage an empty binary");
         }
         let path = dir.join(kind.installed_name(os));
+        // 字节已经一致：跳过。重复安装、失败后重跑都靠它变成几乎零成本。
         if fs::read(&path).is_ok_and(|current| &current == bytes) {
             continue;
         }
-        storage::write_bytes(&path, bytes)
-            .with_context(|| format!("写入 {} 失败（权限不足或被安全软件拦截）", path.display()))?;
+        write_binary(&path, bytes)?;
         set_executable(&path)?;
     }
     if files.iter().any(|(kind, _)| *kind == Binary::Desktop) {
@@ -714,6 +632,35 @@ fn fill(dir: &Path, os: &str, files: &[(Binary, Vec<u8>)]) -> Result<()> {
         crate::webview2::ensure(dir)?;
     }
     Ok(())
+}
+
+/// 直接写最终文件名 + 读回校验；撞上「文件被占用」时长时间等待。
+///
+/// 为什么不用「临时文件 + 改名」：改名要求目标没有打开的句柄，而安全软件正读着刚写出来的
+/// exe 时改名必被拒（客户机就死在目录改名上）。直接写只需要**能打开这个文件**，
+/// 扫完就能写进去；写完读回比对，被隔离/替换掉的会被发现并重写。
+fn write_binary(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write as _;
+
+    storage::patient(
+        "写入安装文件",
+        path,
+        storage::INSTALL_BUDGET,
+        |error| storage::is_busy(error) || error.kind() == std::io::ErrorKind::InvalidData,
+        || {
+            let mut file = fs::File::create(path)?;
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            drop(file);
+            if fs::read(path)? != bytes {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "读回校验不一致（文件可能正被安全软件修改或隔离）",
+                ));
+            }
+            Ok(())
+        },
+    )
 }
 
 /// 这个目录是不是一份**能用的**安装：host、桌面进程、以及（Windows 上）
@@ -868,35 +815,73 @@ mod tests {
     }
 
     #[test]
-    fn a_staged_release_is_renamed_when_the_target_is_free() {
+    fn staging_writes_straight_into_the_version_directory() {
+        // 现场教训（2026-10-28）：落地靠 `fs::rename(.staging-…, bin/<v>)` 时，
+        // 只要暂存目录里有个文件正被安全软件扫着，改名就一定失败。现在直接写正式目录，
+        // 落地过程里不再有目录改名。
         let (_temp, root) = storage::test_root();
-        let target = version_dir(&root, "9.9.8").unwrap();
-        let staging = bin_dir(&root).join(".staging-9.9.8-test");
-        storage::private_dir(&staging).unwrap();
-        fs::write(staging.join("cloudfile-desktop.exe"), b"desktop").unwrap();
-        move_into_place(&staging, &target).unwrap();
-        assert!(target.join("cloudfile-desktop.exe").is_file());
-        assert!(!staging.exists(), "暂存目录必须收掉");
+        let os = std::env::consts::OS;
+        let target = stage(
+            &root,
+            "9.9.8",
+            os,
+            &[
+                (Binary::NativeHost, b"host".to_vec()),
+                (Binary::Desktop, b"desktop".to_vec()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(target, version_dir(&root, "9.9.8").unwrap());
+        assert_eq!(
+            fs::read(target.join(Binary::Desktop.installed_name(os))).unwrap(),
+            b"desktop"
+        );
+        let stagings = fs::read_dir(bin_dir(&root))
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(".staging-"))
+            .count();
+        assert_eq!(stagings, 0, "不应再产生 .staging-* 目录");
     }
 
     #[test]
-    fn a_staged_release_merges_when_the_target_directory_exists() {
-        // 现场：`bin\<version>` 已经存在（上一轮半途而废，或并发安装），
-        // 目录改名必然失败 —— 这时必须逐文件搬进去，而不是让整个安装挂掉。
+    fn a_half_written_version_directory_is_repaired_in_place() {
+        // 上一次安装中途崩掉（或被杀软打断）留下的空目录：这次要在原地补齐，
+        // 而不是报错或另建目录。残留的无关文件也不能被顺手删掉。
         let (_temp, root) = storage::test_root();
+        let os = std::env::consts::OS;
         let target = version_dir(&root, "9.9.9").unwrap();
         storage::private_dir(&target).unwrap();
         fs::write(target.join("leftover.txt"), b"partial").unwrap();
-        let staging = bin_dir(&root).join(".staging-9.9.9-test");
-        storage::private_dir(&staging).unwrap();
-        fs::write(staging.join("cloudfile-native-host.exe"), b"host").unwrap();
-        move_into_place(&staging, &target).unwrap();
-        assert!(target.join("cloudfile-native-host.exe").is_file());
-        assert!(!staging.exists(), "暂存目录必须收掉");
-        assert!(
-            target.join("leftover.txt").is_file(),
-            "合并不能顺手删掉别的文件"
-        );
+        let staged = stage(
+            &root,
+            "9.9.9",
+            os,
+            &[(Binary::NativeHost, b"host".to_vec())],
+        )
+        .unwrap();
+        assert_eq!(staged, target);
+        assert!(target.join(Binary::NativeHost.installed_name(os)).is_file());
+        assert!(target.join("leftover.txt").is_file());
+    }
+
+    #[test]
+    fn a_truncated_binary_in_the_version_directory_is_rewritten() {
+        // 被隔离/截断的 exe 必须被认出来并重写 —— 这就是「读回校验」存在的理由。
+        let (_temp, root) = storage::test_root();
+        let os = std::env::consts::OS;
+        let target = version_dir(&root, "9.9.7").unwrap();
+        storage::private_dir(&target).unwrap();
+        let path = target.join(Binary::NativeHost.installed_name(os));
+        fs::write(&path, b"tru").unwrap();
+        stage(
+            &root,
+            "9.9.7",
+            os,
+            &[(Binary::NativeHost, b"whole".to_vec())],
+        )
+        .unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"whole");
     }
 
     #[test]
