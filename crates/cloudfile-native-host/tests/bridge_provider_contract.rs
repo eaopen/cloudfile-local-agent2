@@ -12,6 +12,7 @@ fn bridge_mcp_provider_is_read_only_and_uses_json_lines() {
     std::fs::create_dir_all(&local).unwrap();
     std::fs::create_dir_all(home.join("Library/Application Support")).unwrap();
 
+    std::fs::create_dir_all(home.join("CloudFileAgent")).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_cloudfile-native-host"))
         .arg("--bridge-provider")
         .env("HOME", &home)
