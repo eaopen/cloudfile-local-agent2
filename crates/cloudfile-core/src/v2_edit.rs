@@ -286,13 +286,10 @@ pub fn open(root: &Path, uri: &str) -> Result<Task> {
     }
     file.flush()?;
     file.as_file().sync_all()?;
-    if mode == "local-view" {
-        // Defense in depth only. The native Fileserver is the authority:
-        // this ticket is valid for READ alone, never publish or Checkout.
-        let mut permissions = file.as_file().metadata()?.permissions();
-        permissions.set_readonly(true);
-        file.as_file().set_permissions(permissions)?;
-    }
+    // 修改逻辑（2026-10-29）：这里原来对**暂存文件**设只读，但下面还要 `persist_noclobber`
+    // 把它移进工作副本 —— Windows 上这一步会把属性丢掉（tempfile 重写目标文件），
+    // 于是「本地查看」第一次打开拿到的是可写文件，第二次（走 update_existing，直接对
+    // 最终路径设）才是只读。只读位必须在落盘之后补设，见文件末尾的 `set_read_only`。
     let mut state = state;
     let task = Task {
         task_id: id.clone(),
@@ -349,7 +346,12 @@ pub fn open(root: &Path, uri: &str) -> Result<Task> {
     // Persist the Guard before exposing the work copy. Checkout can expire
     // safely after an interrupted disk write; never release on an unknown reply.
     store(root, &id, &state)?;
-    file.persist_noclobber(dest)?;
+    file.persist_noclobber(&dest)?;
+    if mode == "local-view" {
+        // Defense in depth only. The native Fileserver is the authority:
+        // this ticket is valid for READ alone, never publish or Checkout.
+        set_read_only(&dest)?;
+    }
     storage::write(&dir.join("task.json"), &task)?;
     Ok(task)
 }
@@ -475,9 +477,7 @@ fn merge(root: &Path, mut task: Task, input: Merge<'_>) -> Result<Option<Task>> 
         clear_read_only(&local)?;
         downloaded.persist(&local)?;
         // 查看副本永远是线上镜像：本地改它没有任何意义，重新压成只读。
-        let mut permissions = fs::metadata(&local)?.permissions();
-        permissions.set_readonly(true);
-        fs::set_permissions(&local, permissions)?;
+        set_read_only(&local)?;
         task.baseline_file_id = file_id;
         task.baseline_digest = digest;
         task.size = size;
@@ -510,6 +510,19 @@ fn merge(root: &Path, mut task: Task, input: Merge<'_>) -> Result<Option<Task>> 
     storage::write(&dir.join("task.json"), &task)?;
     store(root, &task.task_id, &state)?;
     Ok(Some(task))
+}
+
+/// 给查看副本打上只读位。**必须在文件落到最终路径之后调用**。
+///
+/// Windows 上 `NamedTempFile::persist_noclobber`（把暂存文件改名进工作副本）会把暂存阶段
+/// 设好的 `FILE_ATTRIBUTE_READONLY` 丢掉，所以「先在暂存文件上设只读」等于没设 ——
+/// 2026-10-29 现场就是这个表现：本地查看**第一次**打开的文件可写、第二次才只读
+/// （第二次走 `update_existing`，本来就是直接对最终路径设）。
+fn set_read_only(path: &Path) -> Result<()> {
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(path, permissions)?;
+    Ok(())
 }
 
 // Windows 的只读位只有开/关两态，这里确实要关掉它才能替换文件；
@@ -568,9 +581,7 @@ pub fn resolve_conflict(root: &Path, id: &str, choice: &str) -> Result<Value> {
             }
             fs::rename(&copy, &local)?;
             if task.mode == "local-view" {
-                let mut permissions = fs::metadata(&local)?.permissions();
-                permissions.set_readonly(true);
-                fs::set_permissions(&local, permissions)?;
+                set_read_only(&local)?;
             }
             task.baseline_file_id = conflict.file_id.clone();
             task.baseline_digest = conflict.digest.clone();
@@ -823,6 +834,30 @@ mod tests {
         assert!(uri_parts("cloudfile-open://v2/open?instance=https%3A%2F%2Ffiles.example.com&session=11111111-1111-4111-8111-111111111111&ticket=x.y.z").is_ok());
         assert!(uri_parts("cloudfile-open://v2/open?instance=https%3A%2F%2Ffiles.example.com&session=11111111-1111-4111-8111-111111111111&ticket=nope").is_err());
     }
+    #[test]
+    fn a_view_copy_is_read_only_once_it_lands_on_the_final_path() {
+        // 现场故障（2026-10-29）：本地查看**第一次**打开的文件能写，第二次才只读。
+        // 第一次走 open()，原来把只读设在**暂存文件**上，而接下来 persist_noclobber
+        // 会把属性丢掉；第二次走 update_existing()，本来就是直接对最终路径设。
+        // 契约：只读位只认最终路径。
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("view.bin");
+        let mut staged = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+        staged.write_all(b"bytes").unwrap();
+        staged.flush().unwrap();
+        staged.persist_noclobber(&dest).unwrap();
+        assert!(
+            !fs::metadata(&dest).unwrap().permissions().readonly(),
+            "刚落盘的文件默认不是只读，这正是第一次能写的原因"
+        );
+        set_read_only(&dest).unwrap();
+        assert!(
+            fs::metadata(&dest).unwrap().permissions().readonly(),
+            "落盘之后补设的只读位必须生效"
+        );
+    }
+
     #[test]
     fn v2_readonly_mode_is_explicit_and_never_implicitly_editable() {
         assert!(supported_open_mode("local-view"));
