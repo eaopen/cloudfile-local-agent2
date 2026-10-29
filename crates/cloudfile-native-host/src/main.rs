@@ -784,15 +784,22 @@ fn launch_desktop(desktop: Option<&Path>) -> anyhow::Result<bool> {
         std::thread::sleep(std::time::Duration::from_millis(400));
     }
     let mut command = std::process::Command::new(desktop);
+    // 修改逻辑（2026-10-29）：**不带 `--autostart`**。
+    // `--autostart` 是给登录项用的（有托盘时把窗口藏起来），装完也带上的话，用户第一次
+    // 装完只会在右下角多一个托盘图标 —— 他根本不知道有「任务中心」这个程序，而安装引导页
+    // （装浏览器扩展、复制扩展目录）就在那个窗口里。装完必须把窗口放到前台。
     command
-        .arg("--autostart")
         .arg("--await-instance")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     cloudfile_core::childproc::hide(&mut command);
     match command.spawn() {
-        Ok(_) => Ok(true),
+        Ok(_) => {
+            // 装完这一屏就是「下一步做什么」，值得在控制台说一句。
+            eprintln!("任务中心已启动：首次使用请按窗口里的「安装引导」装浏览器扩展。");
+            Ok(true)
+        }
         Err(error) => {
             // 启动失败不算安装失败：二进制已经就位，用户可以自己双击。
             eprintln!(
