@@ -100,5 +100,8 @@ fn absent_provider_root_is_not_created() {
         .output()
         .unwrap();
     assert!(!result.status.success());
-    assert!(!root.exists(), "read-only Provider must not create Agent2 data");
+    assert!(
+        !root.exists(),
+        "read-only Provider must not create Agent2 data"
+    );
 }
