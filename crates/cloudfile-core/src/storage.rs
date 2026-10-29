@@ -28,8 +28,8 @@ pub fn existing_root_readonly() -> Result<PathBuf> {
             let legacy = base.join(LEGACY_AGENT_DIR);
             #[cfg(windows)]
             {
-                let opted_out = std::env::var_os(NO_DRIVE_PREFERENCE)
-                    .is_some_and(|v| !v.is_empty());
+                let opted_out =
+                    std::env::var_os(NO_DRIVE_PREFERENCE).is_some_and(|v| !v.is_empty());
                 let preferred = preferred_root();
                 if !opted_out && preferred.is_dir() && !is_empty_dir(&preferred) {
                     preferred
@@ -41,7 +41,11 @@ pub fn existing_root_readonly() -> Result<PathBuf> {
             }
             #[cfg(not(windows))]
             {
-                if current.is_dir() { current } else { legacy }
+                if current.is_dir() {
+                    current
+                } else {
+                    legacy
+                }
             }
         }
     };
