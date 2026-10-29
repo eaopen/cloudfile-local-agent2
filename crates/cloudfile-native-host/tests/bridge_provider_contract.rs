@@ -86,3 +86,19 @@ fn bridge_mcp_provider_is_read_only_and_uses_json_lines() {
     assert!(!body.contains("device_key"));
     assert!(!body.contains("access_token"));
 }
+
+#[test]
+fn absent_provider_root_is_not_created() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("never-initialized");
+    let result = Command::new(env!("CARGO_BIN_EXE_cloudfile-native-host"))
+        .arg("--bridge-provider")
+        .env("CLOUDFILE_AGENT2_HOME", &root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(!root.exists(), "read-only Provider must not create Agent2 data");
+}
