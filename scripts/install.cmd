@@ -1,6 +1,6 @@
 @echo off
 setlocal enableextensions
-title CloudFile Agent 2.2 安装（正式通道）
+title CloudFile Agent 安装（正式通道）
 
 rem ---------------------------------------------------------------
 rem  双击运行即可。本脚本只做一件事：拿到引导体，然后交给它。
@@ -127,7 +127,14 @@ exit /b %ERRORLEVEL%
 :end
 if not defined CODE set "CODE=1"
 echo.
-echo 退出码：%CODE%
+if "%CODE%"=="0" (
+  echo [OK] 安装完成：本地组件已装好，任务中心已经打开。
+  echo      接着到任务中心左侧的「安装引导」，按第 5 步装浏览器扩展。
+  echo      任务中心没出现时，用开始菜单或桌面上的「CloudFile 任务中心」打开。
+) else (
+  echo [ERROR] 安装没有完成，退出码 %CODE%。
+  echo         请把上面的提示拍照反馈给管理员；再运行一次本脚本通常就能修好。
+)
 if not "%CLOUDFILE_NO_PAUSE%"=="" exit /b %CODE%
 pause
 exit /b %CODE%

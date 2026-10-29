@@ -186,12 +186,14 @@ const SETUP_STEPS = [
   {
     key: 'extension',
     title: '安装浏览器扩展',
-    hint: '自动下载解包，最后在 Chrome 里点三下',
+    hint: '下载扩展包并解压到下面的目录，再到 Chrome 里加载这个目录',
     state: (s) => ({
       ok: Boolean(s.extension_version),
+      // 第 5 步要回答两个问题：解压到哪、完成没有。目录是固定路径（D 盘优先），
+      // 用户下一步要在 Chrome 的「选择文件夹」里找它，所以必须和判据一起显示出来。
       detail: s.extension_version
-        ? `已部署 ${s.extension_version} → ${s.extension_dir}`
-        : `尚未部署到 ${s.extension_dir}`,
+        ? `已完成：扩展 ${s.extension_version} 已解压到 ${s.extension_dir}`
+        : `未完成：还没有解压到 ${s.extension_dir}`,
     }),
   },
 ];

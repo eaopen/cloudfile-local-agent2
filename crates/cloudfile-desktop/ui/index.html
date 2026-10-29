@@ -75,15 +75,16 @@
       </div>
       <div id="setup-log" class="technical" hidden></div>
       <section class="panel" id="setup-extension-help" hidden>
-        <h3>在 Chrome 里装这个扩展</h3>
+        <h3>在 Chrome 里加载这个扩展</h3>
+        <p class="hint">扩展包已经下载并解压到本机，位置见下面的目录。浏览器不允许程序代劳这一步，需要你在 Chrome 里手动加载一次。</p>
         <ol class="setup-howto">
           <li>打开 Chrome，在地址栏输入 <code>chrome://extensions</code> 后回车（浏览器不再允许从外部直接弹出这一页，需要手动输入或粘贴）。</li>
           <li>打开页面右上角的「开发者模式」。</li>
-          <li>点左上角「加载已解压的扩展程序」，选中下面这个目录。</li>
+          <li>点左上角「加载已解压的扩展程序」，在弹窗的地址栏粘贴下面这个目录，回车后点「选择文件夹」。</li>
           <li>回到这里点「完成」；扩展列表里出现 CloudFile 即装好。</li>
         </ol>
         <div class="field-block">
-          <span class="hint">扩展目录（可直接复制）</span>
+          <span class="hint">扩展目录（点这一行即可复制）</span>
           <code id="setup-ext-dir" class="path-value" role="textbox" aria-label="扩展目录"></code>
         </div>
         <p>扩展 ID：<code id="setup-ext-id"></code></p>
