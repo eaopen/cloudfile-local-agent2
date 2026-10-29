@@ -893,7 +893,17 @@ function wire() {
         return;
       }
       if (outcome === 'failed') {
-        dialog('升级失败', '新版本没有安装成功。可以稍后再试；如果反复失败，请检查更新通道是否可访问。', [['知道了']]);
+        // 后台进程把失败原因写在 update-result.json 里；完整过程在同目录的 update.log。
+        // 只给一句「没装成功」的话，现场只能靠猜。
+        const reason = (state.result && state.result.error) || '';
+        const log = state.log ? `\n\n详细日志：${state.log}` : '';
+        dialog(
+          '升级失败',
+          reason
+            ? `${reason}${log}`
+            : `新版本没有安装成功。可以稍后再试；如果反复失败，请检查更新通道是否可访问。${log}`,
+          [['知道了']],
+        );
         return;
       }
     }

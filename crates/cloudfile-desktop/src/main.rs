@@ -678,12 +678,37 @@ fn run_update(state: tauri::State<'_, State>, force: bool) -> Result<Value, Stri
         return Ok(json!({"state": "blocked", "assessment": assessment}));
     }
     let binary = host_binary().ok_or_else(|| "本机未找到 cloudfile-native-host".to_string())?;
+    // 修改逻辑（2026-10-29）：升级进程的 stdout/stderr 原来都指向 null，客户机上「升级失败」
+    // 就只剩这四个字 —— 分不清是下载不通、验签不过，还是新版本 exe 被安全软件拦着起不来。
+    // 现在全部落到 <安装根>\update.log，失败原因同时写进 update-result.json（见 native-host）。
+    let log = cloudfile_core::native::update_log_path(&state.root);
+    note_update_log(
+        &log,
+        &format!(
+            "\n===== 开始后台升级：当前 {}，{} =====",
+            cloudfile_core::VERSION,
+            cloudfile_core::now()
+        ),
+    );
     let mut command = std::process::Command::new(binary);
-    command
-        .arg("--update")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+    command.arg("--update").stdin(std::process::Stdio::null());
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log)
+    {
+        Ok(file) => {
+            if let Ok(dup) = file.try_clone() {
+                command.stdout(std::process::Stdio::from(dup));
+            }
+            command.stderr(std::process::Stdio::from(file));
+        }
+        Err(_) => {
+            command
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+        }
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -691,9 +716,13 @@ fn run_update(state: tauri::State<'_, State>, force: bool) -> Result<Value, Stri
         // （所以这里不需要 `childproc::hide`）。
         command.creation_flags(0x0000_0008);
     }
-    command
-        .spawn()
-        .map_err(|_| "无法启动更新进程".to_string())?;
+    // 连进程都起不来时（企业策略 / 安全软件拦了新程序启动）留一份同样的证据。
+    if let Err(error) = command.spawn() {
+        let message = format!("无法启动更新进程（{error}）；当前版本保持不变");
+        native::record_update_failure(&state.root, "agent", &message);
+        note_update_log(&log, &message);
+        return Err(message);
+    }
     Ok(json!({"state": "running"}))
 }
 
@@ -747,6 +776,9 @@ fn update_state(state: tauri::State<'_, State>) -> Result<Value, String> {
         "active_version": active,
         "newer": newer,
         "result": native::load_update_result(&state.root),
+        // 界面在失败时要把这个位置告诉用户：完整过程（含「文件被安全软件占用，继续等待」）
+        // 都在里面，发给我们就能定位。
+        "log": native::update_log_path(&state.root).to_string_lossy(),
     }))
 }
 
@@ -998,6 +1030,22 @@ fn record_launch_failure(message: &str) {
     {
         use std::io::Write;
         let _ = writeln!(file, "{message}");
+    }
+}
+
+/// 往升级日志里写一行分段标题。超过 1MB 先清空，免得这个文件跟着每次升级无限长下去。
+fn note_update_log(path: &std::path::Path, line: &str) {
+    let too_big = std::fs::metadata(path).is_ok_and(|meta| meta.len() > 1024 * 1024);
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).write(true);
+    if too_big {
+        options.truncate(true);
+    } else {
+        options.append(true);
+    }
+    if let Ok(mut file) = options.open(path) {
+        use std::io::Write;
+        let _ = writeln!(file, "{line}");
     }
 }
 

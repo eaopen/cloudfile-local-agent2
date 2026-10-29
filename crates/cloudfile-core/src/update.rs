@@ -581,8 +581,16 @@ pub fn stage(root: &Path, version: &str, os: &str, files: &[(Binary, Vec<u8>)]) 
         bail!("invalid version directory");
     }
     let target = version_dir(root, version)?;
+    // 目录已经完整：上一次升级走到了「字节全写好了、注册还没改过去」这一步就中断
+    // （激活失败、被强杀、断电）。以前这里直接 `bail!("that version is already installed")`，
+    // 结果是**永久卡死** —— 运行版本还是旧的，检查更新每次都说有新版本，一点升级就报
+    // 「已安装」。字节已经齐了，交给后面的健康检查与激活即可，重复升级是幂等的。
+    //
+    // 这里仍然走一遍 `fill`：字节一致的会被跳过，被安全软件替换/截断过的那份会重写，
+    // 免得一个坏掉的文件让后面每次健康检查都失败。
     if target.exists() && dir_is_complete(&target) {
-        bail!("that version is already installed");
+        fill(&target, os, files)?;
+        return Ok(target);
     }
     storage::private_dir(&target).with_context(|| {
         format!(
@@ -705,11 +713,17 @@ pub fn activate(root: &Path, dir: &Path, host: &str, version: &str) -> Result<Pa
     // 激活以后 Chrome 与登录项都会直接拉起这个 exe，缺一个 DLL 就整台机器用不了。
     crate::webview2::ensure(&directory)?;
     let current = hostreg::state(dir, host, None)?;
+    // 修改逻辑（2026-10-29）：注册可能被「卸载 Host」按钮或第三方清理工具删掉。
+    // 原来这里直接 bail（no existing registration to take over），用户点升级只会看到
+    // 「升级失败」，而且新版本目录已经写完整了，之后每次升级都会重复同一个错误。
+    // 扩展 ID 是产品常量（manifest 里钉了 key），没有既有注册就按它重建，
+    // 有既有注册时沿用原来的 ID —— 那份 ID 才是用户机器上真正装着的扩展。
+    let known = current.extension_id.is_some();
     let extension_id = current
         .extension_id
         .clone()
-        .context("no existing registration to take over; register the host first")?;
-    hostreg::install(dir, host, &extension_id, &host_binary, true)?;
+        .unwrap_or_else(|| hostreg::EXTENSION_ID.to_string());
+    hostreg::install(dir, host, &extension_id, &host_binary, known)?;
     Ok(host_binary)
 }
 
@@ -1241,6 +1255,40 @@ mod tests {
     }
 
     #[test]
+    fn activation_rebuilds_a_registration_that_was_removed() {
+        let (_dir, base) = crate::storage::test_root();
+        let root = base.join("install");
+        let manifests = base.join("hosts");
+        let os = std::env::consts::OS;
+        stage(
+            &root,
+            "2.2.5",
+            os,
+            &[
+                (Binary::NativeHost, b"host".to_vec()),
+                (Binary::Desktop, b"desktop".to_vec()),
+            ],
+        )
+        .unwrap();
+        // 用户点过「卸载 Host」或第三方清理工具删了注册：升级不能因此永远失败。
+        // 扩展 ID 是产品常量（manifest 钉了 key），按它重建即可。
+        assert_eq!(active_version(&manifests, hostreg::DEV_HOST).unwrap(), None);
+        activate(&root, &manifests, hostreg::DEV_HOST, "2.2.5").unwrap();
+        assert_eq!(
+            active_version(&manifests, hostreg::DEV_HOST)
+                .unwrap()
+                .as_deref(),
+            Some("2.2.5")
+        );
+        let manifest: serde_json::Value =
+            storage::read(&hostreg::manifest_path(&manifests, hostreg::DEV_HOST)).unwrap();
+        assert_eq!(
+            manifest["allowed_origins"][0],
+            format!("chrome-extension://{}/", hostreg::EXTENSION_ID)
+        );
+    }
+
+    #[test]
     fn an_incomplete_version_directory_is_repaired_in_place() {
         let (_dir, base) = crate::storage::test_root();
         let root = base.join("install");
@@ -1254,8 +1302,14 @@ mod tests {
 
         let dir = stage(&root, "2.2.4", os, &files(b"new")).unwrap();
         assert!(is_complete(&root, "2.2.4"));
-        // 完整的同版本再装一次没有意义。
-        assert!(stage(&root, "2.2.4", os, &files(b"new")).is_err());
+        // 完整的同版本再装一次：幂等，原地返回。上一次可能死在「目录写好了、注册没改过去」
+        // 那一步（激活失败 / 被强杀），重试必须能继续，不能一句「已安装」把人永久卡住。
+        let repeated = stage(&root, "2.2.4", os, &files(b"new")).unwrap();
+        assert_eq!(repeated, dir, "完整目录再 stage 不该换目录");
+        assert_eq!(
+            fs::read(dir.join(Binary::Desktop.installed_name(os))).unwrap(),
+            b"new"
+        );
 
         // 旧构建暂存的目录里可能缺产物：那不是可用的安装，重装要能就地补齐
         // （不能整目录删掉 —— 正在跑的 host 可能就在里面）。
@@ -1321,7 +1375,12 @@ mod tests {
         // 桌面端（GNU 工具链）要靠同目录的 WebView2Loader.dll 才能启动：暂存时必须
         // 一起放进去，否则紧跟着的健康检查连 `--version` 都跑不出来。
         assert_loader_present(&version_dir(&root, "2.2.1").unwrap());
-        assert!(stage(&root, "2.2.1", os, &[]).is_err());
+        // 完整目录再问一次是幂等的（上一次死在激活那一步时，重试走的就是这条路），
+        // 不是错误，也不会被空清单破坏。
+        assert_eq!(
+            stage(&root, "2.2.1", os, &[]).unwrap(),
+            version_dir(&root, "2.2.1").unwrap()
+        );
 
         activate(&root, &manifests, hostreg::DEV_HOST, "2.2.1").unwrap();
         assert_eq!(

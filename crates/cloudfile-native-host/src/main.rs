@@ -335,7 +335,8 @@ fn run_command(args: &[String]) -> anyhow::Result<()> {
                     println!("{message}");
                 }
                 Err(error) => {
-                    native::record_update_result(&root, "extension", "failed");
+                    // 扩展升级同样是被分离进程触发的：原因不落盘，界面上就只剩一句「失败」。
+                    native::record_update_failure(&root, "extension", &format!("{error:#}"));
                     return Err(error);
                 }
             }
@@ -388,15 +389,13 @@ fn desktop_binary() -> anyhow::Result<PathBuf> {
 fn run_update(root: &Path, host: &str, manifest: Option<PathBuf>) -> anyhow::Result<()> {
     native::record_update_result(root, "agent", "running");
     let result = apply_update(root, host, manifest);
-    native::record_update_result(
-        root,
-        "agent",
-        if result.is_ok() {
-            "completed"
-        } else {
-            "failed"
-        },
-    );
+    match &result {
+        Ok(()) => native::record_update_result(root, "agent", "completed"),
+        // 修改逻辑（2026-10-29）：失败原因必须落进 update-result.json。这个进程是分离启动的，
+        // 它的 stderr 可能指向 null（任务中心侧）或已关闭的控制台（Chrome 侧），
+        // 结果文件里只有一个 `failed` 等于什么都没说。
+        Err(error) => native::record_update_failure(root, "agent", &format!("{error:#}")),
+    }
     let install = update::install_root(&std::env::current_exe()?);
     if result.is_ok() {
         let dir = hostreg::manifest_dir()?;
@@ -856,28 +855,28 @@ fn stage_release(release: &update::Release, install: &Path) -> anyhow::Result<(P
     //
     // 修改逻辑（2026-10-28）：这一步要**启动刚写出来的 exe**。企业杀软正扫着它时，
     // CreateProcess 会直接给出「被占用」（os error 5/32），一次失败就把整个安装否掉太脆。
-    // 运行环境允许慢，所以这里也给它几次机会（最多再等约 7.5 秒）。
-    let mut healthy = Ok(());
-    for attempt in 0..6u32 {
-        healthy = update::probe(&staged_host)
-            .and_then(|reported| {
+    // 修改逻辑（2026-10-29）：原先只重试 6 次（约 7.5 秒）。桌面进程有 7.8MB，实时扫描窗口
+    // 常常比这长，表现就是「装好之后一升级就失败」，而且失败信息用完就丢。现在改成和写盘
+    // 共用同一套长等待（INSTALL_BUDGET，只对「被占用」类错误等），每一轮都记进日志。
+    let healthy = storage::patient(
+        "启动新版本做健康检查",
+        &staged_host,
+        storage::INSTALL_BUDGET,
+        |error| mentions_busy(&error.to_string()),
+        || {
+            (|| -> anyhow::Result<()> {
+                let reported = update::probe(&staged_host)?;
                 anyhow::ensure!(
                     reported == release.version,
                     "staged binary reports a different version"
                 );
-                update::probe_component(&staged_host).map(|_| ())
-            })
-            .and_then(|()| update::probe(&staged_desktop).map(|_| ()));
-        match &healthy {
-            Ok(()) => break,
-            Err(error) if attempt < 5 && mentions_busy(&format!("{error:#}")) => {
-                std::thread::sleep(std::time::Duration::from_millis(
-                    500 * u64::from(attempt + 1),
-                ));
-            }
-            Err(_) => break,
-        }
-    }
+                update::probe_component(&staged_host)?;
+                update::probe(&staged_desktop)?;
+                Ok(())
+            })()
+            .map_err(|error| std::io::Error::other(format!("{error:#}")))
+        },
+    );
     if let Err(error) = healthy {
         // 只有这次新建的暂存目录才删：就地补齐的既有版本目录是这台机器上唯一的安装。
         if !existed {

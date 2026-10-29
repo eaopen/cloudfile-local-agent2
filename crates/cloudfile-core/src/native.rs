@@ -119,6 +119,10 @@ pub fn status(root: &Path) -> Value {
     if let Some(result) = load_update_result(root) {
         value["last_update_state"] = result["state"].clone();
         value["last_update_kind"] = result["kind"].clone();
+        // 失败原因一路带到 `--status` 与扩展，现场排查不用再去翻文件。
+        if let Some(error) = result.get("error") {
+            value["last_update_error"] = error.clone();
+        }
     }
     let probe = check_update(root);
     for key in [
@@ -336,6 +340,36 @@ fn extension_installed_version(config: &session::Config) -> Option<String> {
 pub fn record_update_result(root: &Path, kind: &str, state: &str) {
     let value = json!({"kind": kind, "state": state, "at": crate::now()});
     let _ = crate::storage::write(&update_result_path(root), &value);
+}
+
+/// 失败时连同原因一起落盘。
+///
+/// 修改逻辑（2026-10-29）：升级是**分离进程**里跑的（任务中心 spawn
+/// `cloudfile-native-host --update`，Windows 上 DETACHED_PROCESS），它的 stderr 没有地方去，
+/// 原来结果文件只写 `state: failed`，客户机上看到的就是一句「升级失败」，连是哪一步、
+/// 是不是被安全软件拦了都无从判断。原因必须和状态写在同一个文件里。
+pub fn record_update_failure(root: &Path, kind: &str, reason: &str) {
+    let value = json!({
+        "kind": kind,
+        "state": "failed",
+        "error": clip(reason, 4000),
+        "at": crate::now(),
+    });
+    let _ = crate::storage::write(&update_result_path(root), &value);
+}
+
+/// 升级过程的完整输出（任务中心把 `--update` 子进程的 stdout/stderr 重定向到这里）。
+/// 里面既有分段进度，也有 `storage::patient` 打出的「文件被占用，继续等待」。
+pub fn update_log_path(root: &Path) -> std::path::PathBuf {
+    root.join("update.log")
+}
+
+/// 状态文件是给人看的：超长错误截断，别让整个文件变成一坨。
+fn clip(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        return text.to_string();
+    }
+    text.chars().take(limit).collect::<String>() + "…（已截断）"
 }
 
 /// 上次更新/扩展安装的结果文件（任务中心「关于与更新」读它）。
@@ -754,6 +788,38 @@ mod tests {
         assert_eq!(load_update_result(root).unwrap()["state"], "running");
         record_update_result(root, "agent", "nonsense");
         assert!(load_update_result(root).is_none());
+    }
+
+    #[test]
+    fn a_failed_update_keeps_the_reason_it_failed_for() {
+        let (_dir, base) = crate::storage::test_root();
+        let root = base.as_path();
+        // 升级跑在分离进程里，stderr 没有去处 —— 原因只活在结果文件里。
+        record_update_failure(
+            root,
+            "agent",
+            "启动新版本做健康检查失败：cloudfile-native-host.exe：拒绝访问。 (os error 5)",
+        );
+        let result = load_update_result(root).unwrap();
+        assert_eq!(result["state"], "failed");
+        assert_eq!(result["kind"], "agent");
+        assert!(result["error"].as_str().unwrap().contains("os error 5"));
+
+        // 下一次成功后不能再留着上一次的错误：界面会把旧原因当成这次的。
+        record_update_result(root, "agent", "completed");
+        assert!(load_update_result(root).unwrap().get("error").is_none());
+    }
+
+    #[test]
+    fn an_enormous_failure_reason_is_clipped() {
+        let (_dir, base) = crate::storage::test_root();
+        let root = base.as_path();
+        record_update_failure(root, "agent", &"错".repeat(20_000));
+        let text = load_update_result(root).unwrap()["error"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(text.chars().count(), 4000 + "…（已截断）".chars().count());
     }
 
     #[test]
