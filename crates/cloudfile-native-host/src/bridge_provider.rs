@@ -216,7 +216,7 @@ fn handle(input: &Value, root: &Path) -> Option<Value> {
     Some(json!({"jsonrpc":"2.0","id":id,"result":output}))
 }
 pub fn serve() -> Result<()> {
-    let root = storage::root()?;
+    let root = storage::existing_root_readonly()?;
     let stdin = io::stdin();
     let mut input = stdin.lock();
     let mut output = io::stdout().lock();
