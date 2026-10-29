@@ -11,6 +11,46 @@ const AGENT_DIR: &str = "CloudFileAgent";
 /// 旧名字（带版本后缀的那一版）。只有升级上来的机器上才有，用来找迁移源。
 const LEGACY_AGENT_DIR: &str = "CloudFileAgent22";
 
+/// Resolve an already-existing Agent2 tree without initializing, migrating or
+/// writing any settings. Read-only MCP consumers must not bootstrap file state.
+pub fn existing_root_readonly() -> Result<PathBuf> {
+    let root = match std::env::var_os("CLOUDFILE_AGENT2_HOME") {
+        Some(home) if !home.is_empty() => {
+            let path = PathBuf::from(home);
+            if !path.is_absolute() {
+                bail!("CLOUDFILE_AGENT2_HOME must be an absolute path");
+            }
+            path
+        }
+        _ => {
+            let base = dirs::data_local_dir().context("user data directory unavailable")?;
+            let current = base.join(AGENT_DIR);
+            let legacy = base.join(LEGACY_AGENT_DIR);
+            #[cfg(windows)]
+            {
+                let opted_out = std::env::var_os(NO_DRIVE_PREFERENCE)
+                    .is_some_and(|v| !v.is_empty());
+                let preferred = preferred_root();
+                if !opted_out && preferred.is_dir() && !is_empty_dir(&preferred) {
+                    preferred
+                } else if current.is_dir() {
+                    current
+                } else {
+                    legacy
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                if current.is_dir() { current } else { legacy }
+            }
+        }
+    };
+    if !root.is_dir() {
+        bail!("existing Agent2 data root unavailable");
+    }
+    Ok(root)
+}
+
 /// 本机私有目录（Agent 的整棵树：配置、任务、版本）。
 ///
 /// `CLOUDFILE_AGENT2_HOME` 可以覆盖它 —— 对齐 Go 侧 `install.cmd` 与 `internal/home`：

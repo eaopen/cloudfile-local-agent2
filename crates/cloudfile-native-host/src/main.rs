@@ -5,6 +5,8 @@
 //! process over the file mailbox. With arguments it is a plain CLI, which is
 //! how registration, login items, upgrades and reverts are performed without
 //! a scripting runtime on the target machine.
+mod bridge_provider;
+
 use anyhow::Context;
 use cloudfile_core::{
     apps, autostart, device, guard, hostreg, ipc, native, paired_session, profile, selftest,
@@ -27,6 +29,7 @@ Usage: cloudfile-native-host [command]
 
   --version                      print the build version
   --component                    print the local component contract as JSON
+  --bridge-provider              run optional read-only CloudFile MCP stdio Provider
   --status                       print agent, registration and exit state as JSON
   --sync-app-profile <url>       sync V1 app metadata from app origin or explicit public discovery URL
   --list-app-profiles            list optional locally bound application profiles
@@ -95,6 +98,13 @@ fn main() {
                     })
             })
     });
+    if args.as_slice() == ["--bridge-provider"] {
+        if let Err(error) = bridge_provider::serve() {
+            eprintln!("CloudFile Bridge Provider failed: {error:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if args.is_empty() || browser_launch {
         if run_stdio().is_err() {
             eprintln!("CloudFile native messaging failed");
