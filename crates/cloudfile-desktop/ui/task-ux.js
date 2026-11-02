@@ -9,7 +9,7 @@
   function modeLabel(task) {
     if (task.mode === 'local-view') return '本地打开 · 不自动回传';
     if (task.exclusive) return '独占编辑 · 手动提交';
-    if (task.can_upload) return '普通编辑 · 本地保存后自动回传';
+    if (task.can_upload) return '普通编辑 · 本地保存后手动上传';
     return '旧版本地会话 · 仅可打开';
   }
   function referenceHint(name) {
