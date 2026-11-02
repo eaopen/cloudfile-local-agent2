@@ -112,8 +112,18 @@ cloudfile-desktop --self-test                                            # 同�
 - 被其他程序注册的 Host **不会**被静默替换；需要显式加 `--takeover`，且原 Manifest 一定先备份为 `<host>.previous.json`，可用 `--rollback-host` 还原。任务中心里对应的接管需要用户确认。由**旧 CloudFile Agent** 写入的注册视为本产品自有：用户显式安装/升级 Rust 版本时自动备份并替换，不再二次确认。
 - 升级只信任签名清单：校验签名、SHA-256、平台与协议版本后才暂存到新的版本目录，不覆盖正在运行的程序；暂存程序必须能启动、`--version` 与 `--component` 都通过才允许切换。健康检查失败会删除暂存目录，当前版本保持不变。
 - 升级前会检查活动任务。存在有效 Checkout 或未确认 Intent 时默认拒绝升级，因为升级会替换承担续租与发布的进程；用户可在任务中心看到风险清单后明确选择继续。失败时保留用户数据，不会把未确认任务当作已完成。
-- Windows 需要 WebView2 运行时，`--status` 会报告 `runtime.webview2`；macOS 使用系统 WebKit（该字段为 `null`，表示不适用而非缺失）。不捆绑离线 WebView2，以保持包体积。
+- Windows 需要 WebView2 运行时，`--status` 会报告 `runtime.webview2`、`runtime.task_center` 与 `runtime.installer`；macOS 使用系统 WebKit（`webview2` 为 `null`，表示不适用而非缺失）。**缺运行时不再是一句英文原生错误框，也不需要管理员权限**（2026-11-02 现场）：桌面进程先探测运行时，缺失时一个 webview 都不建 —— 手动启动时弹中文询问「立即安装？」，安装器随发行包提供，以**当前用户**身份装到 `%LOCALAPPDATA%`（不触发 UAC），装好后**同一次启动**就能打开任务中心；用户点「否」或安装失败则降级为托盘常驻 + 中文说明。托盘菜单常驻「安装 WebView2 运行时（无需管理员）」，运行中装好后需从托盘退出重开（窗口只在启动时创建，Windows 上在命令/事件回调里建窗有死锁风险，见 wry #583）。降级期间**保留**的是已打开的本地副本与独占租约续租，上传/提交要等任务中心恢复后再操作（IPC 没有上传请求）。`--status` 的 `runtime` 是注册表尽力探测，桌面进程以 Tauri 的同一入口为准，极端情况下两者可能不一致。
 - 当前替代目标是 **A 类：功能完全替代** —— 首次切换允许重新配对设备，但不丢失任何工作副本。原设备身份与原任务的无感原位迁移（B 类）尚未实现。
+
+### WebView2 运行时分发（免管理员自助安装）
+
+Windows 任务中心窗口依赖 WebView2 运行时，而现场机器常常**没有管理员权限**、也可能打不开微软站点。分发与自愈规则：
+
+- **发行包必须带安装器**：Windows ZIP 根目录下 `webview2/MicrosoftEdgeWebview2Setup.exe` + 同目录 `installer.sha256`。`scripts/package.py` 打包时默认下载微软官方引导器（约 2MB，安装时联网）；内网/断网部署用 `CLOUDFILE_WEBVIEW2_SETUP=<Evergreen 独立安装器路径>` 打包（约 150MB，离线可装）。文件同名，代码不用改。`--install` 会把包里的安装器复制到**安装根**的 `webview2/`，升级换版本目录后仍然找得到。
+- **只执行校验通过的安装器**：Agent 启动时定位安装器并核对 SHA-256（`installer.sha256`，可用 `CLOUDFILE_WEBVIEW2_SETUP_SHA256` 覆盖期望值）；找不到哈希或哈希不一致一律拒绝执行，没有「跳过校验」开关。
+- **安装到当前用户**：安装器以当前用户身份运行（桌面引导保留微软安装界面；`cloudfile-native-host --install-webview2` 为静默版），不请求管理员权限。装好后启动阶段**同一次启动**即可打开任务中心；运行中（托盘）装好后需从托盘退出重开，因为窗口只在启动时创建。
+- **IT 最佳实践**：组策略/SCCM/Intune 机器级预装 WebView2 运行时（一次解决该机器所有用户，最省事）；或在部署包里放内网离线安装器。安全策略禁止运行安装器时，Agent 只能降级为托盘后台运行并提示联系 IT。
+
 
 ### 发版（Rust 通道）
 
@@ -263,7 +273,7 @@ Rust 测试与开发扩展打包测试，并生成开发 ZIP 上传 Artifact；
 ## 代码边界
 
 - `cloudfile-core`：会话、用户配置、任务记录、设备签名、提交快照与全量上传；`exclusive` 模块负责独占 Checkout 租约与 Commit/Checkin，`cdc` 模块负责大文件分块切分与计划/暂存/发布链路，`guard` 模块是“能否安全退出 / 升级”的唯一判定来源，`settings` 负责本机偏好与悬浮位置，`workspace` 负责工作副本根目录策略与一次性搬迁，`apps` 负责应用检测与自定义打开规则，`hostreg` / `update` / `autostart` 负责注册、版本目录与登录项。
-- `cloudfile-core` 的三个 Windows 底层保障模块：`winreg`（进程内读写注册表）、`childproc`（子进程不弹控制台窗口）、`shortcut`（「启动」文件夹里的 `.lnk`）。注册、登录项、WebView2 探测、应用探测**一律走它们**，不再 spawn `reg.exe`——否则父进程是 GUI（Tauri 桌面）时每次调用都会闪一个黑窗口，而且在禁用 `reg.exe` 的机器上会直接失败而不是降级。只有「打开文档的应用」与「必须脱离宿主存活的升级进程」例外，前者需要窗口、后者用 `DETACHED_PROCESS` 自带无控制台。
+- `cloudfile-core` 的四个 Windows 底层保障模块：`winreg`（进程内读写注册表）、`childproc`（子进程不弹控制台窗口）、`shortcut`（「启动」文件夹里的 `.lnk`）、`winbox`（无窗口时的原生中文询问框，缺 WebView2 运行时的安装引导与退出风险确认走它）。注册、登录项、WebView2 探测、应用探测**一律走它们**，不再 spawn `reg.exe`——否则父进程是 GUI（Tauri 桌面）时每次调用都会闪一个黑窗口，而且在禁用 `reg.exe` 的机器上会直接失败而不是降级。只有「打开文档的应用」与「必须脱离宿主存活的升级进程」例外，前者需要窗口、后者用 `DETACHED_PROCESS` 自带无控制台。
 - 读前加固只有一处判据：`fsaccess`（对应 Go 的 `internal/fsaccess`）。任务目录、任务记录、偏好文件在**读**之前都要求「私有的普通文件/目录」，语义是 **fail closed**（与 Go 的 store 层一致）：一份权限被改松的状态文件不能被当成可信输入去授权退出、上传或续租。列表类接口不会把它报成「没有任务」——那会让人以为工作副本丢了。**Windows 上这条判据是刻意的 no-op**：`Metadata` 只反映只读属性，套 POSIX 位会把每一个状态路径都判死；真实访问由 NTFS ACL 管，而 ACL 不通过 `Metadata` 暴露。所以 Windows 上的加固是「绝对路径 + 非重解析点 + 普通文件 + 体积上限」，不含权限私有。
 - Windows 的登录项有**两条途径**，装的时候依次尝试：先写当前用户的 `Run` 键，被组策略或安全软件锁住时（企业机器上常见）退到「启动」文件夹里的 `CloudFileAgent.lnk`。两条都用 `IShellLinkW`/`IPersistFile` 由 shell 自己维护格式，不手写二进制。`--status` 与设置界面会报出实际生效的是哪一条（`run-key` / `startup-folder`），因为这两种情况在任务管理器里长得完全不一样。两条途径都带上 `--autostart`：登录启动必须进托盘而不是抢焦点。
 - `cloudfile-native-host`：有界 stdio 消息、本机请求转交，以及安装/升级/回退用的命令行。

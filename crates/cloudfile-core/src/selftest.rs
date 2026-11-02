@@ -56,7 +56,7 @@ pub fn run(root: &Path, native_host: &Path) -> Value {
         registration(),
         task_store(root),
         exit_assessment(root),
-        webview(),
+        webview(native_host),
         browser_extension(root),
         login_item(),
         update_state(root),
@@ -187,13 +187,28 @@ fn exit_assessment(root: &Path) -> Check {
 
 /// Windows 的桌面外壳**依赖** WebView2，缺了就是打不开窗口。macOS 用系统 WebKit，
 /// 永远在，所以那一侧只需说明「不适用」。
-fn webview() -> Check {
+///
+/// 缺运行时的时候顺带报出「随包安装器能不能用」：现场最常问的就是这句，
+/// 一次自检直接回答「能不能免管理员自助装」，能省一轮沟通。
+fn webview(native_host: &Path) -> Check {
     match apps::webview2_version() {
         Some(version) => Check::pass("webview2", version),
-        None if cfg!(windows) => Check::fail(
-            "webview2",
-            "未检测到 WebView2 运行时；桌面任务中心无法打开窗口",
-        ),
+        None if cfg!(windows) => {
+            let exe_dir = native_host.parent().unwrap_or(Path::new("."));
+            let installer = crate::webview2_setup::available(
+                exe_dir,
+                Some(&crate::update::install_root(native_host)),
+            );
+            let hint = if installer {
+                "随包安装器可用：双击任务中心按提示安装，或执行 cloudfile-native-host --install-webview2（均不需要管理员）"
+            } else {
+                "未随包提供安装器：需手动安装或请 IT 预装"
+            };
+            Check::fail(
+                "webview2",
+                format!("未检测到 WebView2 运行时；桌面任务中心无法打开窗口；{hint}"),
+            )
+        }
         None => Check::report("webview2", "不适用（使用系统 WebKit）"),
     }
 }

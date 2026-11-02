@@ -119,11 +119,29 @@ pub fn initialize_workspace(root: &Path, home: &Path) -> Result<()> {
     let desired = crate::workspace::initial_root(root, home);
     let current = load(root)?.workspace_root;
     if should_reset_workspace(current.as_deref(), &defaults, &desired) {
-        update(root, |settings| {
+        // 修改逻辑（2026-11-03）：校正默认工作目录是**幂等的尽力而为**动作。
+        // 两个 Agent 进程同时启动时（登录项拉起 + 用户又双击、或在跑自检）settings.lock
+        // 可能短暂被占；原来这里把错误冒泡出去，`storage::root()` 就失败，整个进程
+        // 拒绝启动（本地门禁里就复现了：desktop --self-test 与另一实例同时初始化）。
+        // 锁竞争时跳过即可：设置下次启动还会再校正一次，不丢任何用户数据。
+        if let Err(error) = update(root, |settings| {
             settings.workspace_root = Some(desired.to_string_lossy().into_owned());
-        })?;
+        }) {
+            if !is_lock_contention(&error) {
+                return Err(error);
+            }
+        }
     }
     Ok(())
+}
+
+/// 错误链里是否存在「锁被另一个进程短暂占用」（`WouldBlock`）。
+fn is_lock_contention(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::WouldBlock)
+    })
 }
 
 /// 历史上作为「默认值」出现过的所有位置（含当前默认，这样切到新默认时也能纠正）。
@@ -429,5 +447,16 @@ mod tests {
         // 真正的坏数据仍然拒绝。
         plant(&path(root), b"not json");
         assert!(load(root).is_err());
+    }
+
+    /// 默认工作目录的校正必须容忍锁竞争：两个 Agent 进程同时启动时（登录项 + 双击、
+    /// 或自检与实例初始化重叠）不能让 `storage::root()` 失败 —— 那等于整个进程拒绝启动。
+    #[test]
+    fn workspace_defaults_are_best_effort_when_another_process_holds_the_lock() {
+        let (_directory, root) = crate::storage::test_root();
+        let _held = crate::storage::lock(&root.join("settings.lock")).unwrap();
+        // 锁被占时安静跳过；不该返回错误，也不该写出半截设置。
+        initialize_workspace(&root, Path::new("/tmp/cloudfile-selftest-home")).unwrap();
+        assert!(!path(&root).exists(), "锁竞争时不该写设置文件");
     }
 }

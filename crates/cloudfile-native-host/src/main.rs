@@ -40,6 +40,8 @@ Usage: cloudfile-native-host [command]
   --enable-autostart             start the agent at login
   --disable-autostart            stop starting the agent at login
   --install                      install or repair this machine from the update channel
+  --install-webview2             install the bundled WebView2 runtime for the current user
+                                 (silent, no administrator required; fixes a missing task centre)
   --set-update-source <url>      configure the update channel (with --public-key)
   --clear-update-source          remove the configured update channel
   --check-update                 report the available signed release, if any
@@ -193,6 +195,27 @@ fn run_command(args: &[String]) -> anyhow::Result<()> {
             let binary = host_binary()?;
             let dir = hostreg::manifest_dir()?;
             let registration = hostreg::state(&dir, &host, Some(&binary))?;
+            // 修改逻辑（2026-11-02）：运行时探测只做一次，`webview2` 与 `task_center`
+            // 必须出自同一个事实 —— 否则现场会看到「有版本号却说任务中心不可用」
+            // 这种自相矛盾的报告，反而更难判断。
+            // 注意：这里读的是注册表（`apps::webview2_version`），是**尽力探测**；
+            // 桌面进程用的是 Tauri 的同一入口（wry 的 GetAvailableCoreWebView2BrowserVersionString）。
+            // fixed-version 部署、运行时损坏或被策略拦下时两者可能不一致，所以
+            // `task_center` 只作参考，最终以桌面进程实际能不能建窗为准。
+            let webview2 = apps::webview2_version();
+            let task_center =
+                cloudfile_core::webview2::task_center_ready(cfg!(windows), webview2.as_deref());
+            // 随包安装器是否可用：缺运行时时现场/IT 据此决定「一键装到当前用户」还是「走下载页」。
+            // 校验失败也会报不可用（宁可不给按钮，也不执行来源不明的安装器）。
+            let current = std::env::current_exe()?;
+            let exe_dir = current
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("."));
+            let installer = cloudfile_core::webview2_setup::locate(
+                &exe_dir,
+                Some(&update::install_root(&binary)),
+            );
             let value = json!({
                 "version": cloudfile_core::VERSION,
                 "install_root": update::install_root(&binary).to_string_lossy(),
@@ -212,7 +235,18 @@ fn run_command(args: &[String]) -> anyhow::Result<()> {
                     // The desktop shell needs WebView2 on Windows; on macOS the
                     // system WebKit is always present, so `null` there means the
                     // check does not apply, not that it failed.
-                    "webview2": apps::webview2_version(),
+                    "webview2": webview2,
+                    // 扩展与现场支持据此回答「为什么没有任务中心」。
+                    "task_center": task_center,
+                    // 自助安装能力：`available=true` 表示可以直接装到当前用户（免管理员）。
+                    "installer": {
+                        "available": installer.is_ok(),
+                        "path": installer
+                            .as_ref()
+                            .ok()
+                            .map(|path| path.to_string_lossy().into_owned()),
+                        "error": installer.err().map(|error| error.to_string()),
+                    },
                 },
                 "exit": guard::assess(&root),
             });
@@ -237,13 +271,28 @@ fn run_command(args: &[String]) -> anyhow::Result<()> {
                 },
             )?;
             println!("{}", serde_json::to_string_pretty(&outcome)?);
-            // Registration succeeds without it — the native host works either
-            // way — but the desktop shell will not start, so say so now rather
-            // than let it fail opaquely later.
+            // 注册本身不依赖 WebView2（native host 与扩展照常工作），但任务中心窗口会打不开。
+            // 修改逻辑（2026-11-02）：以前只说「可能无法启动」。现在 Agent 缺运行时
+            // 会降级成后台运行，并支持随包安装器自助安装（免管理员），所以这里把
+            // 三条出路一起说清：桌面引导 / 命令行静默 / 手动下载。
             if cfg!(windows) && apps::webview2_version().is_none() {
+                let current = std::env::current_exe()?;
+                let installer_available = cloudfile_core::webview2_setup::available(
+                    current.parent().unwrap_or(Path::new(".")),
+                    Some(&update::install_root(&current)),
+                );
                 eprintln!(
-                    "警告：未检测到 WebView2 运行时，任务中心窗口可能无法启动。\n\
-                     请安装 Microsoft Edge WebView2 Runtime（当前 Windows 通常已内置）。"
+                    "警告：未检测到 WebView2 运行时，任务中心窗口无法打开（Agent 仍会在后台运行）。"
+                );
+                if installer_available {
+                    eprintln!(
+                        "  免管理员安装：双击任务中心按提示安装，或执行 \
+                         cloudfile-native-host --install-webview2"
+                    );
+                }
+                eprintln!(
+                    "  手动安装：Microsoft Edge WebView2 Runtime「常青版独立安装程序」{}",
+                    cloudfile_core::webview2::RUNTIME_DOWNLOAD_URL
                 );
             }
         }
@@ -273,6 +322,10 @@ fn run_command(args: &[String]) -> anyhow::Result<()> {
             );
         }
         "--install" => run_install(&root, &host, args)?,
+        // 自助安装 WebView2 运行时（静默、当前用户、免管理员）。
+        // 修改逻辑（2026-11-02 现场追问）：安装脚本/IT 需要一条不需要管理员、也不需要
+        // 用户会操作命令行之外东西的路径；桌面端在启动/托盘里用的是同一个安装器。
+        "--install-webview2" => run_install_webview2()?,
         "--set-update-source" => {
             let source = flag(args, "--set-update-source")
                 .ok_or_else(|| anyhow::anyhow!("--set-update-source requires a url"))?;
@@ -464,6 +517,21 @@ fn run_install(root: &Path, host: &str, args: &[String]) -> anyhow::Result<()> {
     // 先判「装得进去」再下载：别下完几 MB 才发现目录不可写（Go 的 :usable 也是这个顺序）。
     let install = update::install_root(&std::env::current_exe()?);
     ensure_install_root(&install)?;
+    // 修改逻辑（2026-11-02）：把发行 ZIP 里随包的 WebView2 安装器复制到**安装根**
+    // （`<安装根>/webview2/`）。`--install` 只把两个二进制下载到 `bin/<版本>/`，
+    // 不复制这一步的话，装完的机器上桌面进程找不到安装器 —— 而缺运行时的机器
+    // 往往既没有管理员权限、也打不开微软站点。失败只警告：安装本身不依赖它。
+    if let Ok(current) = std::env::current_exe() {
+        if let Some(exe_dir) = current.parent() {
+            match cloudfile_core::webview2_setup::ensure_in_install_root(exe_dir, &install) {
+                Ok(Some(path)) => eprintln!("WebView2 安装器已就位：{}", path.display()),
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("警告：未能把随包 WebView2 安装器放到安装根（{error:#}）。")
+                }
+            }
+        }
+    }
     // 修改逻辑（2026-10-26）：安装进程继承部署方注入的 CLOUDFILE_TRUSTED_ORIGINS，
     // 只有在这一步才拿得到（任务中心是登录后另起的进程，环境变量不会跟过去）。
     // 只在 config.json 不存在时写 —— 已装机器不会被重置。
@@ -525,6 +593,39 @@ fn run_install(root: &Path, host: &str, args: &[String]) -> anyhow::Result<()> {
         }
     };
 
+    // 修改逻辑（2026-11-02 现场）：任务中心窗口依赖 WebView2 运行时。缺失时**安装本身
+    // 仍然成功**（后台同步、浏览器里打开文件都不依赖它），但必须当场说清 ——
+    // 否则装完自动启动的任务中心只会弹一句英文原生错误框，用户不知道装什么。
+    // 放在启动之前：先让用户看到结论，再拉起那个没有窗口的进程。
+    let webview2 = apps::webview2_version();
+    let task_center_ready =
+        cloudfile_core::webview2::task_center_ready(cfg!(windows), webview2.as_deref());
+    // 随包安装器在不在：决定提示里给「一键安装」还是只能给下载页。
+    let current = std::env::current_exe()?;
+    let installer_available = cloudfile_core::webview2_setup::available(
+        current.parent().unwrap_or(Path::new(".")),
+        Some(&update::install_root(&current)),
+    );
+    if !task_center_ready {
+        // 优先给「不需要管理员」的自助路径：桌面端启动时会引导安装随包安装器，
+        // 脚本/IT 也可以用 --install-webview2 静默装当前用户。
+        eprintln!(
+            "警告：本机未检测到 Microsoft Edge WebView2 运行时，任务中心窗口无法显示。\n\
+             Agent 仍会在后台运行：已打开的本地副本与独占租约会继续；上传/提交要等任务中心恢复后再操作。\n\
+             处理（都不需要管理员权限）："
+        );
+        if installer_available {
+            eprintln!(
+                "  1. 双击任务中心，按中文提示「立即安装」（安装包已随 Agent 提供）；\n\
+                 2. 或执行 cloudfile-native-host --install-webview2（静默安装到当前用户）。"
+            );
+        }
+        eprintln!(
+            "  手动安装：下载「常青版独立安装程序（Evergreen Standalone Installer）」：{}",
+            cloudfile_core::webview2::RUNTIME_DOWNLOAD_URL
+        );
+    }
+
     let launched = if args.iter().any(|value| value == "--skip-launch") {
         false
     } else {
@@ -550,8 +651,55 @@ fn run_install(root: &Path, host: &str, args: &[String]) -> anyhow::Result<()> {
             "registration": registration,
             "login_item": login_item,
             "desktop_started": launched,
+            // 安装脚本/现场支持直接看这一段就知道「任务中心为什么没出现」。
+            "runtime": {
+                "webview2": webview2,
+                "task_center": task_center_ready,
+                // 有随包安装器时，缺运行时可以免管理员自助安装（桌面引导/--install-webview2）。
+                "installer": installer_available,
+            },
         }))?
     );
+    Ok(())
+}
+
+/// 用随包安装器把 WebView2 运行时装到**当前用户**（静默、免管理员）。
+///
+/// 桌面进程在启动/托盘里用的是同一个安装器，只是保留安装器界面让用户看到进度；
+/// 这里是给 `install.cmd` 与 IT 脚本用的无交互版本。安装失败返回非零退出码，
+/// 便于脚本判断（不要把「安装器跑完了」当成功，成功判据是运行时探测）。
+fn run_install_webview2() -> anyhow::Result<()> {
+    let current = std::env::current_exe()?;
+    let exe_dir = current
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| anyhow::anyhow!("无法定位安装目录"))?;
+    let installer =
+        cloudfile_core::webview2_setup::locate(&exe_dir, Some(&update::install_root(&current)))
+            .context("随包 WebView2 安装器不可用")?;
+    let outcome = cloudfile_core::webview2_setup::install(
+        &installer,
+        true,
+        cloudfile_core::webview2_setup::DEFAULT_TIMEOUT,
+    )?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({
+            "installer": installer.to_string_lossy(),
+            "exit_code": outcome.exit_code,
+            "installed": outcome.installed,
+            "webview2": outcome.version,
+        }))?
+    );
+    if !outcome.installed {
+        let code = outcome
+            .exit_code
+            .map_or_else(|| "无".to_string(), |code| code.to_string());
+        anyhow::bail!(
+            "WebView2 运行时未安装成功（安装器退出码：{code}）。\n{}",
+            cloudfile_core::webview2::runtime_install_failed_guidance(outcome.exit_code)
+        );
+    }
     Ok(())
 }
 

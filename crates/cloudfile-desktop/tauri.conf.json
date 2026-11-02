@@ -7,9 +7,9 @@
     "withGlobalTauri":true,
     "macOSPrivateApi":true,
     "windows":[
-      {"label":"main","title":"CloudFile · 任务中心","width":1040,"height":760,"minWidth":760,"minHeight":520},
-      {"label":"float","url":"float.html","width":56,"height":56,"resizable":false,"decorations":false,"transparent":true,"shadow":false,"alwaysOnTop":true,"skipTaskbar":true,"visible":false},
-      {"label":"toast","url":"toast.html","width":360,"height":72,"resizable":false,"decorations":false,"transparent":true,"shadow":false,"alwaysOnTop":true,"skipTaskbar":true,"focus":false,"visible":false}
+      {"label":"main","create":false,"title":"CloudFile · 任务中心","width":1040,"height":760,"minWidth":760,"minHeight":520},
+      {"label":"float","create":false,"url":"float.html","width":56,"height":56,"resizable":false,"decorations":false,"transparent":true,"shadow":false,"alwaysOnTop":true,"skipTaskbar":true,"visible":false},
+      {"label":"toast","create":false,"url":"toast.html","width":360,"height":72,"resizable":false,"decorations":false,"transparent":true,"shadow":false,"alwaysOnTop":true,"skipTaskbar":true,"focus":false,"visible":false}
     ],
     "security":{"csp":"default-src 'self'; script-src 'self'; style-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-src 'none'"}
   },
