@@ -80,7 +80,22 @@ fn help_lists_the_self_test_flag() {
 
 #[test]
 fn the_self_test_answers_with_json_and_never_opens_a_window() {
-    let output = desktop(&["--self-test"]);
+    // CI and another installed Agent may hold a real CloudFileAgent lock.
+    // Self-test must run against its own disposable OS-user directory, never
+    // the developer's working copies or another test process.
+    let temporary = tempfile::tempdir().unwrap();
+    // macOS /var may be a symlink to /private/var; Agent2 private_dir
+    // intentionally rejects symlinked ancestors, even for test-only state.
+    let isolated_home = temporary
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("CloudFileAgent");
+    let output = Command::new(env!("CARGO_BIN_EXE_cloudfile-desktop"))
+        .arg("--self-test")
+        .env("CLOUDFILE_AGENT2_HOME", &isolated_home)
+        .output()
+        .unwrap();
     // 0 = 全绿；1 = 有项确实不工作。两者都说明它跑完了并给出了结论
     // （本机有没有 native host 是环境差异，不是这个用例要判的事）。
     assert!(
