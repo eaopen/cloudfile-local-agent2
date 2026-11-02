@@ -51,7 +51,7 @@ pub const LEGACY_HOSTS: &[&str] = &[
     "com.cloudfile.local_agent",
 ];
 
-pub const DESCRIPTION: &str = "CloudFile Agent 2.2 Native Host";
+pub const DESCRIPTION: &str = "CloudFile Agent Native Host";
 
 /// 本产品对应的 Chrome 扩展 ID：**固定值**，不是每台机器一个。
 ///
@@ -244,6 +244,60 @@ pub fn state(dir: &Path, host: &str, _expected_binary: Option<&Path>) -> Result<
     registration.foreign = !cloudfile_owned_manifest(&value);
     registration.binary = binary;
     Ok(registration)
+}
+
+/// 路径归属比较：`\\?\` 前缀、分隔符、Windows 大小写都不算差异。
+fn same_path(a: &Path, b: &Path) -> bool {
+    fn norm(p: &Path) -> String {
+        let text = p.to_string_lossy();
+        let text = text.strip_prefix(r"\\?\").unwrap_or(&text).to_string();
+        let text = text.replace('/', std::path::MAIN_SEPARATOR_STR);
+        if cfg!(windows) {
+            text.to_lowercase()
+        } else {
+            text
+        }
+    }
+    norm(a) == norm(b)
+}
+
+/// 注册自愈：manifest 还指着本机的程序，但 Windows 的注册表键丢了或指错了 → 重写。
+///
+/// 只修这一种形态：
+/// - `--unregister-host`（界面上的「卸载本机 Host」）会把 manifest 和键一起删，
+///   所以**manifest 还在**本身就说明不是用户主动卸载；
+/// - 键丢了只会是清理工具删的，或者某次注册表写入失败留下的半坏状态 ——
+///   这种状态下扩展只会得到「Agent 未就绪」，用户唯一的出路是重跑 install.cmd；
+/// - manifest 指向别人的程序（foreign）或指向别的路径，一律不碰。
+///
+/// 返回 `Some(说明)` 表示这次真的修了，`None` 表示本来就对、或者不该动。
+pub fn repair_registration(dir: &Path, host: &str, expected: &Path) -> Result<Option<String>> {
+    let current = state(dir, host, None)?;
+    let Some(binary) = current.binary.as_deref() else {
+        // 没有注册（或已被主动卸载）：不凭空造一个。
+        return Ok(None);
+    };
+    if current.foreign || !same_path(binary, expected) {
+        return Ok(None);
+    }
+    #[cfg(windows)]
+    {
+        let (key, want) = registry_update(host, Some(&current.manifest_path))?;
+        let Some(want) = want else { return Ok(None) };
+        if crate::winreg::read_string(&key, "").as_deref() == Some(want.as_str()) {
+            return Ok(None);
+        }
+        crate::winreg::write_string(&key, "", &want)?;
+        Ok(Some(format!(
+            "re-registered {host}: 注册表键缺失或指向别处，已按 manifest 补回"
+        )))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (host, expected);
+        // 非 Windows 的注册就是那个 manifest 文件本身，文件在即已注册。
+        Ok(None)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -567,6 +621,59 @@ mod tests {
         install(&manifest_dir, DEV_HOST, ID, &path, true).unwrap();
         unregister(&manifest_dir, DEV_HOST).unwrap();
         assert!(!manifest_path(&manifest_dir, DEV_HOST).exists());
+    }
+
+    /// 注册自愈的四种形态。现场（2026-11-02）：扩展报「Agent 未就绪」、重跑
+    /// install.cmd 才好 —— 其中一类就是「manifest 还在、HKCU 那个键没了」。
+    /// 任务中心每次登录都会启动，正好把这种情况补回来；但绝不能越界：
+    /// 主动卸载过的、指向别人程序的，一律不准动。
+    #[test]
+    fn a_lost_registry_key_is_repaired_only_when_the_manifest_is_ours() {
+        let (_dir, base) = crate::storage::test_root();
+        let manifest_dir = base.join("hosts");
+        let path = binary(&base);
+        // 专用 host 名：不碰本机真实的 dev / current_agent 注册。
+        let host = "com.cloudfile.agent22.heal";
+
+        // 1) 没有注册（或已被主动卸载）→ 不凭空造一个。
+        assert!(repair_registration(&manifest_dir, host, &path)
+            .unwrap()
+            .is_none());
+
+        install(&manifest_dir, host, ID, &path, false).unwrap();
+        // 2) 注册完好 → 什么都不做（幂等）。
+        assert!(repair_registration(&manifest_dir, host, &path)
+            .unwrap()
+            .is_none());
+
+        // 3) 运行的程序不是 manifest 指的那个 → 不碰别人的注册。
+        let other = base.join(if cfg!(windows) {
+            "elsewhere.exe"
+        } else {
+            "elsewhere"
+        });
+        fs::write(&other, b"bin").unwrap();
+        let other = other.canonicalize().unwrap();
+        assert!(repair_registration(&manifest_dir, host, &other)
+            .unwrap()
+            .is_none());
+
+        // 4) manifest 在、注册表键被删 → 补回来（就是现场那种「Agent 未就绪」）。
+        #[cfg(windows)]
+        {
+            let (key, _) = registry_update(host, None).unwrap();
+            crate::winreg::delete_key(&key).unwrap();
+            assert!(crate::winreg::read_string(&key, "").is_none());
+            let note = repair_registration(&manifest_dir, host, &path).unwrap();
+            assert!(note.is_some(), "键缺失时必须补回来");
+            assert!(crate::winreg::read_string(&key, "").is_some());
+            // 补回来之后再跑一次就该是 no-op。
+            assert!(repair_registration(&manifest_dir, host, &path)
+                .unwrap()
+                .is_none());
+        }
+
+        unregister(&manifest_dir, host).unwrap();
     }
 
     #[test]

@@ -23,7 +23,7 @@ const DESKTOP_NAME: &str = if cfg!(windows) {
 };
 
 const USAGE: &str = "\
-CloudFile Agent 2.2
+CloudFile Agent
 
 Usage: cloudfile-native-host [command]
 

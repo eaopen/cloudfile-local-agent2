@@ -1177,6 +1177,20 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
         Err(_) => return Ok(()),
     };
     ipc::recover(&root)?;
+    // 注册自愈（2026-11-02）：注册表键被清理工具删掉、或某次注册表写入失败时，
+    // 扩展只会看到「Agent 未就绪」，用户唯一的出路是重跑 install.cmd ——
+    // 而任务中心每次登录都会启动，正好是把它补回来的地方。
+    // 只修「manifest 还指着本机程序、键却没了/指错」这一种：主动卸载会把 manifest
+    // 一起删掉，所以那种情况这里什么都不做（见 hostreg::repair_registration）。
+    if let (Ok(dir), Some(binary)) = (hostreg::manifest_dir(), host_binary()) {
+        match hostreg::repair_registration(&dir, hostreg::HOST, &binary) {
+            Ok(Some(note)) => eprintln!("CloudFile desktop: {note}"),
+            Ok(None) => {}
+            Err(error) => {
+                eprintln!("CloudFile desktop: registration self-heal failed: {error:#}")
+            }
+        }
+    }
     let uploading = Arc::new(Mutex::new(HashSet::new()));
     let quitting = Arc::new(AtomicBool::new(false));
     let state = State {

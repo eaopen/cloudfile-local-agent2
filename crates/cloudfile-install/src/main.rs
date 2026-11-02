@@ -1,4 +1,4 @@
-//! CloudFile Agent 2.2 的引导安装体（bootstrap）。
+//! CloudFile Agent 的引导安装体（bootstrap）。
 //!
 //! 空白机器上没有任何可运行的东西，而 `cloudfile-native-host --install` 需要一个**已存在的**
 //! 二进制来跑。这个程序就是那个「先有鸡」的小东西，对应 Go 侧的 `install.cmd`：
@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 const PINNED_KEY: Option<&str> = option_env!("CLOUDFILE_INSTALL_PUBLIC_KEY");
 
 const USAGE: &str = "\
-CloudFile Agent 2.2 bootstrap
+CloudFile Agent bootstrap
 
 Usage: cloudfile-install [options] [-- <extra cloudfile-native-host --install options>]
 
