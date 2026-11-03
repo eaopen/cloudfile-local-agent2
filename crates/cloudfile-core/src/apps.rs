@@ -254,17 +254,18 @@ pub fn open_path(root: &Path, mode: &str, name: &str, path: &Path) -> Result<()>
     }
     let extension = extension_of(name);
     if !DEFAULT_OPENABLE.contains(&extension.as_str()) {
-        // 说清楚「缺什么」和「怎么办」：原来只有一句 file type requires a locally
-        // configured application，桌面端又把它压成「未能打开本地应用」，用户无从下手。
+        // 说清楚「缺什么」和「怎么办」。不指向任务中心的「打开规则」—— 界面上没有这个
+        // 入口（只有 config.json 里有），让用户去找一个不存在的地方等于没提示。
         bail!(
             "这台机器上没有能打开 .{extension} 的程序。\
-             装好对应软件后重试，或在任务中心「设置 → 打开规则」里指定它的可执行文件"
+             请先装对应软件后重试；装好后在 Windows「设置 → 应用 → 默认应用」里\
+             把 .{extension} 关联到它"
         );
     }
     open::that(path).map_err(|error| {
         anyhow::anyhow!(
-            "这台机器没有登记用哪个程序打开 .{extension}（{error}）。\
-             到任务中心「设置 → 打开规则」指定一次即可"
+            "这台机器没有为 .{extension} 指定默认程序（{error}）。\
+             装好对应软件后，在 Windows「设置 → 应用 → 默认应用」里按文件类型关联一次即可"
         )
     })?;
     Ok(())
