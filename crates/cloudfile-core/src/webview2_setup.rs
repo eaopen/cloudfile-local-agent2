@@ -166,6 +166,82 @@ pub fn expected_digest(installer: &Path) -> Result<String> {
     )
 }
 
+/// 从更新通道把安装器取到**安装根**（内网部署的常态路径）。
+///
+/// 现场（2026-11-03）：内网机器缺运行时，既没有管理员也打不开微软站点，而通道本来是通的 ——
+/// 安装器跟着通道走，就成了一条不需要人手介入的路。
+///
+/// 约定：`<update_source>/webview2/MicrosoftEdgeWebview2Setup.exe` 配一份
+/// `<update_source>/webview2/installer.sha256`（一条十六进制）。**没有摘要就不下载**：
+/// 这个 exe 会以当前用户身份跑安装程序，来源不明的文件不能执行。摘要一旦对上，
+/// 内容就不可能被换成别的程序（与扩展清单同一模型：http 通道不签名，但摘要即约束）。
+///
+/// 已经存在同摘要副本时直接复用，不重复拉几百 MB。
+pub fn fetch_from(source: &str, install_root: &Path) -> Result<PathBuf> {
+    let base = source.trim().trim_end_matches('/');
+    if base.is_empty() {
+        bail!("没有配置更新通道，无法获取 WebView2 安装器");
+    }
+    let url = format!("{base}/{INSTALLER_DIR}/{INSTALLER_NAME}");
+    let digest_url = format!("{base}/{INSTALLER_DIR}/{DIGEST_NAME}");
+    let client = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(900))
+        .build()?;
+
+    let expected = client
+        .get(&digest_url)
+        .send()
+        .with_context(|| format!("无法获取安装器摘要：{digest_url}"))?;
+    if expected.status() != 200 {
+        bail!(
+            "通道里没有 {DIGEST_NAME}（HTTP {}）：安装器必须带摘要才能执行",
+            expected.status()
+        );
+    }
+    let expected = expected.text()?.trim().to_ascii_lowercase();
+    if expected.len() != 64 || !expected.chars().all(|c| c.is_ascii_hexdigit()) {
+        bail!("通道里的 {DIGEST_NAME} 不是合法的 SHA-256");
+    }
+
+    let directory = install_root.join(INSTALLER_DIR);
+    std::fs::create_dir_all(&directory)
+        .with_context(|| format!("无法创建安装器目录：{}", directory.display()))?;
+    let target = directory.join(INSTALLER_NAME);
+    if target.is_file() && verify(&target, &expected).is_ok() {
+        return Ok(target);
+    }
+
+    let staging = directory.join(format!("{INSTALLER_NAME}.downloading"));
+    let _ = std::fs::remove_file(&staging);
+    let mut response = client
+        .get(&url)
+        .send()
+        .with_context(|| format!("无法下载 WebView2 安装器：{url}"))?;
+    if response.status() != 200 {
+        bail!("下载 WebView2 安装器失败：HTTP {}", response.status());
+    }
+    {
+        // 流式写盘：独立安装器有几百 MB，不能先读进内存再落盘。
+        let mut file = std::fs::File::create(&staging)
+            .with_context(|| format!("无法写入：{}", staging.display()))?;
+        std::io::copy(&mut response, &mut file)?;
+        file.sync_all()?;
+    }
+    if let Err(error) = verify(&staging, &expected) {
+        let _ = std::fs::remove_file(&staging);
+        return Err(error.context("下载到的安装器与通道摘要不一致，已丢弃"));
+    }
+    let _ = std::fs::remove_file(&target);
+    std::fs::rename(&staging, &target)
+        .with_context(|| format!("无法就位：{}", target.display()))?;
+    std::fs::write(
+        directory.join(DIGEST_NAME),
+        format!("{expected}\n").as_bytes(),
+    )?;
+    Ok(target)
+}
+
 /// 一个「定位 + 校验」组合：找到路径后立刻校验，供 [`locate`] 复用。
 fn verify_expected(installer: &Path) -> Result<()> {
     if !installer.is_file() {
@@ -288,6 +364,57 @@ mod tests {
         let path = root.join(name);
         std::fs::write(&path, body).unwrap();
         path
+    }
+
+    /// 极简 HTTP 服务：只回答两次 GET（摘要 + 安装器），够 `fetch_from` 走完。
+    fn serve_once(digest: &str, payload: &[u8]) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (digest, payload) = (digest.to_string(), payload.to_vec());
+        std::thread::spawn(move || {
+            for _ in 0..2 {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut buffer = [0u8; 1024];
+                let read = std::io::Read::read(&mut stream, &mut buffer).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+                let body = if request.contains(DIGEST_NAME) {
+                    digest.clone().into_bytes()
+                } else {
+                    payload.clone()
+                };
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = std::io::Write::write_all(&mut stream, header.as_bytes());
+                let _ = std::io::Write::write_all(&mut stream, &body);
+            }
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    /// 从通道取的安装器必须与通道摘要一致 —— 这个 exe 会以当前用户身份跑安装程序，
+    /// 校验不过就一个字节都不留（现场是内网 http 通道，没有签名可用）。
+    #[test]
+    fn a_fetched_installer_must_match_the_published_digest() {
+        let (_dir, base) = crate::storage::test_root();
+        let payload = b"installer-bytes".to_vec();
+        let good = format!("{:x}", Sha256::digest(&payload));
+
+        let path = fetch_from(&serve_once(&good, &payload), &base).unwrap();
+        assert_eq!(path, base.join(INSTALLER_DIR).join(INSTALLER_NAME));
+        assert_eq!(std::fs::read(&path).unwrap(), payload);
+        // 边车要跟着落下来：下次 `locate` 走本地路径时还得能校验。
+        assert!(base.join(INSTALLER_DIR).join(DIGEST_NAME).is_file());
+
+        // 摘要对不上：报错，且安装根里不能留下半截文件。
+        let other = base.join("other");
+        let error = fetch_from(&serve_once(&"0".repeat(64), &payload), &other).unwrap_err();
+        assert!(format!("{error:#}").contains("摘要"), "{error:#}");
+        assert!(!other.join(INSTALLER_DIR).join(INSTALLER_NAME).exists());
+        assert!(!other.join(INSTALLER_DIR).join(DIGEST_NAME).exists());
     }
 
     #[test]

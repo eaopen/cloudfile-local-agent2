@@ -130,6 +130,43 @@ fn runtime_notice() -> bool {
     open
 }
 
+/// 本地没有随包安装器时，从配置的更新通道取一份（内网部署的常态）。
+///
+/// 只在**手动双击且确实缺运行时**时调用 —— 登录自启不下载，否则一台一直没装运行时的
+/// 机器每次登录都要拉几百 MB。下载前必须问一次：这是几百 MB、可能几分钟，
+/// 用户有权知道自己在等什么。
+fn fetch_installer(root: &Path, install_root: &Path) -> Option<PathBuf> {
+    let source = session::config(root)
+        .ok()
+        .and_then(|config| config.update_source)
+        .filter(|value| !value.trim().is_empty())?;
+    if !cloudfile_core::winbox::ask(
+        "获取 WebView2 运行时",
+        &format!(
+            "本机缺少 WebView2 运行时，任务中心打不开窗口。\n\n\
+             要从内网通道下载安装包吗？\n{source}\n\n\
+             安装包约 200MB，下载完会自动安装（不需要管理员），装好任务中心随即打开。"
+        ),
+    ) {
+        return None;
+    }
+    eprintln!("CloudFile desktop: 正在从通道获取 WebView2 安装器：{source}");
+    match cloudfile_core::webview2_setup::fetch_from(&source, install_root) {
+        Ok(path) => Some(path),
+        Err(error) => {
+            record_launch_failure(&format!("webview2 installer fetch failed: {error:#}"));
+            cloudfile_core::winbox::notify(
+                "获取 WebView2 安装包失败",
+                &format!(
+                    "{error:#}\n\n\
+                     可以让管理员把安装包放到安装根的 webview2/ 目录，或稍后重试。"
+                ),
+            );
+            None
+        }
+    }
+}
+
 /// 引导用户用**随包安装器**把 WebView2 装到当前用户（不需要管理员）。
 ///
 /// 返回是否装好。调用方负责「装好后怎么办」的提示：启动阶段装好可以直接建窗口，
@@ -1503,9 +1540,15 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
     // 手动双击启动：先给一次「免管理员自助安装」的机会 —— 装好就能在**同一次启动**里
     // 直接建窗口，用户不用再退出重开。登录项启动（--autostart）不弹框：每次登录弹一次
     // 没人受得了；托盘菜单里有安装入口，用户随时能点。
+    let mut installer = installer;
     if missing_now && !autostart {
         // 无论下面装没装成，自动入口都不再重复弹说明（用户已经明确看到过了）。
         RUNTIME_NOTICE_SHOWN.store(true, Ordering::SeqCst);
+        // 本地没有随包安装器时，问一句要不要从内网通道取（内网部署的常态路径）。
+        // 只在手动双击时做：登录自启每次拉几百 MB 没人受得了。
+        if installer.is_none() {
+            installer = fetch_installer(&root, &install_root);
+        }
         if let Some(installer) = installer.as_deref() {
             match offer_runtime_install(installer) {
                 Ok(true) => {
@@ -1898,7 +1941,15 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
                             show(&handle);
                             match session::launch(&root, &task.task_id) {
                                 Ok(()) => json!({"ok":true}),
-                                Err(_) => wire::error("文件已保留，未能打开本地应用，请在任务中心查看"),
+                                // 不吞掉原因：原来固定回一句「未能打开本地应用」，
+                                // 到底是缺程序、没关联还是程序起不来，现场完全看不出来。
+                                // 具体原因（含扩展名与下一步）由 core 给出，这里原样带出去，
+                                // 并且在窗口里弹一条不抢焦点的提示 —— 用户当时就在看任务中心。
+                                Err(error) => {
+                                    let reason = format!("没能打开本地应用：{error}");
+                                    present_toast(&handle, "warning", &reason);
+                                    wire::error(&format!("文件已保留，{reason}"))
+                                }
                             }
                         }
                         Err(error) => wire::error(&error.to_string()),

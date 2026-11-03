@@ -674,9 +674,27 @@ fn run_install_webview2() -> anyhow::Result<()> {
         .parent()
         .map(Path::to_path_buf)
         .ok_or_else(|| anyhow::anyhow!("无法定位安装目录"))?;
-    let installer =
-        cloudfile_core::webview2_setup::locate(&exe_dir, Some(&update::install_root(&current)))
-            .context("随包 WebView2 安装器不可用")?;
+    let install_root = update::install_root(&current);
+    // 先找随包的；没有就**从更新通道取**（2026-11-03：内网机器没有管理员、也打不开
+    // 微软站点，而通道本来是通的 —— 安装器跟着通道走才是能落地的那条路）。
+    let installer = match cloudfile_core::webview2_setup::locate(&exe_dir, Some(&install_root)) {
+        Ok(path) => path,
+        Err(_) => {
+            let config_root = root()?;
+            let source = session::config(&config_root)?
+                .update_source
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "本机没有随包 WebView2 安装器，也没有配置更新通道。\n\
+                         请把 {}/ 放进安装根，或先设置更新通道后重试",
+                        cloudfile_core::webview2_setup::INSTALLER_DIR
+                    )
+                })?;
+            eprintln!("本地没有随包安装器，正在从更新通道获取：{source}");
+            cloudfile_core::webview2_setup::fetch_from(&source, &install_root)?
+        }
+    };
     let outcome = cloudfile_core::webview2_setup::install(
         &installer,
         true,

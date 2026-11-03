@@ -135,10 +135,64 @@ fn valid_extension(value: &str) -> bool {
 /// Types the agent will hand to the OS default handler. Anything else needs an
 /// explicit rule or a detected application, so an unexpected type is not
 /// silently launched.
+///
+/// 修改逻辑（2026-11-03）：补上设计类扩展名。现场 `.prt` 打不开，提示只写
+/// 「未能打开本地应用」—— 根因就是它不在这张表里，而任务中心又把它当成 CAD 文件
+/// 去提示「可能依赖其他参照文件」，两边说法对不上。
+///
+/// `.prt` / `.asm` **刻意不绑到某个具体程序**：Siemens NX 和 Creo(Pro/E) 都用这两个
+/// 扩展名，猜错就会拿另一个软件去开。交给系统关联（用户机上装的是哪个，关联就是哪个），
+/// 没关联时再引导去配「打开规则」。
 const DEFAULT_OPENABLE: &[&str] = &[
-    "txt", "md", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "csv",
-    "rtf", "png", "jpg", "jpeg", "gif", "tif", "tiff", "bmp", "dwg", "dxf", "step", "stp", "iges",
-    "igs", "sldprt", "sldasm", "slddrw",
+    "txt",
+    "md",
+    "pdf",
+    "doc",
+    "docx",
+    "xls",
+    "xlsx",
+    "ppt",
+    "pptx",
+    "odt",
+    "ods",
+    "odp",
+    "csv",
+    "rtf",
+    "png",
+    "jpg",
+    "jpeg",
+    "gif",
+    "tif",
+    "tiff",
+    "bmp",
+    "dwg",
+    "dxf",
+    "dwt",
+    "step",
+    "stp",
+    "iges",
+    "igs",
+    "sldprt",
+    "sldasm",
+    "slddrw",
+    "prt",
+    "asm",
+    "catpart",
+    "catproduct",
+    "ipt",
+    "iam",
+    "idw",
+    "ipn",
+    "skp",
+    "3dm",
+    "rvt",
+    "rfa",
+    "nwd",
+    "nwc",
+    "nwf",
+    "stl",
+    "obj",
+    "fcstd",
 ];
 
 pub fn validate_rules(rules: &[OpenRule]) -> Result<()> {
@@ -198,10 +252,21 @@ pub fn open_path(root: &Path, mode: &str, name: &str, path: &Path) -> Result<()>
             return spawn(&program, &command);
         }
     }
-    if !DEFAULT_OPENABLE.contains(&extension_of(name).as_str()) {
-        bail!("file type requires a locally configured application");
+    let extension = extension_of(name);
+    if !DEFAULT_OPENABLE.contains(&extension.as_str()) {
+        // 说清楚「缺什么」和「怎么办」：原来只有一句 file type requires a locally
+        // configured application，桌面端又把它压成「未能打开本地应用」，用户无从下手。
+        bail!(
+            "这台机器上没有能打开 .{extension} 的程序。\
+             装好对应软件后重试，或在任务中心「设置 → 打开规则」里指定它的可执行文件"
+        );
     }
-    open::that(path)?;
+    open::that(path).map_err(|error| {
+        anyhow::anyhow!(
+            "这台机器没有登记用哪个程序打开 .{extension}（{error}）。\
+             到任务中心「设置 → 打开规则」指定一次即可"
+        )
+    })?;
     Ok(())
 }
 
@@ -660,6 +725,27 @@ pub fn names() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 现场（2026-11-03）：`.prt` 点了「本地查看」只回一句「未能打开本地应用」，
+    /// 根因是它不在这张表里 —— 而任务中心又把它当 CAD 文件提示参照文件，两边说法对不上。
+    #[test]
+    fn design_file_extensions_are_handed_to_the_os_handler() {
+        for extension in [
+            "prt", "asm", "catpart", "ipt", "sldprt", "dwg", "step", "3dm",
+        ] {
+            assert!(
+                DEFAULT_OPENABLE.contains(&extension),
+                ".{extension} 应该交给系统关联打开"
+            );
+        }
+        // 反过来：可执行文件绝不在这张表里（安全约束不能因为加 CAD 扩展名而放松）。
+        for extension in ["exe", "bat", "ps1", "cmd"] {
+            assert!(
+                !DEFAULT_OPENABLE.contains(&extension),
+                ".{extension} 不该被悄悄启动"
+            );
+        }
+    }
 
     /// A program path that is absolute on the host OS. Rules must not hard-code
     /// a Unix path: `Path::is_absolute` is false for `/usr/bin/tool` on Windows,
