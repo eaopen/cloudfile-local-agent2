@@ -953,6 +953,25 @@ mod tests {
         assert!(super::nx_reads_unicode_paths(r"D:\NX\UGII\ugraf.exe"));
     }
 
+    /// 手动跑的端到端：让 `open_path` 真的把部件交给本机 NX。
+    /// 默认 `#[ignore]` —— 它会拉起一个完整的 NX 进程（几十秒、几百兆内存），
+    /// 不能进 CI；在受限会话里（进程随命令结束被回收）也会被连带杀掉，
+    /// 所以要在真实桌面上跑：
+    /// `CLOUDFILE_NX_SAMPLE=D:\tmp\arrow.prt cargo test -p cloudfile-core
+    /// opens_a_part_through_the_detected_nx -- --ignored --nocapture`
+    /// 通过的标准是 NX 标题里出现 `[<文件名>]`，而不是「进程起来了」。
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn opens_a_part_through_the_detected_nx() {
+        let sample = std::env::var("CLOUDFILE_NX_SAMPLE").expect("需要 CLOUDFILE_NX_SAMPLE");
+        let path = Path::new(&sample);
+        assert!(path.is_file(), "样例部件不存在：{sample}");
+        let root = std::env::temp_dir().join("cloudfile-nx-open");
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        open_path(&root, "local-edit", &name, path).expect("应当把部件交给 NX");
+    }
+
     /// A program path that is absolute on the host OS. Rules must not hard-code
     /// a Unix path: `Path::is_absolute` is false for `/usr/bin/tool` on Windows,
     /// so such a test passes locally and fails the Windows runner.
