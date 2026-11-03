@@ -1339,6 +1339,17 @@ fn main() {
             // 自检必须在**建窗口之前**结束：它要在装坏了的机器上也能给出结论。
             std::process::exit(self_test());
         }
+        // 诊断用：两个运行时探测入口在任何 webview 存在之前各自给什么答案。
+        // 2026-11-03 真机验证时靠它定位「有运行时却被判成缺失、于是只出托盘」。
+        Some("--probe-runtime") => {
+            println!("tauri::webview_version() = {:?}", tauri::webview_version());
+            println!(
+                "apps::webview2_version()  = {:?}",
+                cloudfile_core::apps::webview2_version()
+            );
+            println!("runtime_missing()         = {}", runtime_missing());
+            return;
+        }
         Some("--help") | Some("-h") => {
             print!("{USAGE}");
             return;

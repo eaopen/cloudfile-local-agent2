@@ -135,12 +135,31 @@ pub fn initialize_workspace(root: &Path, home: &Path) -> Result<()> {
     Ok(())
 }
 
-/// 错误链里是否存在「锁被另一个进程短暂占用」（`WouldBlock`）。
+/// 错误链里是否存在「锁被另一个进程短暂占用」。
+///
+/// 两个平台的内核错误码不一样，判据必须都认：
+/// - Unix 的 `flock` 冲突是 `EWOULDBLOCK` → `ErrorKind::WouldBlock`；
+/// - Windows 的 `fs2` 走 `LockFileEx`，冲突是 `ERROR_LOCK_VIOLATION`(33) /
+///   `ERROR_SHARING_VIOLATION`(32)，`io::ErrorKind` 落不到 `WouldBlock`。
+///   只判 `WouldBlock` 的话，这个「锁竞争时安静跳过」在 Windows 上根本不生效 ——
+///   实测：`workspace_defaults_are_best_effort_when_another_process_holds_the_lock`
+///   在 Windows 上 panic，正是这个原因（2026-11-03 真机验证）。
 fn is_lock_contention(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
-        cause
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(|io| io.kind() == std::io::ErrorKind::WouldBlock)
+        let Some(io) = cause.downcast_ref::<std::io::Error>() else {
+            return false;
+        };
+        if io.kind() == std::io::ErrorKind::WouldBlock {
+            return true;
+        }
+        #[cfg(windows)]
+        {
+            matches!(io.raw_os_error(), Some(32) | Some(33))
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
     })
 }
 
