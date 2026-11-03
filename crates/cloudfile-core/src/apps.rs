@@ -196,6 +196,23 @@ const DEFAULT_OPENABLE: &[&str] = &[
     "stl",
     "obj",
     "fcstd",
+    // 仿真数据文件（2026-11-03 现场）：.dta/.erg 及 *_for_modN/*_from_modN 变体。
+    // 只列小写——`extension_of()` 比较前统一下转，`.dta_for_Mod1` 自然命中
+    // `dta_for_mod1`，不用把大小写变体再抄一遍。
+    "erg",
+    "input",
+    "dta",
+    "out",
+    "in",
+    "dta_for_mod1",
+    "dta_from_mod1",
+    "dta_for_mod2",
+    "dta_from_mod2",
+    "dta_for_mod3",
+    "dta_from_mod3",
+    "erg_from_mod1",
+    "erg_from_mod2",
+    "erg_from_mod3",
 ];
 
 pub fn validate_rules(rules: &[OpenRule]) -> Result<()> {
@@ -970,6 +987,43 @@ mod tests {
         let root = std::env::temp_dir().join("cloudfile-nx-open");
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
         open_path(&root, "local-edit", &name, path).expect("应当把部件交给 NX");
+    }
+
+    /// 现场（2026-11-03）：仿真数据文件点「本地查看」被白名单挡住。
+    /// 用户列的 23 个名字里有大小写变体（`.dta_for_Mod1` 等），`extension_of()`
+    /// 比较前下转，所以名单只收小写 —— 这里把两条路径都钉住。
+    #[test]
+    fn simulation_data_suffixes_are_openable() {
+        for name in [
+            "run.erg",
+            "run.input",
+            "run.dta",
+            "run.out",
+            "run.in",
+            "run.dta_for_mod1",
+            "run.dta_for_Mod1",
+            "run.dta_from_mod1",
+            "run.dta_from_Mod1",
+            "run.dta_for_mod2",
+            "run.dta_for_Mod2",
+            "run.dta_from_mod2",
+            "run.dta_from_Mod2",
+            "run.dta_for_mod3",
+            "run.dta_for_Mod3",
+            "run.dta_from_mod3",
+            "run.dta_from_Mod3",
+            "run.erg_from_mod1",
+            "run.erg_from_Mod1",
+            "run.erg_from_mod2",
+            "run.erg_from_Mod2",
+            "run.erg_from_mod3",
+            "run.erg_from_Mod3",
+        ] {
+            assert!(
+                DEFAULT_OPENABLE.contains(&extension_of(name).as_str()),
+                "{name} 应该交给系统关联打开"
+            );
+        }
     }
 
     /// A program path that is absolute on the host OS. Rules must not hard-code
