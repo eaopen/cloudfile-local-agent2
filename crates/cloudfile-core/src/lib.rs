@@ -17,6 +17,10 @@ pub mod storage;
 pub mod update;
 /// 桌面端在 GNU 工具链下必需的外部加载器（`WebView2Loader.dll`）。
 pub mod webview2;
+/// 随包携带的 WebView2 安装器：缺运行时时由 Agent 在当前用户下自助安装（免管理员）。
+pub mod webview2_setup;
+/// 无窗口时的原生询问框，仅 Windows —— 缺 WebView2 运行时与退出保护的最后出口。
+pub mod winbox;
 pub mod wire;
 
 /// 子进程控制台窗口控制（其它平台是空操作）。

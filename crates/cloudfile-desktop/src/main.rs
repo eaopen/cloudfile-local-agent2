@@ -31,13 +31,217 @@ struct State {
     /// Coalesces the position writes produced by a single drag: the native drag
     /// emits one `Moved` per frame and only the resting place is worth storing.
     float_moves: Arc<Mutex<u64>>,
+    /// 任务中心窗口是否真的建起来了（缺 WebView2 运行时为 false）。
+    ///
+    /// 修改原因（2026-11-02 现场）：以前窗口由 Tauri 启动时自动创建，缺 WebView2
+    /// 运行时的机器上只会在**任何中文引导之前**弹一句英文原生错误框。现在窗口改由
+    /// [`create_window`] 运行时创建，托盘提示、[`show`] 与退出保护都要按这个标志分流：
+    /// 没有窗口时那句「打开任务中心」必须变成中文说明，而不是点了没反应。
+    windowed: Arc<AtomicBool>,
+    /// 启动时是否真的缺 WebView2 运行时。
+    ///
+    /// 和 `windowed` 分开存：窗口没建起来可能是缺运行时，也可能是运行时在但建窗失败
+    /// （例如被安全软件拦下）。两者的提示不能混为一谈 —— 把「装运行时」当成万能答案
+    /// 只会让真正的原因更难查。这里只在启动时写一次，不再重探。
+    runtime_missing: bool,
+    /// 随包携带、校验通过的 WebView2 安装器路径（没有就是 `None`）。
+    ///
+    /// 缺运行时的机器上「安装」按钮直接用它把运行时装到**当前用户**（不需要管理员）；
+    /// 没有随包安装器时只能退回官方下载页，所以部署方要把安装器打进发行包。
+    installer: Option<PathBuf>,
 }
 
+/// 缺运行时说明只弹一次：自动入口（扩展、打开文件、配对完成）可能同时触发，
+/// 每次双击都弹框比不弹更烦。**用户显式点击**不走这套限制（见 [`show_explicitly`]）。
+static RUNTIME_NOTICE_SHOWN: AtomicBool = AtomicBool::new(false);
+
+/// 本机 WebView 运行时版本；`None` 表示探测不到（Windows 上即缺 WebView2 运行时）。
+///
+/// 必须走 `tauri::webview_version()` 而不是自己的注册表探测：Tauri 建 webview 前判断
+/// `webview_runtime_installed` 用的就是它，两边同一个入口才不会出现「我们以为能开、
+/// 它却弹英文错误框」的错位（2026-11-02 现场弹的就是那个框）。
+fn webview_runtime() -> Option<String> {
+    tauri::webview_version().ok()
+}
+
+/// 这台机器上任务中心窗口**根本建不出来**（只有 Windows 会因为缺 WebView2 走到这里）。
+///
+/// 为什么只对 Windows 下结论：macOS 的 WebKit 探测会查 `com.apple.WebKit` 的 NSBundle，
+/// 可能返回 Err，但 Tauri 在 macOS 上只记一条 warn 并继续建 webview；把 Err 当成门禁
+/// 会让 macOS 无故变成零窗口、且没有任何说明（winbox 在非 Windows 是空实现）。
+fn runtime_missing() -> bool {
+    cfg!(windows) && webview_runtime().is_none()
+}
+
+/// 按 `tauri.conf.json` 的定义**在运行时**创建窗口。
+///
+/// 为什么不在启动时让 Tauri 自动建：配置里的三个窗口都是 `create:false`，所以这里是
+/// 唯一的创建入口，也只应该在**确认运行时可用**时调用。缺 WebView2 的机器上建 webview
+/// 会让 Tauri 在 release+Windows 弹出那句英文原生框（tauri-runtime-wry 的
+/// `create_webview`：`!webview_runtime_installed` 时先弹框再返回错误）。
+///
+/// 另外 Tauri 文档提醒：在 Windows 的同步命令或事件处理器里建窗可能死锁（wry #583），
+/// 所以这里只在 `setup` 里调用；`show()` 之类的晚路径不再补建窗口。
+fn create_window(app: &tauri::AppHandle, label: &str) -> Option<tauri::WebviewWindow> {
+    // 防御性门禁：即使将来有调用方忘了先探测，也绝不让进程走到会弹英文框的那一步。
+    if runtime_missing() {
+        record_launch_failure(&format!(
+            "refused to create window {label}: webview runtime missing"
+        ));
+        return None;
+    }
+    let Some(config) = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|window| window.label == label)
+        .cloned()
+    else {
+        // 配置里没有这个窗口：说明构建产物与代码不一致，现场只看 stderr 是看不到的。
+        record_launch_failure(&format!("window config missing: {label}"));
+        return None;
+    };
+    match tauri::WebviewWindowBuilder::from_config(app, &config).and_then(|builder| builder.build())
+    {
+        Ok(window) => Some(window),
+        Err(error) => {
+            // 一个窗口没建起来不该拖垮整个进程：托盘与后台同步仍然可用。
+            // 但要留痕：发布版的 stderr 是空的，现场只能靠 launch.log 判断。
+            eprintln!("CloudFile desktop: 无法创建窗口 {label}：{error}");
+            record_launch_failure(&format!("window {label} could not be created: {error}"));
+            None
+        }
+    }
+}
+
+/// 缺 WebView2 运行时的中文说明（见 `cloudfile_core::webview2`）。
+/// 返回用户是否选择去下载安装包。**只能在主线程调用**：MessageBox 是模态的，
+/// 显示期间会阻塞事件循环（托盘与 IPC 都停），这是用户主动点击时可接受的代价。
+fn runtime_notice() -> bool {
+    let open = cloudfile_core::winbox::ask(
+        "CloudFile 任务中心无法打开",
+        &cloudfile_core::webview2::runtime_missing_guidance(),
+    );
+    if open && !cloudfile_core::webview2::open_runtime_download() {
+        // 分离进程的 stderr 是空的，失败要留痕，否则现场只能猜。
+        record_launch_failure("could not open the WebView2 download page");
+    }
+    open
+}
+
+/// 引导用户用**随包安装器**把 WebView2 装到当前用户（不需要管理员）。
+///
+/// 返回是否装好。调用方负责「装好后怎么办」的提示：启动阶段装好可以直接建窗口，
+/// 运行中（托盘/打开任务中心）装好必须重启 Agent 才能建窗口。
+/// **只能在主线程调用**（会弹模态询问框与微软安装器界面）。
+fn offer_runtime_install(installer: &Path) -> anyhow::Result<bool> {
+    if !cloudfile_core::winbox::ask(
+        "安装 WebView2 运行时",
+        &cloudfile_core::webview2::runtime_install_prompt(),
+    ) {
+        return Ok(false);
+    }
+    record_launch_failure(&format!(
+        "installing webview2 runtime from {}",
+        installer.display()
+    ));
+    // 用可见安装器而不是静默：用户点了「安装」就应该看得到进度，静默几分钟无反馈更像卡死。
+    let outcome = cloudfile_core::webview2_setup::install(
+        installer,
+        false,
+        cloudfile_core::webview2_setup::DEFAULT_TIMEOUT,
+    )?;
+    record_launch_failure(&format!(
+        "webview2 installer exit={:?} installed={} version={:?}",
+        outcome.exit_code, outcome.installed, outcome.version
+    ));
+    if outcome.installed {
+        return Ok(true);
+    }
+    cloudfile_core::winbox::notify(
+        "WebView2 运行时安装未完成",
+        &cloudfile_core::webview2::runtime_install_failed_guidance(outcome.exit_code),
+    );
+    Ok(false)
+}
+
+/// 自动入口（扩展、打开文件、配对完成）请求一次说明：每个进程最多一次。
+///
+/// 不能在这些线程上直接弹模态框（会卡住 mailbox 循环），所以排到主线程再弹。
+fn request_runtime_notice(app: &tauri::AppHandle) {
+    if RUNTIME_NOTICE_SHOWN.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let _ = app.run_on_main_thread(|| {
+        runtime_notice();
+    });
+}
+
+/// 把任务中心窗口抬到前台；窗口不存在时返回 `false`。
+fn raise_task_center(app: &tauri::AppHandle) -> bool {
+    let Some(window) = app.get_webview_window("main") else {
+        return false;
+    };
+    let _ = window.unminimize();
+    let _ = window.show();
+    let _ = window.set_focus();
+    true
+}
+
+/// 自动触发路径：抬窗口；没有窗口时最多说明一次。
+///
+/// 这里**绝不补建窗口**：缺运行时补建会让 release+Windows 重新弹出英文框，
+/// 而运行时正常时窗口在启动阶段就已经建好（建失败属于故障，已写进 launch.log）。
 fn show(app: &tauri::AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.unminimize();
-        let _ = window.show();
-        let _ = window.set_focus();
+    if raise_task_center(app) {
+        return;
+    }
+    if runtime_missing() {
+        request_runtime_notice(app);
+    } else {
+        record_launch_failure("task centre window missing; not re-creating at runtime");
+    }
+}
+
+/// 用户显式点击（托盘「打开任务中心」）：每次都给反馈，一次性限制会让人以为按钮坏了。
+///
+/// 由托盘菜单回调调用，本来就在主线程，可以直接弹模态框。
+fn show_explicitly(app: &tauri::AppHandle) {
+    if raise_task_center(app) {
+        return;
+    }
+    if runtime_missing() {
+        RUNTIME_NOTICE_SHOWN.store(true, Ordering::SeqCst);
+        // 有随包安装器就先引导安装（免管理员）；没有才退回下载页说明。
+        if let Some(installer) = app.state::<State>().installer.clone() {
+            match offer_runtime_install(&installer) {
+                Ok(true) => cloudfile_core::winbox::notify(
+                    "WebView2 运行时已安装",
+                    "请从托盘菜单「退出」Agent，再重新打开任务中心。",
+                ),
+                Ok(false) => {}
+                Err(error) => {
+                    record_launch_failure(&format!("webview2 install failed: {error:#}"));
+                    cloudfile_core::winbox::notify(
+                        "WebView2 运行时安装失败",
+                        &format!(
+                            "{error:#}\n\n{}",
+                            cloudfile_core::webview2::runtime_install_failed_guidance(None)
+                        ),
+                    );
+                }
+            }
+        } else {
+            runtime_notice();
+        }
+    } else {
+        // 运行时在却没有窗口：另一种故障，别用「缺 WebView2」误导现场。
+        cloudfile_core::winbox::notify(
+            "CloudFile 任务中心未启动",
+            "任务中心窗口没有启动。请从托盘菜单「退出」Agent 后重新打开；\n\
+             详情见安装目录下的 desktop-launch.log。",
+        );
     }
 }
 
@@ -953,6 +1157,36 @@ async fn release_checkout(
     .map_err(|_| "释放 Checkout 执行失败".to_string())?
 }
 
+/// 无窗口时托盘的「退出」要问的那句话。
+///
+/// 修改原因（2026-11-02）：有独占任务或待确认提交时，退出保护原本靠任务中心窗口
+/// 弹确认框。缺 WebView2 运行时没有窗口，这时若仍然沿用「show + emit」，
+/// 托盘的「退出」就变成点了没反应 —— 用户只能去任务管理器杀进程，更容易丢状态。
+fn exit_risk_text(assessment: &guard::Assessment) -> String {
+    format!(
+        "仍有 {} 个独占任务、{} 项待确认提交。\n\n\
+现在退出会停止独占续租，授权到期后其他人可能接管这些文件；\
+待确认提交的结果将无从得知，需要重新核对。本地工作副本不会被删除。\n\n\
+确定要退出吗？",
+        assessment.active_checkouts, assessment.uncertain
+    )
+}
+
+/// 托盘提示文案。抽成纯函数是为了能测全三个分支（正常 / 缺运行时 / 建窗失败），
+/// 这三种在托盘上必须看起来不一样，否则现场分不清该装运行时还是该查日志。
+fn tray_tooltip(windowed: bool, runtime_missing: bool, summary: &str) -> String {
+    let version = cloudfile_core::VERSION;
+    if windowed {
+        format!("CloudFile Agent {version} · {summary}")
+    } else if runtime_missing {
+        format!("CloudFile Agent {version} · 后台运行（任务中心需要 WebView2 运行时）· {summary}")
+    } else {
+        format!(
+            "CloudFile Agent {version} · 后台运行（任务中心窗口启动失败，详见 desktop-launch.log）· {summary}"
+        )
+    }
+}
+
 /// Keeps the tray tooltip and the guard menu row honest about the real store.
 /// `set_text` dispatches to the main thread on its own, so this is safe to call
 /// from the background guard loop.
@@ -967,9 +1201,10 @@ fn refresh_tray(state: &State, app: &tauri::AppHandle) {
         )
     };
     if let Some(tray) = app.tray_by_id("main") {
-        let _ = tray.set_tooltip(Some(format!(
-            "CloudFile Agent {} · {summary}",
-            cloudfile_core::VERSION
+        let _ = tray.set_tooltip(Some(tray_tooltip(
+            state.windowed.load(Ordering::SeqCst),
+            state.runtime_missing,
+            &summary,
         )));
     }
     if let Ok(row) = state.guard_row.lock() {
@@ -1019,15 +1254,23 @@ fn is_launch_flag(argument: &str) -> bool {
 
 /// 启动阶段的失败必须留痕：常驻进程是分离启动的（stdin/stdout/stderr 都是 null），
 /// 参数被拒或初始化失败时外面什么都看不到。写一行到安装根，现场一眼能查。
+///
+/// 加 1MB 上限（与 `note_update_log` 同款）：缺 WebView2 的机器每次启动都会写一行，
+/// 不设上限的话这个文件会跟着登录次数无限长下去。
 fn record_launch_failure(message: &str) {
     let Ok(root) = cloudfile_core::storage::root() else {
         return;
     };
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(root.join("desktop-launch.log"))
-    {
+    let path = root.join("desktop-launch.log");
+    let too_big = std::fs::metadata(&path).is_ok_and(|meta| meta.len() > 1024 * 1024);
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).write(true);
+    if too_big {
+        options.truncate(true);
+    } else {
+        options.append(true);
+    }
+    if let Ok(mut file) = options.open(&path) {
         use std::io::Write;
         let _ = writeln!(file, "{message}");
     }
@@ -1096,6 +1339,17 @@ fn main() {
             // 自检必须在**建窗口之前**结束：它要在装坏了的机器上也能给出结论。
             std::process::exit(self_test());
         }
+        // 诊断用：两个运行时探测入口在任何 webview 存在之前各自给什么答案。
+        // 2026-11-03 真机验证时靠它定位「有运行时却被判成缺失、于是只出托盘」。
+        Some("--probe-runtime") => {
+            println!("tauri::webview_version() = {:?}", tauri::webview_version());
+            println!(
+                "apps::webview2_version()  = {:?}",
+                cloudfile_core::apps::webview2_version()
+            );
+            println!("runtime_missing()         = {}", runtime_missing());
+            return;
+        }
         Some("--help") | Some("-h") => {
             print!("{USAGE}");
             return;
@@ -1156,6 +1410,30 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
         }
     }
     let _ = settings::ensure_workspace(&root);
+    // 修改原因（2026-11-02 现场）：任务中心窗口由 WebView2 渲染。缺运行时的机器上，
+    // 以前 Tauri 会在启动阶段自动建窗口，然后弹一句英文原生错误框
+    // （Could not find the WebView2 Runtime.），用户既看不懂也不知道该装什么。
+    // 现在先探测，再决定建不建窗口（配置里三个窗口都是 `create:false`，见 `create_window`）：
+    // 缺失时**一个 webview 都不建**，改为中文说明 + 托盘常驻 + 后台同步继续跑。
+    // 探测只对 Windows 成立（macOS 的 WebKit 探测失败不代表建不出窗口，见 `runtime_missing`）。
+    let mut missing_now = runtime_missing();
+    // 随包的 WebView2 安装器：发行包里 `webview2/` 目录携带（在线引导器或内网离线包都行），
+    // 以当前用户身份安装即可，不需要管理员 —— 这是「用户没权限」场景的正解。
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+        .unwrap_or_default();
+    let install_root = update::install_root(&desktop_binary());
+    let installer = match cloudfile_core::webview2_setup::locate(&exe_dir, Some(&install_root)) {
+        Ok(path) => Some(path),
+        Err(error) => {
+            if missing_now {
+                // 只有缺运行时才值得记：macOS 上永远找不到 Windows 安装器，那是正常的。
+                record_launch_failure(&format!("no usable webview2 installer: {error:#}"));
+            }
+            None
+        }
+    };
     let lock_path = root.join("desktop.lock");
     let _lock = match storage::lock(&lock_path) {
         Ok(lock) => lock,
@@ -1169,13 +1447,44 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
                 match storage::lock(&lock_path) {
                     Ok(lock) => break lock,
                     Err(_) if std::time::Instant::now() < deadline => continue,
-                    Err(_) => return Ok(()),
+                    Err(_) => {
+                        // 已有实例在跑。缺运行时的话，再双击只会「什么都没发生」，
+                        // 所以补一次说明；有随包安装器时直接引导装（装完仍需重启旧进程）。
+                        if missing_now && !autostart {
+                            match installer.as_deref() {
+                                Some(installer) => {
+                                    let _ = offer_runtime_install(installer);
+                                }
+                                None => {
+                                    runtime_notice();
+                                }
+                            }
+                        }
+                        return Ok(());
+                    }
                 }
             }
         }
         // A second launch only needs to raise the window the first one owns.
-        Err(_) => return Ok(()),
+        Err(_) => {
+            if missing_now && !autostart {
+                match installer.as_deref() {
+                    Some(installer) => {
+                        let _ = offer_runtime_install(installer);
+                    }
+                    None => {
+                        runtime_notice();
+                    }
+                }
+            }
+            return Ok(());
+        }
     };
+    // 分离进程的 stderr 是空的：缺运行时留一行痕，现场排查直接看这个文件。
+    // 放在拿到实例锁之后：第二实例不该把日志刷成重复行。
+    if missing_now {
+        record_launch_failure("webview runtime missing: task centre window disabled");
+    }
     ipc::recover(&root)?;
     // 注册自愈（2026-11-02）：注册表键被清理工具删掉、或某次注册表写入失败时，
     // 扩展只会看到「Agent 未就绪」，用户唯一的出路是重跑 install.cmd ——
@@ -1191,8 +1500,49 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
             }
         }
     }
+    // 手动双击启动：先给一次「免管理员自助安装」的机会 —— 装好就能在**同一次启动**里
+    // 直接建窗口，用户不用再退出重开。登录项启动（--autostart）不弹框：每次登录弹一次
+    // 没人受得了；托盘菜单里有安装入口，用户随时能点。
+    if missing_now && !autostart {
+        // 无论下面装没装成，自动入口都不再重复弹说明（用户已经明确看到过了）。
+        RUNTIME_NOTICE_SHOWN.store(true, Ordering::SeqCst);
+        if let Some(installer) = installer.as_deref() {
+            match offer_runtime_install(installer) {
+                Ok(true) => {
+                    missing_now = runtime_missing();
+                    if missing_now {
+                        cloudfile_core::winbox::notify(
+                            "WebView2 运行时已安装",
+                            "运行时已安装，但系统还没就绪。请稍后从托盘菜单「退出」Agent 后重新打开任务中心。",
+                        );
+                    } else {
+                        cloudfile_core::winbox::notify(
+                            "WebView2 运行时已安装",
+                            "任务中心马上打开。",
+                        );
+                    }
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    record_launch_failure(&format!("webview2 install failed: {error:#}"));
+                    cloudfile_core::winbox::notify(
+                        "WebView2 运行时安装失败",
+                        &format!(
+                            "{error:#}\n\n{}",
+                            cloudfile_core::webview2::runtime_install_failed_guidance(None)
+                        ),
+                    );
+                }
+            }
+        } else {
+            // 没有随包安装器：退回中文说明 + 官方下载页（部署方应把安装器打进发行包）。
+            runtime_notice();
+        }
+    }
     let uploading = Arc::new(Mutex::new(HashSet::new()));
     let quitting = Arc::new(AtomicBool::new(false));
+    // 托盘菜单要不要挂「安装」项，只看启动时有没有可用的随包安装器。
+    let installer_available = installer.is_some();
     let state = State {
         root: root.clone(),
         uploading: uploading.clone(),
@@ -1200,6 +1550,9 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
         toast: Arc::new(Mutex::new(0)),
         guard_row: Arc::new(Mutex::new(None)),
         float_moves: Arc::new(Mutex::new(0)),
+        windowed: Arc::new(AtomicBool::new(false)),
+        runtime_missing: missing_now,
+        installer: installer.clone(),
     };
     tauri::Builder::default()
         .manage(state)
@@ -1242,8 +1595,21 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
             release_checkout
         ])
         .setup(move |app| {
-            use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+            use tauri::menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem};
             use tauri::tray::TrayIconBuilder;
+            // 修改逻辑（2026-11-02）：窗口改由这里创建（`tauri.conf.json` 里三个窗口都是
+            // `create:false`）。缺 WebView2 运行时的机器上一个 webview 都不建 —— 建了也只会
+            // 得到 Tauri 自己的英文原生错误框，用户看不懂、也不知道该装什么。
+            // 只在 setup 里建窗：Windows 上在同步命令/事件处理器里建窗有死锁风险（wry #583）。
+            if !missing_now {
+                for label in ["main", "float", "toast"] {
+                    let _ = create_window(app.handle(), label);
+                }
+            }
+            let windowed = app.get_webview_window("main").is_some();
+            app.state::<State>()
+                .windowed
+                .store(windowed, Ordering::SeqCst);
             let open = MenuItem::with_id(app, "open", "打开任务中心", true, None::<&str>)?;
             let refresh = MenuItem::with_id(app, "refresh", "刷新任务", true, None::<&str>)?;
             let guard_row = MenuItem::with_id(app, "guard", "状态：检查中", false, None::<&str>)?;
@@ -1252,7 +1618,35 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
             }
             let separator = PredefinedMenuItem::separator(app)?;
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&open, &refresh, &guard_row, &separator, &quit])?;
+            // 确属缺运行时：托盘菜单里直接给出「装到当前用户」的入口（不需要管理员）。
+            // 没有随包安装器时退回「查看安装方法」（官方下载页）。
+            // 运行时在、但建窗失败时不挂这一项：那是另一种故障，写「缺运行时」会误导。
+            let runtime_hint = if !missing_now {
+                None
+            } else if installer_available {
+                Some(MenuItem::with_id(
+                    app,
+                    "runtime-install",
+                    "安装 WebView2 运行时（无需管理员）",
+                    true,
+                    None::<&str>,
+                )?)
+            } else {
+                Some(MenuItem::with_id(
+                    app,
+                    "runtime",
+                    "缺少 WebView2 运行时（点击查看安装方法）",
+                    true,
+                    None::<&str>,
+                )?)
+            };
+            let mut items: Vec<&dyn IsMenuItem<tauri::Wry>> = vec![&open, &refresh, &guard_row];
+            if let Some(hint) = &runtime_hint {
+                items.push(hint);
+            }
+            items.push(&separator);
+            items.push(&quit);
+            let menu = Menu::with_items(app, &items)?;
             let icon = tray_icon()?;
             // The window doubles as the fallback entry when no tray is allowed.
             let tray = TrayIconBuilder::with_id("main")
@@ -1261,7 +1655,47 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
                 .tooltip(format!("CloudFile Agent {}", cloudfile_core::VERSION))
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id.as_ref() {
-                    "open" => show(app),
+                    // 用户显式点击：每次都反馈，不能因为「之前提示过」而点了没反应。
+                    "open" => show_explicitly(app),
+                    // 托盘是缺运行时唯一的可见入口：先引导免管理员自助安装；
+                    // 装好后必须重启进程（窗口只在启动时创建），装不上再给手动说明。
+                    "runtime-install" => {
+                        if let Some(installer) = app.state::<State>().installer.clone() {
+                            match offer_runtime_install(&installer) {
+                                Ok(true) => cloudfile_core::winbox::notify(
+                                    "WebView2 运行时已安装",
+                                    "请从托盘菜单「退出」Agent，再重新打开任务中心。",
+                                ),
+                                Ok(false) => {}
+                                Err(error) => {
+                                    record_launch_failure(&format!(
+                                        "webview2 install failed: {error:#}"
+                                    ));
+                                    cloudfile_core::winbox::notify(
+                                        "WebView2 运行时安装失败",
+                                        &format!(
+                                            "{error:#}\n\n{}",
+                                            cloudfile_core::webview2::runtime_install_failed_guidance(None)
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    // 没有随包安装器时的兜底：官方下载页 + 手动步骤。
+                    // 如果用户在这期间已经把运行时装好，就别再说「缺运行时」了 ——
+                    // 改为告诉他重启进程（窗口只在启动时创建）。
+                    "runtime" => {
+                        if runtime_missing() {
+                            RUNTIME_NOTICE_SHOWN.store(true, Ordering::SeqCst);
+                            runtime_notice();
+                        } else {
+                            cloudfile_core::winbox::notify(
+                                "WebView2 运行时已就绪",
+                                "已检测到 WebView2 运行时。请从托盘菜单「退出」Agent 后重新打开任务中心。",
+                            );
+                        }
+                    }
                     "refresh" => {
                         let _ = app.emit("tasks-changed", ());
                         show(app);
@@ -1272,39 +1706,52 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
                         if assessment.safe_to_exit {
                             state.quitting.store(true, Ordering::SeqCst);
                             app.exit(0);
-                        } else {
+                        } else if state.windowed.load(Ordering::SeqCst) {
                             // Ask before stopping renewal; never stop silently.
                             show(app);
                             let _ = app.emit(
                                 "confirm-exit",
                                 serde_json::to_value(&assessment).unwrap_or(Value::Null),
                             );
+                        } else if cloudfile_core::winbox::ask(
+                            "退出前请确认",
+                            &exit_risk_text(&assessment),
+                        ) {
+                            // 没有窗口可以问（缺运行时）：用原生中文对话框把退出风险说清，
+                            // 否则托盘「退出」在有独占任务时等于点了没反应。
+                            state.quitting.store(true, Ordering::SeqCst);
+                            app.exit(0);
                         }
                     }
                     _ => (),
                 })
                 .build(app);
             let has_tray = tray.is_ok();
-            let window = app
-                .get_webview_window("main")
-                .ok_or_else(|| anyhow::anyhow!("main window missing"))?;
-            if autostart && has_tray {
-                // Started by the login item: stay resident and reachable from the
-                // tray instead of opening a window on every login. Without a tray
-                // there would be no way back, so the window is kept.
-                let _ = window.hide();
+            if !has_tray && !windowed {
+                // 既没有窗口也没有托盘：用户没有任何入口（看不到状态、也退不出去）。
+                // 不能主动退出——后台同步与浏览器打开文件仍靠这个进程；但必须留痕，
+                // 否则现场只会看到「装了却什么都没有」。
+                record_launch_failure("no tray and no window: the agent is invisible to the user");
             }
-            let handle = app.handle().clone();
-            window.on_window_event(move |event| {
-                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                    if has_tray {
-                        api.prevent_close();
-                        if let Some(window) = handle.get_webview_window("main") {
-                            let _ = window.hide();
+            if let Some(window) = app.get_webview_window("main") {
+                if autostart && has_tray {
+                    // Started by the login item: stay resident and reachable from the
+                    // tray instead of opening a window on every login. Without a tray
+                    // there would be no way back, so the window is kept.
+                    let _ = window.hide();
+                }
+                let handle = app.handle().clone();
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        if has_tray {
+                            api.prevent_close();
+                            if let Some(window) = handle.get_webview_window("main") {
+                                let _ = window.hide();
+                            }
                         }
                     }
-                }
-            });
+                });
+            }
             for label in ["float", "toast"] {
                 if let Some(extra) = app.get_webview_window(label) {
                     let _ = extra.set_always_on_top(true);
@@ -1498,6 +1945,54 @@ mod launch_flag_tests {
         assert!(is_launch_flag("--autostart"));
         assert!(!is_launch_flag("--definitely-not-a-flag"));
         assert!(!is_launch_flag("--await"));
+    }
+}
+
+/// 缺运行时降级后的用户可见文案：三种状态必须在托盘上分得清，
+/// 否则现场分不清「该装运行时」还是「该查日志」。
+#[cfg(test)]
+mod degraded_ux_tests {
+    use super::{exit_risk_text, tray_tooltip};
+
+    #[test]
+    fn tray_tooltip_tells_apart_no_window_reasons() {
+        let normal = tray_tooltip(true, false, "可以安全退出");
+        assert!(normal.contains("可以安全退出"));
+        assert!(!normal.contains("后台运行"));
+
+        let missing = tray_tooltip(false, true, "可以安全退出");
+        assert!(missing.contains("后台运行"));
+        assert!(missing.contains("WebView2"));
+        assert!(!missing.contains("启动失败"));
+
+        // 运行时在却建不出窗口是另一种故障：不能让用户去装一个已经装好的运行时。
+        let failed = tray_tooltip(false, false, "可以安全退出");
+        assert!(failed.contains("启动失败"));
+        assert!(failed.contains("desktop-launch.log"));
+        assert!(!failed.contains("需要 WebView2"));
+    }
+
+    #[test]
+    fn exit_risk_text_states_both_checkout_and_pending_commit_consequences() {
+        let assessment = cloudfile_core::guard::Assessment {
+            safe_to_exit: false,
+            active_checkouts: 2,
+            uncertain: 3,
+            risks: Vec::new(),
+        };
+        let text = exit_risk_text(&assessment);
+        assert!(text.contains("2 个独占任务"), "{text}");
+        assert!(text.contains("3 项待确认提交"), "{text}");
+        assert!(text.contains("停止独占续租"), "{text}");
+        // 未确认提交不能只说「工作副本不会删除」：结果未知才是用户要知道的后果。
+        assert!(text.contains("重新核对"), "{text}");
+    }
+
+    /// 缺运行时的门禁只对 Windows 成立：macOS 的 WebKit 探测失败不代表建不出窗口。
+    #[cfg(not(windows))]
+    #[test]
+    fn runtime_missing_never_blocks_macos() {
+        assert!(!super::runtime_missing());
     }
 }
 

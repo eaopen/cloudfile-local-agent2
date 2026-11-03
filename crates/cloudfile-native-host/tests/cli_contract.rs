@@ -189,6 +189,8 @@ fn usage_is_printed_for_help_and_for_an_unknown_command() {
         "--enable-autostart",
         "--update",
         "--rollback",
+        // 缺 WebView2 运行时的自助安装入口（免管理员）：脚本/IT 靠它，不能从帮助里消失。
+        "--install-webview2",
     ] {
         assert!(help.contains(expected), "{expected} missing from usage");
     }
@@ -196,6 +198,68 @@ fn usage_is_printed_for_help_and_for_an_unknown_command() {
     let unknown = sandbox.refuses(&["--definitely-not-a-command"]);
     assert!(unknown.contains("unknown command"), "{unknown}");
     assert!(unknown.contains("--register-host"), "{unknown}");
+}
+
+#[test]
+fn webview2_self_install_refuses_without_a_bundled_installer() {
+    let sandbox = Sandbox::new();
+    // 显式指向一个不存在的文件：即使机器环境里配了 CLOUDFILE_WEBVIEW2_SETUP 也不受影响。
+    let output = sandbox
+        .command()
+        .env(
+            "CLOUDFILE_WEBVIEW2_SETUP",
+            sandbox.home.join("missing-webview2-setup.exe"),
+        )
+        .arg("--install-webview2")
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "没有安装器时必须失败");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // 拒绝原因要说清是「安装器不可用」，而不是一句笼统的安装失败。
+    assert!(stderr.contains("WebView2"), "{stderr}");
+    assert!(
+        stderr.contains("安装器") || stderr.contains("不存在"),
+        "{stderr}"
+    );
+    sandbox.cleanup();
+}
+
+/// 随包安装器的完整链路：定位 → SHA-256 校验 → 执行 → **以运行时探测判成败**。
+///
+/// 只在非 Windows 跑：这里用一个 shell 脚本冒充安装器，Windows 上无法这样模拟。
+/// 关键断言是「安装器退出 0 但运行时仍然不可用 → 必须报未安装成功」，
+/// 防止把「安装器跑完了」当成装好了。
+#[cfg(not(windows))]
+#[test]
+fn webview2_self_install_verifies_then_judges_by_the_runtime_probe() {
+    let sandbox = Sandbox::new();
+    let directory = sandbox.home.join("isolated");
+    std::fs::create_dir_all(directory.join("webview2")).unwrap();
+    let binary = directory.join("cloudfile-native-host");
+    std::fs::copy(env!("CARGO_BIN_EXE_cloudfile-native-host"), &binary).unwrap();
+    let installer = directory.join("webview2/MicrosoftEdgeWebview2Setup.exe");
+    std::fs::write(&installer, "#!/bin/sh\nexit 0\n").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&installer).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&installer, permissions).unwrap();
+    }
+    let digest = cloudfile_core::webview2_setup::sha256_hex(&installer).unwrap();
+    std::fs::write(directory.join("webview2/installer.sha256"), digest).unwrap();
+
+    let output = sandbox
+        .command_at(&binary)
+        .arg("--install-webview2")
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "运行时仍不可用时不能报成功");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("未安装成功"), "{stderr}");
+    assert!(stderr.contains("退出码：0"), "{stderr}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("\"installed\": false"), "{stdout}");
+    sandbox.cleanup();
 }
 
 #[test]
@@ -397,8 +461,29 @@ fn status_reports_the_local_component_contract() {
             status["runtime"]["webview2"].is_string() || status["runtime"]["webview2"].is_null(),
             "{status}"
         );
+        // 任务中心能不能开必须与同一个探测结论一致（2026-11-02 现场：缺运行时
+        // 以前只会弹英文框）。Windows 上两者同源：有版本号才可能开。
+        assert_eq!(
+            status["runtime"]["task_center"],
+            json!(status["runtime"]["webview2"].is_string()),
+            "{status}"
+        );
     } else {
         assert_eq!(status["runtime"]["webview2"], Value::Null);
+        // macOS 用系统 WebKit，任务中心恒可用（不跟着 webview2 的 null 走）。
+        assert_eq!(status["runtime"]["task_center"], json!(true), "{status}");
+    }
+    // 自助安装能力必须如实报告：测试二进制旁边没有 webview2/ 包，所以这里只断言
+    // 结构完整（布尔 + 失败原因），不假设某一台机器的具体结果。
+    assert!(
+        status["runtime"]["installer"]["available"].is_boolean(),
+        "{status}"
+    );
+    if status["runtime"]["installer"]["available"] == json!(false) {
+        assert!(
+            status["runtime"]["installer"]["error"].is_string(),
+            "不可用时要说明原因：{status}"
+        );
     }
     // No manifest yet, so nothing is active. The extension reads this field
     // directly, so an absent version is a JSON null rather than a missing key.
@@ -530,6 +615,65 @@ fn the_installer_keeps_the_first_usable_source_and_writes_it_back() {
         serde_json::from_str(&std::fs::read_to_string(sandbox.config_path()).unwrap()).unwrap();
     assert_eq!(config["update_source"], primary.as_str());
     assert_eq!(config["allow_insecure_update_source"], true);
+    sandbox.cleanup();
+}
+
+/// `--install` 必须把发行包里的 WebView2 安装器落到**安装根**（`<root>/webview2/`）。
+///
+/// 只下载两个二进制到 `bin/<版本>/` 的话，装完的机器上桌面进程找不到安装器，
+/// 缺运行时的用户又只能手动下载 —— 而现场常常没有管理员权限、打不开微软站点。
+/// 这里用「孤立目录里的二进制 + 旁边带 webview2/ 的包」复现发行包形态。
+#[test]
+fn install_places_the_bundled_webview2_installer_in_the_install_root() {
+    let sandbox = Sandbox::new();
+    let bundle = sandbox.home.join("bundle");
+    std::fs::create_dir_all(bundle.join("webview2")).unwrap();
+    let binary = bundle.join(if cfg!(windows) {
+        "cloudfile-native-host.exe"
+    } else {
+        "cloudfile-native-host"
+    });
+    std::fs::copy(env!("CARGO_BIN_EXE_cloudfile-native-host"), &binary).unwrap();
+    let installer = bundle.join("webview2/MicrosoftEdgeWebview2Setup.exe");
+    std::fs::write(&installer, b"payload").unwrap();
+    let digest = cloudfile_core::webview2_setup::sha256_hex(&installer).unwrap();
+    std::fs::write(bundle.join("webview2/installer.sha256"), &digest).unwrap();
+
+    let primary = serve(br#"{"version":"0.0.0"}"#);
+    let output = sandbox
+        .command_at(&binary)
+        .args([
+            "--install",
+            "--source",
+            &primary,
+            "--allow-insecure-source",
+            "--skip-registration",
+            "--skip-autostart",
+            "--skip-launch",
+        ])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let report: Value = serde_json::from_str(&stdout).unwrap_or_else(|error| {
+        panic!(
+            "{error}: {stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    assert!(output.status.success(), "{stdout}");
+    let install_root = PathBuf::from(report["install_root"].as_str().unwrap());
+    let placed = install_root
+        .join("webview2")
+        .join("MicrosoftEdgeWebview2Setup.exe");
+    assert!(
+        placed.is_file(),
+        "安装根缺少随包安装器：{}（报告：{report}）",
+        placed.display()
+    );
+    assert_eq!(
+        cloudfile_core::webview2_setup::sha256_hex(&placed).unwrap(),
+        digest
+    );
     sandbox.cleanup();
 }
 
