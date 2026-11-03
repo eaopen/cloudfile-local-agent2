@@ -40,6 +40,12 @@ pub enum Request {
     Update {},
     #[serde(rename = "update_extension")]
     UpdateExtension {},
+    /// 升级结果的轻量查询：只读本地文件（update-result.json + 磁盘上的扩展 manifest），
+    /// **不碰网络**。扩展弹窗轮询升级结果用它——`status` 每次都要拉两份更新清单
+    /// （`check_update` 里两个 HTTP 请求，各 30 秒超时），更新源慢的时候一轮轮询
+    /// 就卡半分钟，用户等到超时也看不到成功/失败（2026-11-03 现场反馈）。
+    #[serde(rename = "upgrade_state")]
+    UpgradeState {},
     /// Does a working copy exist locally for this repository file?
     #[serde(rename = "query_local_file")]
     QueryLocalFile {

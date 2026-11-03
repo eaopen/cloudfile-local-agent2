@@ -1888,6 +1888,8 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
                         summaries(&root, &uploading).unwrap_or_else(|_| wire::error("task storage unavailable"))
                     }
                     wire::Request::CheckUpdate {} => native::check_update(&root),
+                    // 升级轮询专用：只读本地文件，不拉更新清单（见 wire::Request::UpgradeState）。
+                    wire::Request::UpgradeState {} => native::upgrade_state(&root),
                     wire::Request::QueryLocalFile { repo_id, path, mode } => {
                         native::query_local_file(&root, &repo_id, &path, &mode)
                     }

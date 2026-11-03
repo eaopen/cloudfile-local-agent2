@@ -1079,6 +1079,8 @@ fn run_stdio() -> anyhow::Result<()> {
             Ok(wire::Request::Status {}) => native::status(&root),
             Ok(wire::Request::Tasks {}) => native::task_summary(&root),
             Ok(wire::Request::CheckUpdate {}) => native::check_update(&root),
+            // 升级轮询专用：只读本地文件，不拉更新清单（见 wire::Request::UpgradeState）。
+            Ok(wire::Request::UpgradeState {}) => native::upgrade_state(&root),
             // 「打开任务中心」：常驻进程在跑 → 由它切前台；没跑 → 这里拉起（不杀任何东西）。
             Ok(wire::Request::OpenTaskCenter {}) => {
                 match ipc::call(&root, wire::Request::OpenTaskCenter {}) {

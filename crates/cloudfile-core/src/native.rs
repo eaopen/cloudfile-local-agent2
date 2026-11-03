@@ -332,9 +332,19 @@ pub fn open_workspace(root: &Path, repo_id: &str, path: &str, mode: &str) -> Val
     }
 }
 
-fn extension_installed_version(config: &session::Config) -> Option<String> {
-    let directory = config.extension_dir.as_ref()?;
-    crate::extension::installed_version(Path::new(directory))
+/// 磁盘上扩展副本的版本号。目录规则必须与 `update_extension` **完全一致**
+/// （`extension_dir` 未配时回落 `<agent 根>\extension`）。
+///
+/// 2026-11-03 现场：扩展其实已经升级成功，但 `--status` 只在 config 里写了
+/// extension_dir 时才去读版本号 —— 没写就一直 `None`，弹窗轮询到超时也等不到
+/// 「已完成」，用户看到的是「升级结果未知」而不是成功。
+fn extension_installed_version(root: &Path, config: &session::Config) -> Option<String> {
+    let directory = config
+        .extension_dir
+        .as_deref()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| root.join(crate::extension::DIR_NAME));
+    crate::extension::installed_version(&directory)
 }
 
 pub fn record_update_result(root: &Path, kind: &str, state: &str) {
@@ -390,6 +400,32 @@ pub fn load_update_result(root: &Path) -> Option<Value> {
     })
 }
 
+/// 升级结果的轻量查询：只读本地文件，**不碰网络**（与 [`check_update`] 的区别）。
+///
+/// 扩展弹窗每 1.5 秒轮询一次升级结果。老路径走 `status`，而 `status` 内部调
+/// `check_update`——那要拉两份更新清单，更新源慢的时候一轮轮询就卡半分钟，
+/// 用户只能等到超时，看不到成功或失败（2026-11-03 现场反馈）。这个命令只回
+/// 「磁盘上的扩展版本 + update-result.json」，秒级返回；完成与否的最终判据
+/// 仍然是磁盘版本（update-result.json 只用来解释失败原因）。
+pub fn upgrade_state(root: &Path) -> Value {
+    let config = session::config(root).unwrap_or_default();
+    let mut value = json!({
+        "ok": true,
+        "agent_version": crate::VERSION,
+    });
+    if let Some(version) = extension_installed_version(root, &config) {
+        value["extension_installed_version"] = json!(version);
+    }
+    if let Some(result) = load_update_result(root) {
+        for key in ["kind", "state", "error"] {
+            if let Some(field) = result.get(key) {
+                value[&format!("last_update_{key}")] = field.clone();
+            }
+        }
+    }
+    value
+}
+
 /// Version probe. An unconfigured or unreachable source is not an error: the
 /// extension only uses the answer to show an update hint.
 pub fn check_update(root: &Path) -> Value {
@@ -408,7 +444,7 @@ pub fn check_update(root: &Path) -> Value {
         return value;
     };
     value["update_source_set"] = json!(true);
-    if let Some(version) = extension_installed_version(&config) {
+    if let Some(version) = extension_installed_version(root, &config) {
         value["extension_installed_version"] = json!(version);
     }
     // 扩展清单与 Agent 清单同级、同一个源，而且**不需要签名**（信任锚是同源 https
@@ -820,6 +856,43 @@ mod tests {
             .unwrap()
             .to_string();
         assert_eq!(text.chars().count(), 4000 + "…（已截断）".chars().count());
+    }
+
+    #[test]
+    fn upgrade_state_answers_from_local_files_only() {
+        let (_dir, base) = crate::storage::test_root();
+        let root = base.as_path();
+        // 没有任何升级记录时也要能回答：ok + 当前版本，不带任何要拉网络的字段。
+        let value = upgrade_state(root);
+        assert_eq!(value["ok"], true);
+        assert_eq!(value["agent_version"], crate::VERSION);
+        assert!(value.get("extension_latest_version").is_none());
+        assert!(value.get("last_update_state").is_none());
+
+        record_update_result(root, "extension", "completed");
+        let value = upgrade_state(root);
+        assert_eq!(value["last_update_state"], "completed");
+        assert_eq!(value["last_update_kind"], "extension");
+
+        record_update_failure(root, "extension", "下载扩展清单失败");
+        let value = upgrade_state(root);
+        assert_eq!(value["last_update_state"], "failed");
+        assert!(value["last_update_error"]
+            .as_str()
+            .unwrap()
+            .contains("下载"));
+
+        // config 里没写 extension_dir 时，也要能读到 <root>/extension 里的版本
+        // —— 否则升级其实已经成功了，弹窗却还停在 pending（2026-11-03 现场）。
+        let extension_dir = base.join("extension");
+        std::fs::create_dir_all(&extension_dir).unwrap();
+        crate::storage::write(
+            &extension_dir.join("manifest.json"),
+            &serde_json::json!({"version": "2.0.12"}),
+        )
+        .unwrap();
+        let value = upgrade_state(root);
+        assert_eq!(value["extension_installed_version"], "2.0.12");
     }
 
     #[test]
