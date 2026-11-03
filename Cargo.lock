@@ -365,7 +365,7 @@ dependencies = [
 
 [[package]]
 name = "cloudfile-core"
-version = "2.0.19"
+version = "2.0.20"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -391,7 +391,7 @@ dependencies = [
 
 [[package]]
 name = "cloudfile-desktop"
-version = "2.0.19"
+version = "2.0.20"
 dependencies = [
  "anyhow",
  "cloudfile-core",
@@ -404,7 +404,7 @@ dependencies = [
 
 [[package]]
 name = "cloudfile-install"
-version = "2.0.19"
+version = "2.0.20"
 dependencies = [
  "anyhow",
  "cloudfile-core",
@@ -414,7 +414,7 @@ dependencies = [
 
 [[package]]
 name = "cloudfile-native-host"
-version = "2.0.19"
+version = "2.0.20"
 dependencies = [
  "anyhow",
  "cloudfile-core",
