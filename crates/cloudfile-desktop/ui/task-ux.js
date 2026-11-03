@@ -15,7 +15,9 @@
   function referenceHint(name) {
     const ext = String(name || '').split('.').pop().toLowerCase();
     if (CAD.has(ext)) {
-      return '设计文件可能依赖其他参照文件；当前任务仅管理此文件，不会自动同步整个项目。';
+      // 这是一句「同步范围」的说明，不是失败原因。原来的「可能依赖其他参照文件」
+      // 在打不开的时候会被读成「所以打不开」，现场就误解过一次。
+      return '设计文件可能引用其他零件或图纸；当前任务仅管理此文件，不会一起同步这些参照件。';
     }
     return '';
   }

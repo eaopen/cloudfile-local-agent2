@@ -140,9 +140,12 @@ fn valid_extension(value: &str) -> bool {
 /// 「未能打开本地应用」—— 根因就是它不在这张表里，而任务中心又把它当成 CAD 文件
 /// 去提示「可能依赖其他参照文件」，两边说法对不上。
 ///
-/// `.prt` / `.asm` **刻意不绑到某个具体程序**：Siemens NX 和 Creo(Pro/E) 都用这两个
-/// 扩展名，猜错就会拿另一个软件去开。交给系统关联（用户机上装的是哪个，关联就是哪个），
-/// 没关联时再引导去配「打开规则」。
+/// `.prt` 交给 Siemens NX：现场口径（2026-11-03）是**只用 NX、不装 Creo**，而客户机的
+/// `.prt` 往往没有任何文件关联（本机 `HKCR\.prt` 就是空的），只靠系统关联必然打不开。
+/// 所以先由 `nx_install()` 找到 `ugraf.exe` 直接打开，找不到 NX 时才退回系统关联。
+///
+/// `.asm` 仍**刻意不绑到某个具体程序**：Creo 与 SolidWorks 都用它，猜错就会拿另一个
+/// 软件去开，交给系统关联更安全。
 const DEFAULT_OPENABLE: &[&str] = &[
     "txt",
     "md",
@@ -238,18 +241,26 @@ pub fn open_path(root: &Path, mode: &str, name: &str, path: &Path) -> Result<()>
     if let Some(rule) = resolve_open_rule(&rules, mode, name) {
         let mut command = rule.render(path);
         let program = command.remove(0);
-        return spawn(&program, &command);
+        return spawn(&program, &command, path.parent());
     }
     let apps = detect();
     if let Some(app) = for_file(&apps, name) {
         if app.available {
+            let text = path.to_string_lossy();
+            if app.id == "nx" && !text.is_ascii() && !nx_reads_unicode_paths(&app.command[0]) {
+                // 与其让 NX 起来停在空会话、用户以为文件坏了，不如把真实原因说清楚。
+                bail!(
+                    "这份文件的路径里有中文，NX 7.x 及更早版本不认（NX 8.0 起才支持中文路径）。\
+                     请把文件改成英文或数字名字后再试，或者让管理员升级 NX"
+                );
+            }
             let mut command = app.command.clone();
             let program = command.remove(0);
             let command: Vec<String> = command
                 .iter()
-                .map(|argument| argument.replace(PLACEHOLDER, &path.to_string_lossy()))
+                .map(|argument| argument.replace(PLACEHOLDER, &text))
                 .collect();
-            return spawn(&program, &command);
+            return spawn(&program, &command, path.parent());
         }
     }
     let extension = extension_of(name);
@@ -271,15 +282,47 @@ pub fn open_path(root: &Path, mode: &str, name: &str, path: &Path) -> Result<()>
     Ok(())
 }
 
-fn spawn(program: &str, arguments: &[String]) -> Result<()> {
+/// NX 7.x 走 ANSI 文件名接口，**中文路径会静默失败**：进程起来了，但停在空会话
+/// （真机实测标题只有 `NX 7.5 - `，没有文件名）。NX 8.0 起才有 UTF-8 文件名支持。
+/// 版本只能从安装目录名读（`…\NX 7.5\UGII\ugraf.exe`）；读不出来时按「支持」处理，
+/// 宁可让用户看到空会话，也不要误拦一台本来能用的机器。
+#[cfg(windows)]
+fn nx_reads_unicode_paths(program: &str) -> bool {
+    Path::new(program)
+        .ancestors()
+        .filter_map(|part| part.file_name())
+        .filter_map(|name| name.to_str())
+        .find(|name| name.starts_with("NX "))
+        .and_then(|name| name.trim_start_matches("NX ").trim().parse::<f64>().ok())
+        .is_none_or(|version| version >= 8.0)
+}
+
+#[cfg(not(windows))]
+fn nx_reads_unicode_paths(_program: &str) -> bool {
+    true
+}
+
+/// `directory` 是新进程的工作目录。老版 CAD 会用当前目录做初始化，而任务中心
+/// 继承来的目录未必是它能接受的（真机实测：不设工作目录，NX 直接
+/// `NX Initialization Error`；设成部件所在目录就正常）。UNC 路径不能当工作目录
+/// —— 用 `\\?\` 前缀的私有路径同理，遇到就保持继承。
+fn spawn(program: &str, arguments: &[String], directory: Option<&Path>) -> Result<()> {
     if program.contains('\0') || arguments.iter().any(|argument| argument.contains('\0')) {
         bail!("invalid application command");
     }
-    std::process::Command::new(program)
+    let mut command = std::process::Command::new(program);
+    command
         .args(arguments)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    if let Some(directory) = directory {
+        let text = directory.to_string_lossy();
+        if directory.is_absolute() && !text.starts_with("\\\\") {
+            command.current_dir(directory);
+        }
+    }
+    command
         .spawn()
         .with_context(|| format!("could not start {program}"))?;
     Ok(())
@@ -296,7 +339,7 @@ pub fn open_directory(path: &Path) -> Result<()> {
     let program = "explorer";
     #[cfg(not(any(target_os = "macos", windows)))]
     let program = "xdg-open";
-    spawn(program, &[path.to_string_lossy().into_owned()])
+    spawn(program, &[path.to_string_lossy().into_owned()], None)
 }
 
 /// Version of the WebView2 runtime the Windows desktop shell needs, if present.
@@ -437,7 +480,7 @@ mod platform {
         None
     }
 
-    pub fn command(bundle: &Path) -> Vec<String> {
+    pub fn command(_spec: &Spec, bundle: &Path) -> Vec<String> {
         vec![
             "/usr/bin/open".into(),
             "-a".into(),
@@ -557,6 +600,14 @@ mod platform {
             ],
         },
         Spec {
+            id: "nx",
+            name: "Siemens NX",
+            // 现场只有 NX 用 `.prt`；入口由 `nx_install()` 单独定位（见下）。
+            extensions: &["prt"],
+            exe: "ugraf.exe",
+            fallbacks: &[],
+        },
+        Spec {
             id: "notepad",
             name: "Notepad",
             extensions: &["txt", "md", "csv"],
@@ -602,9 +653,98 @@ mod platform {
         None
     }
 
+    /// NX 的安装根可以落在**任意盘**（本机就是 `D:\Program Files (x86)\UGS\NX 7.5`），
+    /// 入口也不叫 `ugraf.exe` 所在的 `App Paths`——所以静态 `fallbacks` 拼不出来。
+    /// 各版本的目录布局还不一样：
+    /// - NX 7.5 及更早：`<安装根>\UGII\ugraf.exe`
+    /// - NX 8 及以后：`<安装根>\NXBIN\ugraf.exe`
+    ///
+    /// 依次认：安装器写进注册表的环境变量 → 进程环境 → 常见安装根下的 `NX*` 版本目录
+    /// （取版本号最大的那个）。全都找不到才返回 `None`，交回系统关联。
+    fn nx_install() -> Option<PathBuf> {
+        const RELATIVES: [&str; 2] = ["UGII/ugraf.exe", "NXBIN/ugraf.exe"];
+
+        fn under(base: &Path) -> Option<PathBuf> {
+            RELATIVES
+                .iter()
+                .map(|relative| base.join(relative))
+                .find(|candidate| candidate.is_file())
+        }
+
+        // `UGII_ROOT_DIR` 直接指向 UGII 目录，`UGII_BASE_DIR` 指安装根，两者都试一遍。
+        fn from_base(base: &Path) -> Option<PathBuf> {
+            under(base).or_else(|| base.parent().and_then(under))
+        }
+
+        const ENVIRONMENT: &str =
+            r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
+        for name in ["UGII_BASE_DIR", "UGII_ROOT_DIR"] {
+            if let Some(value) = crate::winreg::read_string(ENVIRONMENT, name) {
+                if let Some(found) = from_base(Path::new(&value)) {
+                    return Some(found);
+                }
+            }
+        }
+
+        for name in ["UGII_BASE_DIR", "UGII_ROOT_DIR"] {
+            if let Some(value) = std::env::var_os(name) {
+                if let Some(found) = from_base(Path::new(&value)) {
+                    return Some(found);
+                }
+            }
+        }
+
+        for root in program_roots() {
+            for family in ["Siemens", "UGS"] {
+                let Ok(entries) = std::fs::read_dir(root.join(family)) else {
+                    continue;
+                };
+                let mut versions: Vec<PathBuf> = entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|path| {
+                        path.is_dir()
+                            && path
+                                .file_name()
+                                .is_some_and(|name| name.to_string_lossy().starts_with("NX"))
+                    })
+                    .collect();
+                versions.sort_by(|left, right| {
+                    nx_version(left)
+                        .partial_cmp(&nx_version(right))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                for directory in versions.iter().rev() {
+                    if let Some(found) = under(directory) {
+                        return Some(found);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// `NX 7.5` → 7.5、`NX 2306` → 2306.0；解析不出来时排最前（最后才试）。
+    pub(super) fn nx_version(directory: &Path) -> f64 {
+        directory
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default()
+            .trim_start_matches("NX")
+            .trim()
+            .parse::<f64>()
+            .unwrap_or(-1.0)
+    }
+
     pub fn resolve(spec: &Spec) -> Option<PathBuf> {
         if let Some(path) = registry(spec.exe) {
             return Some(path);
+        }
+        // NX 走专用探测：它既不在 `App Paths`，也不保证装在系统盘。
+        if spec.id == "nx" {
+            if let Some(path) = nx_install() {
+                return Some(path);
+            }
         }
         for root in program_roots() {
             for fallback in spec.fallbacks {
@@ -617,8 +757,15 @@ mod platform {
         None
     }
 
-    pub fn command(path: &Path) -> Vec<String> {
-        vec![path.to_string_lossy().into_owned(), PLACEHOLDER.into()]
+    pub fn command(spec: &Spec, path: &Path) -> Vec<String> {
+        let program = path.to_string_lossy().into_owned();
+        // NX **不认** `ugraf.exe <part.prt>`：那样只会开一个空会话（真机实测标题就是
+        // `NX 7.5 - `，没有文件名）。官方开关是 `-retrieve:<part>`，实测标题才出现
+        // `NX 7.5 - 基本环境 - [arrow.prt]`。
+        if spec.id == "nx" {
+            return vec![program, format!("-retrieve:{PLACEHOLDER}")];
+        }
+        vec![program, PLACEHOLDER.into()]
     }
 }
 
@@ -667,7 +814,7 @@ mod platform {
         None
     }
 
-    pub fn command(path: &Path) -> Vec<String> {
+    pub fn command(_spec: &Spec, path: &Path) -> Vec<String> {
         vec![path.to_string_lossy().into_owned(), PLACEHOLDER.into()]
     }
 }
@@ -698,7 +845,7 @@ pub fn detect() -> Vec<Application> {
             };
             let command = resolved
                 .as_ref()
-                .map(|found| platform::command(found))
+                .map(|found| platform::command(spec, found))
                 .unwrap_or_default();
             let available = resolved.is_some();
             Application {
@@ -746,6 +893,64 @@ mod tests {
                 ".{extension} 不该被悄悄启动"
             );
         }
+    }
+
+    /// 现场（2026-11-03）：客户机的 `.prt` 根本没有文件关联（`HKCR\.prt` 为空），
+    /// 只靠 `open::that` 必然失败。所以 `.prt` 必须先交给 NX：找到 `ugraf.exe` 就直接开，
+    /// 找不到才退回系统关联。这条测试在没装 NX 的机器上也要通过——它只钉「映射关系」，
+    /// 装机状态由 `available` 表达。
+    #[cfg(windows)]
+    #[test]
+    fn a_part_file_is_handed_to_nx() {
+        let apps = detect();
+        let app = for_file(&apps, "bracket.prt").expect(".prt 必须映射到 NX");
+        assert_eq!(app.id, "nx");
+        if app.available {
+            let program = app.command[0].to_ascii_lowercase();
+            assert!(
+                program.ends_with("ugraf.exe"),
+                "NX 的入口应是 ugraf.exe，实际是 {program}"
+            );
+            assert!(
+                Path::new(&app.command[0]).is_file(),
+                "探测到的入口必须真实存在"
+            );
+            // 裸文件名只会开一个空会话（真机实测标题是 `NX 7.5 - `，没有文件名）。
+            assert_eq!(app.command[1], format!("-retrieve:{PLACEHOLDER}"));
+        }
+    }
+
+    /// `NX 7.5` / `NX 12.0` / `NX 2306` 必须按数值而不是字符串比大小，
+    /// 否则 `NX 7.5` 会被当成最新版，拿旧版本去开新版本的文件。
+    #[cfg(windows)]
+    #[test]
+    fn nx_versions_compare_numerically() {
+        let old = super::platform::nx_version(Path::new("C:/Siemens/NX 7.5"));
+        let newer = super::platform::nx_version(Path::new("C:/Siemens/NX 12.0"));
+        let newest = super::platform::nx_version(Path::new("C:/Siemens/NX 2306"));
+        assert!(newer > old, "NX 12.0 应比 NX 7.5 新");
+        assert!(newest > newer, "NX 2306 应比 NX 12.0 新");
+        // 解析不出数字的目录排最前，只有实在没有别的版本时才会被试到。
+        let unknown = super::platform::nx_version(Path::new("C:/Siemens/Teamcenter"));
+        assert!(unknown < old);
+    }
+
+    /// NX 7.x 不认中文路径（真机实测：进程起来了但停在空会话）。这条只钉版本判定，
+    /// 不依赖本机装的是哪个版本。
+    #[cfg(windows)]
+    #[test]
+    fn nx_only_reads_unicode_paths_from_version_eight() {
+        assert!(!super::nx_reads_unicode_paths(
+            r"D:\Program Files (x86)\UGS\NX 7.5\UGII\ugraf.exe"
+        ));
+        assert!(super::nx_reads_unicode_paths(
+            r"C:\Program Files\Siemens\NX 12.0\NXBIN\ugraf.exe"
+        ));
+        assert!(super::nx_reads_unicode_paths(
+            r"C:\Program Files\Siemens\NX 2306\NXBIN\ugraf.exe"
+        ));
+        // 版本读不出来时按「支持」处理：宁可让用户看到空会话，也不要误拦一台能用的机器。
+        assert!(super::nx_reads_unicode_paths(r"D:\NX\UGII\ugraf.exe"));
     }
 
     /// A program path that is absolute on the host OS. Rules must not hard-code
