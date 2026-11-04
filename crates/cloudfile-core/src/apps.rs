@@ -213,6 +213,10 @@ const DEFAULT_OPENABLE: &[&str] = &[
     "erg_from_mod1",
     "erg_from_mod2",
     "erg_from_mod3",
+    // 现场又报的两类（2026-11-04 用户手加）：.aitp 是仿真输入/参数文件，
+    // .dat 是各求解器通用的数据文件 —— 两者都没有固定的程序归属，只交给系统关联。
+    "aitp",
+    "dat",
 ];
 
 pub fn validate_rules(rules: &[OpenRule]) -> Result<()> {
@@ -1018,6 +1022,11 @@ mod tests {
             "run.erg_from_Mod2",
             "run.erg_from_mod3",
             "run.erg_from_Mod3",
+            // 2026-11-04：.aitp 与 .dat 也属于现场的数据文件，`.DAT` 走同一条下转路径。
+            "run.aitp",
+            "run.AITP",
+            "run.dat",
+            "run.DAT",
         ] {
             assert!(
                 DEFAULT_OPENABLE.contains(&extension_of(name).as_str()),
