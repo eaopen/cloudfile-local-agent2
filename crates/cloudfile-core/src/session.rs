@@ -31,6 +31,16 @@ pub struct Config {
     /// 读回来不影响任何判定。手写 true/false 都不会改变源能否被接受。
     #[serde(default)]
     pub allow_insecure_update_source: bool,
+    /// ApplicationProfile V1 的发现地址（完整 URL 或裸 origin）。
+    ///
+    /// 由部署方注入：不同部署把同一条 `/admin-api/local-bridge/profile/v1`
+    /// 挂在不同的反向代理前缀下（例如 Etech 生产是 `/prod-api/admin-api/...`），
+    /// agent 无法从服务地址里推出来。留空时界面用第一个受信任服务的 origin 兜底。
+    ///
+    /// 它只是**去哪个地址取应用元数据**，不是信任：能绑定哪一个文件服务仍由
+    /// `allowed_origins` + `service_paths` 决定，profile 不能新增受信任服务。
+    #[serde(default)]
+    pub profile_source: Option<String>,
 }
 
 impl Config {

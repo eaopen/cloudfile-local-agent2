@@ -8,7 +8,7 @@
 </head>
 <body>
 <aside>
-  <div class="brand"><span class="brand-mark" aria-hidden="true"></span> CloudFile</div>
+  <div class="brand"><span class="brand-mark" aria-hidden="true"></span> <span id="brand-name">CloudFile</span></div>
   <div class="badge" id="agent-badge">AGENT</div>
   <nav aria-label="主导航">
     <button class="nav-item selected" data-view="tasks" aria-current="page"><span aria-hidden="true">▤</span>本地任务<span id="attention-count" class="nav-count" hidden></span></button>
@@ -53,6 +53,11 @@
         <div class="settings-group"><h3>工作副本目录</h3><label class="field"><span class="hint">修改仅影响新任务；留空恢复默认目录。</span><input id="workspace_root" type="text" aria-label="工作副本目录" placeholder="默认：用户主目录 / CloudFile-Dev / Workspace"></label></div>
         <div class="form-footer"><button>保存设置</button><button type="button" id="workspace-reset" class="secondary">恢复默认目录</button><span class="hint">已有文件和编辑任务会保留在原位置。</span></div>
       </form>
+    </section>
+    <section class="panel"><div class="section-heading"><div><h2>应用信息</h2><p class="hint">站点下发的品牌名称与环境，只用于显示，不改变文件权限。</p></div></div>
+      <p id="app-profile-state" class="hint">尚未同步应用信息。</p>
+      <div class="field-block"><span class="hint">应用信息地址（留空使用默认地址）</span><input id="app-profile-source" type="text" spellcheck="false" placeholder="http://服务地址/admin-api/local-bridge/profile/v1"></div>
+      <div class="row"><button id="app-profile-sync" class="secondary" type="button">同步应用信息</button><span id="app-profile-hint" class="hint"></span></div>
     </section>
     <section class="panel"><div class="section-heading"><div><h2>关于与更新</h2><p id="version" class="hint"></p></div><button id="check-update" class="secondary">检查更新</button></div>
       <details class="advanced"><summary>浏览器连接与诊断</summary><div class="advanced-content">

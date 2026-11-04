@@ -396,6 +396,74 @@ pub fn summaries(root: &Path) -> Value {
         .collect::<Vec<_>>())
 }
 
+/// 界面用的默认发现地址：`config.profile_source` 显式给了就用它，否则退回
+/// 第一个受信任服务的 origin + 固定发现路径。
+///
+/// 为什么需要一个可配置项：同一条 `/admin-api/local-bridge/profile/v1` 在不同部署下
+/// 挂在不同的反代前缀后面（Etech 生产是 `/prod-api/admin-api/...`），从服务地址
+/// 推不出来。这里给的只是**默认值**，用户/部署可以覆盖。
+pub fn default_address(config: &session::Config) -> Option<String> {
+    if let Some(raw) = config
+        .profile_source
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(raw.to_string());
+    }
+    config
+        .allowed_origins
+        .first()
+        .map(|origin| format!("{origin}{DISCOVERY_PATH}"))
+}
+
+/// 设置页的「应用信息」：已绑定的 profile、默认发现地址、以及侧栏该显示的名字。
+///
+/// 只读投影 + 一个地址，没有任何授权含义：绑定成功与否由 [`sync`] 判定，
+/// 这里的每一项都只是把本地已存的东西摊开展示。
+pub fn overview(root: &Path) -> Value {
+    let labels = labels(root);
+    // 配置读不出来（损坏/权限）时不要在这里报错：任务中心本来还能用，
+    // 应用信息只是展示，退回「没有品牌、没有默认地址」即可。
+    let config = session::config(root).ok();
+    // 侧栏品牌：只在「这个文件服务恰好对应一个 profile」时采用，歧义时保持
+    // CloudFile 默认名 —— 猜错牌子比不显示牌子更糟。
+    //
+    // 要遍历所有受信任服务，不能只看第一个：现场就是 EAP 门户域名排在前、
+    // 真正签了 profile 的是 IP 源（10.9.8.162:6111），只看第一个永远显示 CloudFile。
+    // 多个服务分别绑不同应用时取第一个能唯一解析的，本机只显示一个名字。
+    let brand = config.as_ref().and_then(|config| {
+        config
+            .allowed_origins
+            .iter()
+            .find_map(|server| label_for_file_server(&labels, server))
+    });
+    json!({
+        "source": config.as_ref().and_then(default_address),
+        "configured_source": config.as_ref().and_then(|c| c.profile_source.clone()),
+        "brand": brand.map(|label| json!({
+            "application_name": label.application_name,
+            "profile_id": label.profile_id,
+            "environment": label.environment,
+            "stale": label.stale,
+        })),
+        "profiles": summaries(root),
+    })
+}
+
+/// 记下本次成功同步用的地址。校验与同步是同一套规则：地址不合法时
+/// [`sync`] 已经拒绝了，这里只存**已经用过且成功**的那一份。
+pub fn remember_source(root: &Path, address: &str) -> Result<()> {
+    let (_, canonical) = discovery_target(address)?;
+    let _lock = storage::lock(&root.join("config.lock"))?;
+    let mut config = session::config(root)?;
+    if config.profile_source.as_deref() == Some(canonical.as_str()) {
+        return Ok(());
+    }
+    config.profile_source = Some(canonical);
+    storage::write(&root.join("config.json"), &config)
+}
+
 /// Only use a brand when a CloudFile origin resolves to *one* application
 /// instance. Ambiguous mappings keep the existing CloudFile service display.
 pub fn label_for_file_server<'a>(
@@ -501,6 +569,150 @@ mod tests {
         ] {
             assert!(discovery_target(bad).is_err(), "{bad}");
         }
+    }
+
+    /// 设置页的默认地址：部署显式配了就用配置，否则退回第一个受信任服务。
+    /// 这条决定了「没填地址时点同步会去问谁」。
+    #[test]
+    fn default_address_prefers_the_deployed_source_and_falls_back_to_the_trusted_service() {
+        let (_temporary, root) = storage::test_root();
+        // 一个服务都没信任：没有默认地址，界面应提示先完成安装引导。
+        assert_eq!(default_address(&session::config(&root).unwrap()), None);
+
+        session::trust(&root, "https://files.example.test/seafile".into()).unwrap();
+        assert_eq!(
+            default_address(&session::config(&root).unwrap()).unwrap(),
+            "https://files.example.test/admin-api/local-bridge/profile/v1"
+        );
+
+        // 部署把同一条路径挂在反代前缀后面时，配置优先（否则一定 404）。
+        let mut config = session::config(&root).unwrap();
+        config.profile_source =
+            Some("http://files.example.test/prod-api/admin-api/local-bridge/profile/v1".into());
+        assert_eq!(
+            default_address(&config).unwrap(),
+            "http://files.example.test/prod-api/admin-api/local-bridge/profile/v1"
+        );
+        // 空串等于没配。
+        config.profile_source = Some("   ".into());
+        assert_eq!(
+            default_address(&config).unwrap(),
+            "https://files.example.test/admin-api/local-bridge/profile/v1"
+        );
+    }
+
+    /// 没有绑定过 profile 时，设置页要说「尚未同步」而不是报错；
+    /// 侧栏也必须保持 CloudFile 默认名。
+    #[test]
+    fn overview_is_empty_but_successful_before_any_profile_is_bound() {
+        let (_temporary, root) = storage::test_root();
+        let empty = overview(&root);
+        assert_eq!(empty["profiles"].as_array().unwrap().len(), 0);
+        assert!(empty["brand"].is_null());
+        assert!(empty["source"].is_null());
+
+        session::trust(&root, "https://files.example.test/seafile".into()).unwrap();
+        let with_service = overview(&root);
+        assert_eq!(
+            with_service["source"].as_str().unwrap(),
+            "https://files.example.test/admin-api/local-bridge/profile/v1"
+        );
+        assert!(with_service["brand"].is_null());
+    }
+
+    /// 记住的必须是与同步时相同的那条规范地址：写成 origin 会让下次同步
+    /// 打到不带前缀的路径上（正好是漏反代前缀的经典错误）。
+    #[test]
+    fn a_successful_sync_remembers_the_canonical_address_only() {
+        let (_temporary, root) = storage::test_root();
+        session::trust(&root, "https://files.example.test/seafile".into()).unwrap();
+        assert!(remember_source(&root, "https://files.example.test/prod-api").is_err());
+
+        remember_source(
+            &root,
+            "https://files.example.test/prod-api/admin-api/local-bridge/profile/v1",
+        )
+        .unwrap();
+        assert_eq!(
+            session::config(&root).unwrap().profile_source.unwrap(),
+            "https://files.example.test/prod-api/admin-api/local-bridge/profile/v1"
+        );
+        // 再记一次同样的地址是幂等的。
+        remember_source(
+            &root,
+            "https://files.example.test/prod-api/admin-api/local-bridge/profile/v1",
+        )
+        .unwrap();
+    }
+
+    /// 极简 HTTP 服务：先绑端口、用真实 base 拼响应体，再回答一次 GET。
+    /// 这样 profile 的 `origin`/`services.files` 必然与请求地址一致（同源校验的硬要求）。
+    fn serve_profile(build: impl FnOnce(&str) -> String) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let body = build(&base).into_bytes();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buffer = [0u8; 2048];
+            let _ = std::io::Read::read(&mut stream, &mut buffer);
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = std::io::Write::write_all(&mut stream, header.as_bytes());
+            let _ = std::io::Write::write_all(&mut stream, &body);
+        });
+        base
+    }
+
+    /// 端到端：真拉一次 Profile → 绑定 → 设置页/侧栏读得到品牌。
+    /// 这条覆盖「界面点同步」背后真正跑的路径（Tauri 命令只是包了一层）。
+    #[test]
+    fn a_real_sync_binds_the_brand_for_display() {
+        let (_temporary, root) = storage::test_root();
+        let base = serve_profile(|base| {
+            json!({
+                "schema_version": 1,
+                "profile_id": "etech-test",
+                "provider": "etech",
+                "environment": "test",
+                "revision": 1,
+                "expires_at": crate::now() + 3600,
+                "application": {"id": "etech", "name": "Etech文件助手"},
+                "origin": base,
+                "services": {"files": format!("{base}/seafile")},
+                "channels": [{
+                    "id": "files", "title": "文件", "kind": "native",
+                    "module": "cloudfile",
+                    "capabilities": ["cloudfile.file.view"],
+                }],
+                "update": {"track": "dev", "source_id": "trusted-dev"},
+            })
+            .to_string()
+        });
+        // 服务必须先被信任：Profile 只能引用已有的文件服务，不能新增。
+        // 故意**先**信任另一个服务，让签 profile 的这个排第二 —— 现场就是这样
+        // （门户域名在前、IP 源签的 profile），只看第一个服务会永远显示 CloudFile。
+        session::trust(&root, "https://portal.example.test/seafile".to_string()).unwrap();
+        session::trust(&root, format!("{base}/seafile")).unwrap();
+
+        let result = sync(&root, &base).unwrap();
+        assert_eq!(result["application_name"], "Etech文件助手");
+        assert_eq!(result["file_server"], base);
+
+        // 桌面端在同步成功后会记住这次用的地址（`remember_source`），
+        // 否则默认地址永远指向第一个受信任服务、下次同步又打错地方。
+        remember_source(&root, &base).unwrap();
+
+        let page = overview(&root);
+        assert_eq!(page["brand"]["application_name"], "Etech文件助手");
+        assert_eq!(page["profiles"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            page["source"].as_str().unwrap(),
+            format!("{base}{DISCOVERY_PATH}")
+        );
     }
 
     #[test]

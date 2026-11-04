@@ -670,6 +670,47 @@ function showAutostartNote(mechanism) {
   note.textContent = text;
 }
 
+// 应用信息（ApplicationProfile V1）：站点下发的品牌名称与环境。
+// 纯展示 —— 过期或没有 profile 时侧栏就保持「CloudFile」，绝不因为拿不到元数据
+// 而挡住任何文件操作。
+function renderAppProfile(profile) {
+  const name = profile && profile.brand && profile.brand.application_name;
+  document.querySelector('#brand-name').textContent = name || 'CloudFile';
+  const state = document.querySelector('#app-profile-state');
+  const source = document.querySelector('#app-profile-source');
+  if (source && !source.value && profile && profile.source) source.value = profile.source;
+  const profiles = (profile && profile.profiles) || [];
+  if (!profiles.length) {
+    state.textContent = '尚未同步应用信息。同步后这里会显示站点品牌名称与环境。';
+    return;
+  }
+  state.textContent = profiles.map((item) => {
+    const until = new Date(item.expires_at * 1000);
+    const day = `${until.getFullYear()}-${String(until.getMonth() + 1).padStart(2, '0')}-${String(until.getDate()).padStart(2, '0')}`;
+    const expiry = item.stale ? '已过期，仅作显示' : `有效至 ${day}`;
+    return `${item.application_name}（${item.environment}，${expiry}）`;
+  }).join('；');
+}
+
+async function syncAppProfile() {
+  const button = document.querySelector('#app-profile-sync');
+  const hint = document.querySelector('#app-profile-hint');
+  const address = document.querySelector('#app-profile-source').value.trim();
+  button.disabled = true;
+  hint.textContent = '正在同步…';
+  try {
+    const result = await invoke('sync_app_profile', { address: address || null });
+    renderAppProfile(result.profile);
+    hint.textContent = `已同步：${result.application_name}（${result.source}）`;
+  } catch (error) {
+    // 常见三种：服务没被信任、地址漏了反代前缀、过期/签名不符。原文比笼统的
+    // 「同步失败」有用得多，直接透出。
+    hint.textContent = `同步失败：${(error && error.message) || error}`;
+  } finally {
+    button.disabled = false;
+  }
+}
+
 async function loadSettings() {
   const current = await invoke('settings_get');
   component = current;
@@ -699,6 +740,9 @@ async function loadSettings() {
     hostState.textContent = `Host ${registration.host} 尚未注册；点「重新注册」由 Agent 完成，不需要 Python。`;
   }
   renderWelcome();
+  // 应用信息只影响侧栏名字与这一块文字；拿不到就保持默认，不报错、不阻塞。
+  const appProfile = await invoke('app_profile').catch(() => null);
+  if (appProfile) renderAppProfile(appProfile);
   return current;
 }
 
@@ -708,6 +752,7 @@ function wire() {
   }
   document.querySelector('#setup-run').onclick = runSetup;
   document.querySelector('#setup-open-dir').onclick = openExtensionDir;
+  document.querySelector('#app-profile-sync').onclick = syncAppProfile;
   document.querySelector('#setup-finish').onclick = finishSetup;
   document.querySelector('#setup-ext-dir').onclick = async () => {
     // 浏览器不让程序自动打开扩展管理页，这一步只能靠用户复制路径后再手动粘贴选择。

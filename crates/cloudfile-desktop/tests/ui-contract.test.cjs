@@ -75,6 +75,10 @@ function fakeApp(serviceList, options = {}) {
               float_hidden_when_empty: false, workspace_root: '/test/workspace'
             }
           };
+          if (name === 'app_profile') {
+            if (!options.appProfile) throw new Error('unexpected invocation: ' + name);
+            return options.appProfile;
+          }
           throw new Error('unexpected invocation: ' + name);
         } },
         event: { listen() {} },
@@ -120,6 +124,46 @@ test('settings load renders autostart state and host state without missing eleme
   assert.equal(elements.get('autostart_note').hidden, true);
   assert.equal(elements.get('workspace_root').value, '/test/workspace');
   assert.match(elements.get('host-state').textContent, /尚未注册/);
+  assert.match(elements.get('version').textContent, /2.2.0/);
+});
+
+// 应用信息（ApplicationProfile V1）：有绑定就显示站点品牌，没有就保持 CloudFile。
+// 这两条钉住「品牌只是显示」——拿不到 profile 时设置页必须照常可用。
+test('a bound application profile replaces the sidebar brand and names its source', async () => {
+  const { ctx, elements } = fakeApp([], {
+    appProfile: {
+      brand: { application_name: 'Etech文件助手', profile_id: 'etech-prod',
+        environment: 'prod', stale: false },
+      source: 'http://10.9.8.162:6111/admin-api/local-bridge/profile/v1',
+      configured_source: null,
+      profiles: [{ profile_id: 'etech-prod', application_name: 'Etech文件助手',
+        environment: 'prod', expires_at: 4102444800, stale: false }],
+    },
+  });
+  await vm.runInContext('loadSettings()', ctx);
+  assert.match(elements.get('brand-name').textContent, /Etech文件助手/);
+  assert.match(elements.get('app-profile-state').textContent, /Etech文件助手.*prod/);
+  assert.match(elements.get('app-profile-state').textContent, /有效至/);
+  // 输入框被默认地址预填，用户点同步前就能看到会去问谁。
+  assert.match(elements.get('app-profile-source').value, /profile\/v1$/);
+});
+
+test('without a profile the brand stays CloudFile and the page says it is not synced', async () => {
+  const { ctx, elements } = fakeApp([], {
+    appProfile: { brand: null, source: null, configured_source: null, profiles: [] },
+  });
+  await vm.runInContext('loadSettings()', ctx);
+  assert.equal(elements.get('brand-name').textContent, 'CloudFile');
+  assert.match(elements.get('app-profile-state').textContent, /尚未同步/);
+});
+
+// 读不到应用信息（老 Agent / 配置损坏）时必须静默降级，不能把整个设置页拖垮。
+test('a failing application profile read never breaks the settings page', async () => {
+  const { ctx, elements } = fakeApp([]);
+  await vm.runInContext('loadSettings()', ctx);
+  // 没有 profile 时不改写品牌节点，页面显示的仍是 HTML 里的静态兜底名。
+  assert.equal(elements.get('brand-name').textContent, '');
+  assert.match(html, /<span id="brand-name">CloudFile<\/span>/);
   assert.match(elements.get('version').textContent, /2.2.0/);
 });
 

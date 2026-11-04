@@ -316,6 +316,7 @@ mod tests {
             server: "https://internal.example.test".into(),
             repo_id: "private-library-id".into(),
             remote_path: "/confidential/drawing.dwg".into(),
+            library_name: None,
             session_id: "private-session".into(),
             baseline_file_id: "base-id".into(),
             baseline_digest: "digest".into(),

@@ -426,6 +426,53 @@ fn settings_get(state: tauri::State<'_, State>) -> Result<Value, String> {
     }))
 }
 
+/// 设置页的「应用信息」（ApplicationProfile V1）：本地已绑定的品牌 + 默认发现地址。
+///
+/// 纯读：不联网、不改信任、不碰任务。绑定与否由 [`sync_app_profile`] 决定，
+/// 这里只是把本地已有的东西摊开展示。
+#[tauri::command]
+async fn app_profile(state: tauri::State<'_, State>) -> Result<Value, String> {
+    let root = state.root.clone();
+    tauri::async_runtime::spawn_blocking(move || profile::overview(&root))
+        .await
+        .map_err(|_| "无法读取应用信息".to_string())
+}
+
+/// 用户点「同步应用信息」时显式拉一次 Profile。
+///
+/// 成功后把用过的地址记回 config.json，下次不用再填。失败原样透出原因：
+/// 常见的是「服务地址没被信任」「路径不对（漏了反代前缀）」「签名/有效期不符」，
+/// 这三种要分别处理，笼统说「同步失败」等于没说。
+#[tauri::command]
+async fn sync_app_profile(
+    state: tauri::State<'_, State>,
+    address: Option<String>,
+) -> Result<Value, String> {
+    let root = state.root.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<Value, String> {
+        let config = session::config(&root).map_err(|error| error.to_string())?;
+        let target = address
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .or_else(|| profile::default_address(&config))
+            .ok_or_else(|| {
+                "还没有受信任的 CloudFile 服务，无法确定应用信息地址；请先完成安装引导".to_string()
+            })?;
+        let result = profile::sync(&root, &target).map_err(|error| error.to_string())?;
+        // 只记已经成功用过的地址：写失败不算同步失败，本次结果仍然有效。
+        let _ = profile::remember_source(&root, &target);
+        Ok(json!({
+            "ok": true,
+            "source": target,
+            "application_name": result["application_name"],
+            "file_server": result["file_server"],
+            "profile": profile::overview(&root),
+        }))
+    })
+    .await
+    .map_err(|_| "同步应用信息失败".to_string())?
+}
+
 #[tauri::command]
 fn settings_set(
     state: tauri::State<'_, State>,
@@ -1605,6 +1652,8 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
             task_summary,
             settings_get,
             settings_set,
+            app_profile,
+            sync_app_profile,
             float_sync,
             open_task_center,
             toast_show,
