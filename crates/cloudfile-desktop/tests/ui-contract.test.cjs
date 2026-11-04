@@ -79,6 +79,10 @@ function fakeApp(serviceList, options = {}) {
             if (!options.appProfile) throw new Error('unexpected invocation: ' + name);
             return options.appProfile;
           }
+          if (name === 'set_profile_environment') {
+            if (!options.switchTo) throw new Error('unexpected invocation: ' + name);
+            return options.switchTo(args && args.useTest);
+          }
           throw new Error('unexpected invocation: ' + name);
         } },
         event: { listen() {} },
@@ -129,31 +133,72 @@ test('settings load renders autostart state and host state without missing eleme
 
 // 应用信息（ApplicationProfile V1）：有绑定就显示站点品牌，没有就保持 CloudFile。
 // 这两条钉住「品牌只是显示」——拿不到 profile 时设置页必须照常可用。
-test('a bound application profile replaces the sidebar brand and names its source', async () => {
-  const { ctx, elements } = fakeApp([], {
-    appProfile: {
-      brand: { application_name: 'Etech文件助手', profile_id: 'etech-prod',
-        environment: 'prod', stale: false },
-      source: 'http://10.9.8.162:6111/admin-api/local-bridge/profile/v1',
-      configured_source: null,
-      profiles: [{ profile_id: 'etech-prod', application_name: 'Etech文件助手',
-        environment: 'prod', expires_at: 4102444800, stale: false }],
-    },
-  });
+// 两套配置：开关决定当前生效哪一套，状态行要能说清"哪个环境、开了哪些功能"。
+function profileFixture(useTest) {
+  const environment = useTest ? 'test' : 'prod';
+  return {
+    use_test: useTest,
+    brand: { application_name: useTest ? '测试助手' : '生产助手',
+      profile_id: 'etech-' + environment, environment, stale: false },
+    source: `http://${environment}.example.test/prod-api/admin-api/local-bridge/profile/v1`,
+    configured_source: null,
+    active: { profile_id: 'etech-' + environment, environment, stale: false,
+      features: ['cloudfile'], web_entries: [] },
+    profiles: [{ profile_id: 'etech-prod', application_name: '生产助手',
+      environment: 'prod', expires_at: 4102444800, stale: false }],
+  };
+}
+
+test('the active environment drives the brand and the sidebar', async () => {
+  const { ctx, elements } = fakeApp([], { appProfile: profileFixture(false) });
   await vm.runInContext('loadSettings()', ctx);
-  assert.match(elements.get('brand-name').textContent, /Etech文件助手/);
-  assert.match(elements.get('app-profile-state').textContent, /Etech文件助手.*prod/);
-  assert.match(elements.get('app-profile-state').textContent, /有效至/);
-  // 输入框被默认地址预填，用户点同步前就能看到会去问谁。
+  assert.match(elements.get('brand-name').textContent, /生产助手/);
+  assert.match(elements.get('app-profile-state').textContent, /当前生效：生产环境/);
+  assert.match(elements.get('app-profile-state').textContent, /开放功能：cloudfile/);
+  assert.equal(elements.get('use_test_server').checked, false);
+  // 输入框被当前环境的地址预填，用户点同步前就能看到会去问谁。
   assert.match(elements.get('app-profile-source').value, /profile\/v1$/);
   // 「左上角」不止侧栏：标题栏与版本行也要用同一个名字。
-  assert.equal(ctx.document.title, 'Etech文件助手 · 任务中心');
-  assert.match(elements.get('version').textContent, /^Etech文件助手 · 2\.2\.0/);
+  assert.equal(ctx.document.title, '生产助手 · 任务中心');
+  assert.match(elements.get('version').textContent, /^生产助手 · 2\.2\.0/);
+});
+
+test('ticking the test switch loads the test configuration and its features', async () => {
+  const { ctx, elements } = fakeApp([], {
+    appProfile: profileFixture(false),
+    switchTo: (useTest) => ({ ok: true, use_test: useTest, sync_error: null, profile: profileFixture(useTest) }),
+  });
+  vm.runInContext('wire()', ctx);
+  await vm.runInContext('loadSettings()', ctx);
+  assert.equal(elements.get('use_test_server').checked, false);
+
+  await elements.get('use_test_server').onchange({ target: { checked: true } });
+  assert.match(elements.get('brand-name').textContent, /测试助手/);
+  assert.match(elements.get('app-profile-state').textContent, /当前生效：测试环境/);
+  assert.match(elements.get('app-profile-hint').textContent, /已切换到测试环境/);
+
+  // 切回生产：只应剩下生产那套。
+  await elements.get('use_test_server').onchange({ target: { checked: false } });
+  assert.match(elements.get('brand-name').textContent, /生产助手/);
+});
+
+// 拉取失败不是切换失败：必须继续用本地缓存，并把原因说清楚。
+test('a failed pull still switches and says it kept the local copy', async () => {
+  const { ctx, elements } = fakeApp([], {
+    appProfile: profileFixture(false),
+    switchTo: (useTest) => ({ ok: true, use_test: useTest,
+      sync_error: 'Profile discovery unavailable', profile: profileFixture(useTest) }),
+  });
+  vm.runInContext('wire()', ctx);
+  await vm.runInContext('loadSettings()', ctx);
+  await elements.get('use_test_server').onchange({ target: { checked: true } });
+  assert.match(elements.get('app-profile-hint').textContent, /继续使用本地配置/);
+  assert.match(elements.get('brand-name').textContent, /测试助手/);
 });
 
 test('without a profile the brand stays CloudFile and the page says it is not synced', async () => {
   const { ctx, elements } = fakeApp([], {
-    appProfile: { brand: null, source: null, configured_source: null, profiles: [] },
+    appProfile: { use_test: false, brand: null, source: null, configured_source: null, active: null, profiles: [] },
   });
   await vm.runInContext('loadSettings()', ctx);
   assert.equal(elements.get('brand-name').textContent, 'CloudFile');

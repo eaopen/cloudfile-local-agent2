@@ -396,38 +396,146 @@ pub fn summaries(root: &Path) -> Value {
         .collect::<Vec<_>>())
 }
 
-/// 自动刷新判据：返回这次要同步的地址，`None` 表示不用动。
+/// 自动刷新的默认间隔：一天。品牌这类元数据没必要更勤，服务端也没有变更通知。
+pub const REFRESH_INTERVAL: u64 = 24 * 60 * 60;
+
+/// 要拉取的应用信息地址。
 ///
-/// 规则（2026-11-04）：
-/// - **已经绑定过**：已过期、或距上次成功同步超过 `interval` → 刷；
-/// - **从没绑定过**：只有当部署在 config.json 里显式配了 `profile_source` 时才自动绑一次。
-///   否则一律等用户手动点 —— 不能自己拿一个推导出来的地址去敲门户（那台机器上
-///   这条路径可能根本不存在，白敲一次还查不出所以然）。
+/// 一台机器上同时存在测试与生产两套配置：**软件只有一个、更新源也只有一个**，
+/// 但两套配置各自独立缓存，由「使用测试服」开关决定当前生效哪一套。
+/// 所以这里返回的是**所有已知来源**，逐个拉（失败互不影响），各自落到自己的缓存文件里。
 ///
-/// 只影响品牌显示：刷不动就保持现状，绝不阻塞任何文件操作。
-pub fn refresh_target(root: &Path, interval: u64) -> Option<String> {
-    let config = session::config(root).ok()?;
-    let address = default_address(&config)?;
-    let now = crate::now();
-    let mut bound = false;
-    let mut last_fetch = 0u64;
-    let mut earliest_expiry = u64::MAX;
-    for (fetched_at, expires_at) in bound_snapshots(root) {
-        bound = true;
-        last_fetch = last_fetch.max(fetched_at);
-        earliest_expiry = earliest_expiry.min(expires_at);
-    }
-    if !bound {
-        return config
+/// 顺序（先精确后兜底）：
+/// 1. `config.profile_sources`（部署/上次成功时记下的环境→地址）；
+/// 2. 旧的单值 `config.profile_source`（兼容早期安装）；
+/// 3. 从已信任服务推导：`<origin><DISCOVERY_PATH>` 与 `<origin>/prod-api<DISCOVERY_PATH>`。
+///    Etech 两套服务的 `/admin-api` 裸路径都会被 nginx 回成前端 HTML，只有带
+///    `/prod-api` 的才是真接口 —— 两个都试，谁先给出 JSON 谁算数。
+pub fn sources(config: &session::Config) -> Vec<String> {
+    let mut result: Vec<String> = config
+        .profile_sources
+        .values()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect();
+    if result.is_empty() {
+        if let Some(single) = config
             .profile_source
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .map(str::to_string);
+        {
+            result.push(single.to_string());
+        }
     }
-    let expired = now >= earliest_expiry;
+    if result.is_empty() {
+        for origin in &config.allowed_origins {
+            result.push(format!("{origin}{DISCOVERY_PATH}"));
+            result.push(format!("{origin}/prod-api{DISCOVERY_PATH}"));
+        }
+    }
+    let mut seen = BTreeSet::new();
+    result.retain(|value| seen.insert(value.clone()));
+    result.truncate(8);
+    result
+}
+
+/// 当前生效的那一套配置（由「使用测试服」开关选）。
+///
+/// 两套配置各存一份文件（`profile_id` 不同），这里按 `environment` 挑；
+/// 挑不到就返回 None —— 界面退回默认品牌，绝不因为某个环境没拉到就不让用。
+#[derive(Clone, Debug, Serialize)]
+pub struct ActiveProfile {
+    pub profile_id: String,
+    pub application_name: String,
+    pub environment: String,
+    pub origin: String,
+    pub stale: bool,
+    /// 该环境下开放的能力模块（native channel 且 enabled）。
+    /// 这是**功能可见性**的依据，不涉及文件授权 —— 能不能读写在服务端票据里。
+    pub features: Vec<String>,
+    /// 该环境声明的 Web 入口（如元枢），供界面按环境显隐。
+    pub web_entries: Vec<String>,
+}
+
+pub fn active(root: &Path, use_test: bool) -> Option<ActiveProfile> {
+    let wanted = if use_test { "test" } else { "prod" };
+    let mut startable = Vec::new();
+    let Ok(entries) = std::fs::read_dir(root.join("application-profiles")) else {
+        return None;
+    };
+    for entry in entries.flatten().take(32) {
+        let path = entry.path();
+        if path.extension().and_then(|x| x.to_str()) != Some("json")
+            || !matches!(std::fs::metadata(&path), Ok(meta) if meta.len() <= MAX_PROFILE_BYTES)
+        {
+            continue;
+        }
+        let Ok(record) = storage::read::<BoundProfile>(&path) else {
+            continue;
+        };
+        if record.profile.origin != record.source_origin
+            || record.profile.environment != wanted
+            || check_bound_file_service(root, &record.profile).is_err()
+        {
+            continue;
+        }
+        let features = record
+            .profile
+            .channels
+            .iter()
+            .filter(|channel| channel.kind == ChannelKind::Native && channel.enabled)
+            .filter_map(|channel| channel.module.clone())
+            .collect();
+        let web_entries = record
+            .profile
+            .channels
+            .iter()
+            .filter(|channel| channel.kind == ChannelKind::Web && channel.enabled)
+            .filter_map(|channel| channel.entry.clone())
+            .collect();
+        startable.push(ActiveProfile {
+            profile_id: record.profile.profile_id.clone(),
+            application_name: record.profile.application.name.clone(),
+            environment: record.profile.environment.clone(),
+            origin: record.profile.origin.clone(),
+            stale: crate::now() >= record.profile.expires_at,
+            features,
+            web_entries,
+        });
+    }
+    // 同一环境绑定多份时按 profile_id 取第一个，保证结果稳定。
+    startable.sort_by(|a, b| a.profile_id.cmp(&b.profile_id));
+    startable.into_iter().next()
+}
+
+/// 这次该拉哪些地址（空 = 不用拉）。
+///
+/// 触发条件（满足任意一条就拉**全部**来源，两套配置一起保鲜）：
+/// - 程序版本与上次成功拉取的版本不同（升级后立刻拿最新配置）；
+/// - 当前生效环境没有缓存，或已过期；
+/// - 距离上次成功同步超过 `interval`。
+pub fn refresh_due(root: &Path, interval: u64, version: &str, use_test: bool) -> Vec<String> {
+    let Ok(config) = session::config(root) else {
+        return Vec::new();
+    };
+    let targets = sources(&config);
+    if targets.is_empty() {
+        return Vec::new();
+    }
+    let settings = crate::settings::load(root).unwrap_or_default();
+    let now = crate::now();
+    let snapshots = bound_snapshots(root);
+    let last_fetch = snapshots.iter().map(|(at, _)| *at).max().unwrap_or(0);
+    let urgent_version = settings.profile_pull_version.as_deref() != Some(version);
+    let active_missing = active(root, use_test).is_none();
+    let active_expired = snapshots.iter().any(|(_, expires)| now >= *expires);
     let aged = now.saturating_sub(last_fetch) >= interval;
-    (expired || aged).then_some(address)
+    if urgent_version || active_missing || active_expired || aged {
+        targets
+    } else {
+        Vec::new()
+    }
 }
 
 /// 本地已绑定记录的（同步时刻、有效期）。坏文件直接跳过 —— 刷新判据不值得为它失败。
@@ -452,16 +560,23 @@ fn bound_snapshots(root: &Path) -> Vec<(u64, u64)> {
     result
 }
 
-/// 自动刷新的默认间隔：一天。品牌这类元数据没必要更勤，服务端也没有变更通知。
-pub const REFRESH_INTERVAL: u64 = 24 * 60 * 60;
-
-/// 界面用的默认发现地址：`config.profile_source` 显式给了就用它，否则退回
-/// 第一个受信任服务的 origin + 固定发现路径。
+/// 当前环境对应的默认发现地址。
 ///
-/// 为什么需要一个可配置项：同一条 `/admin-api/local-bridge/profile/v1` 在不同部署下
-/// 挂在不同的反代前缀后面（Etech 生产是 `/prod-api/admin-api/...`），从服务地址
-/// 推不出来。这里给的只是**默认值**，用户/部署可以覆盖。
-pub fn default_address(config: &session::Config) -> Option<String> {
+/// 优先用上次成功记下的「环境 → 地址」；没有就退回第一个候选来源。
+/// `use_test` 只决定"优先哪一个"，不影响信任关系。
+///
+/// 为什么需要可配置：同一条 `/admin-api/local-bridge/profile/v1` 在不同部署下挂在
+/// 不同的反代前缀后面（Etech 两套服务都只有 `/prod-api/...` 是真接口），推不出来。
+pub fn default_address(config: &session::Config, use_test: bool) -> Option<String> {
+    let environment = if use_test { "test" } else { "prod" };
+    if let Some(known) = config
+        .profile_sources
+        .get(environment)
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        return Some(known.to_string());
+    }
     if let Some(raw) = config
         .profile_source
         .as_deref()
@@ -470,41 +585,56 @@ pub fn default_address(config: &session::Config) -> Option<String> {
     {
         return Some(raw.to_string());
     }
-    config
-        .allowed_origins
-        .first()
-        .map(|origin| format!("{origin}{DISCOVERY_PATH}"))
+    sources(config).into_iter().next()
 }
 
 /// 设置页的「应用信息」：已绑定的 profile、默认发现地址、以及侧栏该显示的名字。
 ///
 /// 只读投影 + 一个地址，没有任何授权含义：绑定成功与否由 [`sync`] 判定，
 /// 这里的每一项都只是把本地已存的东西摊开展示。
-pub fn overview(root: &Path) -> Value {
+pub fn overview(root: &Path, use_test: bool) -> Value {
     let labels = labels(root);
     // 配置读不出来（损坏/权限）时不要在这里报错：任务中心本来还能用，
     // 应用信息只是展示，退回「没有品牌、没有默认地址」即可。
     let config = session::config(root).ok();
-    // 侧栏品牌：只在「这个文件服务恰好对应一个 profile」时采用，歧义时保持
-    // CloudFile 默认名 —— 猜错牌子比不显示牌子更糟。
-    //
-    // 要遍历所有受信任服务，不能只看第一个：现场就是 EAP 门户域名排在前、
-    // 真正签了 profile 的是 IP 源（10.9.8.162:6111），只看第一个永远显示 CloudFile。
-    // 多个服务分别绑不同应用时取第一个能唯一解析的，本机只显示一个名字。
-    let brand = config.as_ref().and_then(|config| {
+    // 当前生效的那一套（按「使用测试服」开关挑）。品牌与功能可见性都以它为准。
+    let current = active(root, use_test);
+    // 兜底：开关选中的环境没有缓存时，退到「这个文件服务恰好对应一个 profile」的
+    // 那个品牌，而不是直接掉回 CloudFile —— 至少别让已经拉到的名字白白浪费。
+    let fallback = config.as_ref().and_then(|config| {
         config
             .allowed_origins
             .iter()
             .find_map(|server| label_for_file_server(&labels, server))
     });
-    json!({
-        "source": config.as_ref().and_then(default_address),
-        "configured_source": config.as_ref().and_then(|c| c.profile_source.clone()),
-        "brand": brand.map(|label| json!({
+    let brand = match (&current, fallback) {
+        (Some(current), _) => json!({
+            "application_name": current.application_name,
+            "profile_id": current.profile_id,
+            "environment": current.environment,
+            "stale": current.stale,
+        }),
+        (None, Some(label)) => json!({
             "application_name": label.application_name,
             "profile_id": label.profile_id,
             "environment": label.environment,
             "stale": label.stale,
+        }),
+        (None, None) => Value::Null,
+    };
+    json!({
+        "source": config.as_ref().and_then(|config| default_address(config, use_test)),
+        "configured_source": config.as_ref().and_then(|c| c.profile_source.clone()),
+        "use_test": use_test,
+        "brand": brand,
+        // 当前环境开放的能力模块与 Web 入口：界面据此显隐「只在某个环境有」的功能。
+        "active": current.map(|profile| json!({
+            "profile_id": profile.profile_id,
+            "environment": profile.environment,
+            "origin": profile.origin,
+            "stale": profile.stale,
+            "features": profile.features,
+            "web_entries": profile.web_entries,
         })),
         "profiles": summaries(root),
     })
@@ -512,14 +642,19 @@ pub fn overview(root: &Path) -> Value {
 
 /// 记下本次成功同步用的地址。校验与同步是同一套规则：地址不合法时
 /// [`sync`] 已经拒绝了，这里只存**已经用过且成功**的那一份。
-pub fn remember_source(root: &Path, address: &str) -> Result<()> {
+/// 记下某个环境成功用过的地址：下次切换/刷新直接用它，不用再逐个候选去试。
+pub fn remember_source(root: &Path, address: &str, environment: &str) -> Result<()> {
     let (_, canonical) = discovery_target(address)?;
-    let _lock = storage::lock(&root.join("config.lock"))?;
-    let mut config = session::config(root)?;
-    if config.profile_source.as_deref() == Some(canonical.as_str()) {
+    let key = environment.trim().to_ascii_lowercase();
+    if key.is_empty() {
         return Ok(());
     }
-    config.profile_source = Some(canonical);
+    let _lock = storage::lock(&root.join("config.lock"))?;
+    let mut config = session::config(root)?;
+    if config.profile_sources.get(&key) == Some(&canonical) {
+        return Ok(());
+    }
+    config.profile_sources.insert(key, canonical);
     storage::write(&root.join("config.json"), &config)
 }
 
@@ -630,33 +765,59 @@ mod tests {
         }
     }
 
-    /// 设置页的默认地址：部署显式配了就用配置，否则退回第一个受信任服务。
-    /// 这条决定了「没填地址时点同步会去问谁」。
+    /// 地址来源的优先级：按环境记下的地址 → 旧的单值 → 从受信任服务推导。
+    /// 推导时会同时试裸路径和 `/prod-api` 前缀（Etech 两套服务只有后者是真接口）。
     #[test]
-    fn default_address_prefers_the_deployed_source_and_falls_back_to_the_trusted_service() {
+    fn sources_and_default_address_follow_the_configured_environment() {
         let (_temporary, root) = storage::test_root();
-        // 一个服务都没信任：没有默认地址，界面应提示先完成安装引导。
-        assert_eq!(default_address(&session::config(&root).unwrap()), None);
-
-        session::trust(&root, "https://files.example.test/seafile".into()).unwrap();
+        // 一个服务都没信任：没有地址，界面应提示先完成安装引导。
+        assert!(sources(&session::config(&root).unwrap()).is_empty());
         assert_eq!(
-            default_address(&session::config(&root).unwrap()).unwrap(),
-            "https://files.example.test/admin-api/local-bridge/profile/v1"
+            default_address(&session::config(&root).unwrap(), false),
+            None
         );
 
-        // 部署把同一条路径挂在反代前缀后面时，配置优先（否则一定 404）。
+        session::trust(&root, "https://files.example.test/seafile".to_string()).unwrap();
+        let derived = sources(&session::config(&root).unwrap());
+        assert_eq!(
+            derived,
+            vec![
+                "https://files.example.test/admin-api/local-bridge/profile/v1".to_string(),
+                "https://files.example.test/prod-api/admin-api/local-bridge/profile/v1".to_string(),
+            ]
+        );
+        // 推导顺序决定默认值：先裸路径，失败会被内容类型校验挡住，回落到 /prod-api。
+        assert_eq!(
+            default_address(&session::config(&root).unwrap(), false).unwrap(),
+            derived[0]
+        );
+
+        // 按环境记下的地址优先，且 prod / test 各用各的。
         let mut config = session::config(&root).unwrap();
-        config.profile_source =
-            Some("http://files.example.test/prod-api/admin-api/local-bridge/profile/v1".into());
-        assert_eq!(
-            default_address(&config).unwrap(),
-            "http://files.example.test/prod-api/admin-api/local-bridge/profile/v1"
+        config.profile_sources.insert(
+            "prod".into(),
+            "http://prod.example.test/prod-api/admin-api/local-bridge/profile/v1".into(),
         );
-        // 空串等于没配。
-        config.profile_source = Some("   ".into());
+        config.profile_sources.insert(
+            "test".into(),
+            "http://test.example.test/prod-api/admin-api/local-bridge/profile/v1".into(),
+        );
         assert_eq!(
-            default_address(&config).unwrap(),
-            "https://files.example.test/admin-api/local-bridge/profile/v1"
+            default_address(&config, false).unwrap(),
+            "http://prod.example.test/prod-api/admin-api/local-bridge/profile/v1"
+        );
+        assert_eq!(
+            default_address(&config, true).unwrap(),
+            "http://test.example.test/prod-api/admin-api/local-bridge/profile/v1"
+        );
+
+        // 旧的单值仍然兼容（早期安装只填过一个地址）。
+        let mut legacy = session::config(&root).unwrap();
+        legacy.profile_source = Some("   ".into());
+        assert_eq!(
+            default_address(&legacy, false).unwrap(),
+            derived[0],
+            "空串等于没配"
         );
     }
 
@@ -665,17 +826,16 @@ mod tests {
     #[test]
     fn overview_is_empty_but_successful_before_any_profile_is_bound() {
         let (_temporary, root) = storage::test_root();
-        let empty = overview(&root);
+        let empty = overview(&root, false);
         assert_eq!(empty["profiles"].as_array().unwrap().len(), 0);
         assert!(empty["brand"].is_null());
-        assert!(empty["source"].is_null());
+        assert!(empty["active"].is_null());
+        assert_eq!(empty["use_test"], json!(false));
 
-        session::trust(&root, "https://files.example.test/seafile".into()).unwrap();
-        let with_service = overview(&root);
-        assert_eq!(
-            with_service["source"].as_str().unwrap(),
-            "https://files.example.test/admin-api/local-bridge/profile/v1"
-        );
+        session::trust(&root, "https://files.example.test/seafile".to_string()).unwrap();
+        let with_service = overview(&root, true);
+        assert_eq!(with_service["use_test"], json!(true));
+        assert!(with_service["source"].as_str().is_some());
         assert!(with_service["brand"].is_null());
     }
 
@@ -685,21 +845,28 @@ mod tests {
     fn a_successful_sync_remembers_the_canonical_address_only() {
         let (_temporary, root) = storage::test_root();
         session::trust(&root, "https://files.example.test/seafile".into()).unwrap();
-        assert!(remember_source(&root, "https://files.example.test/prod-api").is_err());
+        assert!(remember_source(&root, "https://files.example.test/prod-api", "prod").is_err());
 
         remember_source(
             &root,
             "https://files.example.test/prod-api/admin-api/local-bridge/profile/v1",
+            "prod",
         )
         .unwrap();
         assert_eq!(
-            session::config(&root).unwrap().profile_source.unwrap(),
+            session::config(&root)
+                .unwrap()
+                .profile_sources
+                .get("prod")
+                .cloned()
+                .unwrap(),
             "https://files.example.test/prod-api/admin-api/local-bridge/profile/v1"
         );
         // 再记一次同样的地址是幂等的。
         remember_source(
             &root,
             "https://files.example.test/prod-api/admin-api/local-bridge/profile/v1",
+            "prod",
         )
         .unwrap();
     }
@@ -726,99 +893,143 @@ mod tests {
         base
     }
 
-    /// 端到端：真拉一次 Profile → 绑定 → 设置页/侧栏读得到品牌。
-    /// 这条覆盖「界面点同步」背后真正跑的路径（Tauri 命令只是包了一层）。
+    /// 端到端：两个环境各拉一次 → 两套配置并存 → 开关决定用哪一套。
+    /// 这条覆盖「界面点同步 / 切换环境」背后真正跑的路径。
     #[test]
-    fn a_real_sync_binds_the_brand_for_display() {
+    fn two_environments_are_cached_separately_and_the_switch_selects_one() {
         let (_temporary, root) = storage::test_root();
-        let base = serve_profile(|base| {
-            json!({
-                "schema_version": 1,
-                "profile_id": "etech-test",
-                "provider": "etech",
-                "environment": "test",
-                "revision": 1,
-                "expires_at": crate::now() + 3600,
-                "application": {"id": "etech", "name": "Etech文件助手"},
-                "origin": base,
-                "services": {"files": format!("{base}/seafile")},
-                "channels": [{
-                    "id": "files", "title": "文件", "kind": "native",
-                    "module": "cloudfile",
-                    "capabilities": ["cloudfile.file.view"],
-                }],
-                "update": {"track": "dev", "source_id": "trusted-dev"},
-            })
-            .to_string()
+        let prod = serve_profile(|base| {
+            profile_json(
+                base,
+                "etech-prod",
+                "prod",
+                "生产助手",
+                &["cloudfile.file.view"],
+            )
         });
-        // 服务必须先被信任：Profile 只能引用已有的文件服务，不能新增。
-        // 故意**先**信任另一个服务，让签 profile 的这个排第二 —— 现场就是这样
-        // （门户域名在前、IP 源签的 profile），只看第一个服务会永远显示 CloudFile。
-        session::trust(&root, "https://portal.example.test/seafile".to_string()).unwrap();
-        session::trust(&root, format!("{base}/seafile")).unwrap();
+        let test = serve_profile(|base| {
+            profile_json(
+                base,
+                "etech-test",
+                "test",
+                "测试助手",
+                &["cloudfile.file.view"],
+            )
+        });
+        session::trust(&root, format!("{prod}/seafile")).unwrap();
+        session::trust(&root, format!("{test}/seafile")).unwrap();
 
-        let result = sync(&root, &base).unwrap();
-        assert_eq!(result["application_name"], "Etech文件助手");
-        assert_eq!(result["file_server"], base);
+        sync(&root, &prod).unwrap();
+        sync(&root, &test).unwrap();
+        remember_source(&root, &prod, "prod").unwrap();
+        remember_source(&root, &test, "test").unwrap();
 
-        // 桌面端在同步成功后会记住这次用的地址（`remember_source`），
-        // 否则默认地址永远指向第一个受信任服务、下次同步又打错地方。
-        remember_source(&root, &base).unwrap();
+        // 两套并存，各自独立（互不覆盖）。
+        assert_eq!(sources(&session::config(&root).unwrap()).len(), 2);
 
-        let page = overview(&root);
-        assert_eq!(page["brand"]["application_name"], "Etech文件助手");
-        assert_eq!(page["profiles"].as_array().unwrap().len(), 1);
+        // 不勾测试服 → 生产那套；勾了 → 测试那套。
+        let production = overview(&root, false);
+        assert_eq!(production["brand"]["application_name"], "生产助手");
+        assert_eq!(production["active"]["environment"], "prod");
+        let staging = overview(&root, true);
+        assert_eq!(staging["brand"]["application_name"], "测试助手");
+        assert_eq!(staging["active"]["environment"], "test");
+        // 只在测试开放的能力，切到生产就必须消失。
+        assert!(staging["active"]["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "cloudfile"));
         assert_eq!(
-            page["source"].as_str().unwrap(),
-            format!("{base}{DISCOVERY_PATH}")
+            staging["source"].as_str().unwrap(),
+            format!("{test}{DISCOVERY_PATH}")
         );
+        assert_eq!(
+            production["source"].as_str().unwrap(),
+            format!("{prod}{DISCOVERY_PATH}")
+        );
+    }
+
+    /// 构造一份环境 profile 的 JSON；`services.files` 必须与请求来源一致（同源校验）。
+    fn profile_json(
+        base: &str,
+        id: &str,
+        environment: &str,
+        name: &str,
+        capabilities: &[&str],
+    ) -> String {
+        json!({
+            "schema_version": 1,
+            "profile_id": id,
+            "provider": "etech",
+            "environment": environment,
+            "revision": 1,
+            "expires_at": crate::now() + 3600,
+            "application": {"id": "etech", "name": name},
+            "origin": base,
+            "services": {"files": format!("{base}/seafile")},
+            "channels": [{
+                "id": "files", "title": "文件", "kind": "native",
+                "module": "cloudfile",
+                "capabilities": capabilities,
+            }],
+            "update": {"track": "dev", "source_id": "trusted-dev"},
+        })
+        .to_string()
     }
 
     /// 自动刷新判据：不该刷的时候一次都别刷（这是「后台偷偷联网」最容易失控的地方）。
     #[test]
-    fn auto_refresh_only_happens_when_due_and_never_invents_a_target() {
+    fn refresh_is_due_after_an_upgrade_or_when_the_active_environment_is_missing() {
         let (_temporary, root) = storage::test_root();
         let interval = REFRESH_INTERVAL;
         // 没有受信任服务 → 连地址都没有，什么都不做。
-        assert_eq!(refresh_target(&root, interval), None);
+        assert!(refresh_due(&root, interval, "1.0.0", false).is_empty());
 
         session::trust(&root, "https://files.example.test/seafile".to_string()).unwrap();
-        // 有服务但从没绑定、也没配部署源 → 不自作主张去敲门户。
-        assert_eq!(refresh_target(&root, interval), None);
+        // 有服务但从没绑定过 → 当前环境缺配置，要拉。
+        assert!(!refresh_due(&root, interval, "1.0.0", false).is_empty());
 
-        // 部署显式配了发现地址 → 允许自动完成第一次绑定。
-        let mut config = session::config(&root).unwrap();
-        config.profile_source =
-            Some("https://files.example.test/prod-api/admin-api/local-bridge/profile/v1".into());
-        storage::write(&root.join("config.json"), &config).unwrap();
-        assert_eq!(
-            refresh_target(&root, interval).unwrap(),
-            "https://files.example.test/prod-api/admin-api/local-bridge/profile/v1"
-        );
-
-        // 绑定过、还新鲜 → 不动。
         let now = crate::now();
-        store_bound(&root, "etech-test", now - 3600, now + 86400);
-        assert_eq!(refresh_target(&root, interval), None);
+        store_bound(&root, "etech-prod", "prod", now - 60, now + 86400);
+        crate::settings::update(&root, |current| {
+            current.profile_pull_version = Some("1.0.0".into());
+        })
+        .unwrap();
+        // 刚拉过、还是同一个版本 → 不刷。
+        assert!(refresh_due(&root, interval, "1.0.0", false).is_empty());
+
+        // 升级了（版本变了）→ 立刻刷一次。
+        assert!(!refresh_due(&root, interval, "2.0.0", false).is_empty());
 
         // 超过间隔 → 刷。
-        store_bound(&root, "etech-test", now - interval - 60, now + 86400);
-        assert_eq!(
-            refresh_target(&root, interval).unwrap(),
-            "https://files.example.test/prod-api/admin-api/local-bridge/profile/v1"
+        store_bound(
+            &root,
+            "etech-prod",
+            "prod",
+            now - interval - 60,
+            now + 86400,
         );
+        assert!(!refresh_due(&root, interval, "1.0.0", false).is_empty());
 
         // 已过期 → 刷（即使刚同步过）。
-        store_bound(&root, "etech-test", now - 60, now.saturating_sub(10));
-        assert!(refresh_target(&root, interval).is_some());
+        store_bound(
+            &root,
+            "etech-prod",
+            "prod",
+            now - 60,
+            now.saturating_sub(10),
+        );
+        assert!(!refresh_due(&root, interval, "1.0.0", false).is_empty());
     }
 
     /// 往本地写一条绑定记录（只给刷新判据用，不要求能通过完整校验）。
-    fn store_bound(root: &Path, id: &str, fetched_at: u64, expires_at: u64) {
+    fn store_bound(root: &Path, id: &str, environment: &str, fetched_at: u64, expires_at: u64) {
         let dir = root.join("application-profiles");
         storage::private_dir(&dir).unwrap();
         let mut profile = sample();
         profile.profile_id = id.to_string();
+        profile.environment = environment.to_string();
         profile.expires_at = expires_at;
         storage::write(
             &dir.join(format!("{id}.json")),

@@ -39,8 +39,18 @@ pub struct Config {
     ///
     /// 它只是**去哪个地址取应用元数据**，不是信任：能绑定哪一个文件服务仍由
     /// `allowed_origins` + `service_paths` 决定，profile 不能新增受信任服务。
+    ///
+    /// 2026-11-04 起多环境共存：真正使用的是下面按环境分开的 `profile_sources`，
+    /// 这个单值保留给早期安装与手工填入的地址。
     #[serde(default)]
     pub profile_source: Option<String>,
+    /// 按环境（`prod` / `test`）分开的应用信息地址。
+    ///
+    /// 一套软件、一个更新源，但测试与生产是**两套配置**：测试服多开放一些生产没有的
+    /// 能力，需要能切换。两份各自缓存到本地，切换只是"选哪一份生效"，
+    /// 不改变任何信任关系。键用小写环境名，值是该环境的发现地址。
+    #[serde(default)]
+    pub profile_sources: std::collections::BTreeMap<String, String>,
 }
 
 impl Config {

@@ -696,23 +696,58 @@ function applyBrand(name) {
 // 应用信息（ApplicationProfile V1）：站点下发的品牌名称与环境。
 // 纯展示 —— 过期或没有 profile 时侧栏就保持「CloudFile」，绝不因为拿不到元数据
 // 而挡住任何文件操作。
+//
+// 测试/生产是**两套配置**（一套软件、一个更新源）：开关切的是用哪一套，
+// 决定品牌名与该环境开放的功能（`active.features`）。
 function renderAppProfile(profile) {
   const name = profile && profile.brand && profile.brand.application_name;
   applyBrand(name);
+  const toggle = document.querySelector('#use_test_server');
+  if (toggle && profile && typeof profile.use_test === 'boolean') {
+    toggle.checked = profile.use_test;
+  }
   const state = document.querySelector('#app-profile-state');
   const source = document.querySelector('#app-profile-source');
   if (source && !source.value && profile && profile.source) source.value = profile.source;
   const profiles = (profile && profile.profiles) || [];
-  if (!profiles.length) {
-    state.textContent = '尚未同步应用信息。同步后这里会显示站点品牌名称与环境。';
-    return;
+  const active = profile && profile.active;
+  const lines = [];
+  if (active) {
+    const environment = active.environment === 'test' ? '测试' : '生产';
+    const expiry = active.stale ? '配置已过期，仅作显示' : '配置有效';
+    const features = (active.features || []).join('、') || '无';
+    lines.push(`当前生效：${environment}环境（${active.profile_id}）· ${expiry} · 开放功能：${features}`);
   }
-  state.textContent = profiles.map((item) => {
-    const until = new Date(item.expires_at * 1000);
-    const day = `${until.getFullYear()}-${String(until.getMonth() + 1).padStart(2, '0')}-${String(until.getDate()).padStart(2, '0')}`;
-    const expiry = item.stale ? '已过期，仅作显示' : `有效至 ${day}`;
-    return `${item.application_name}（${item.environment}，${expiry}）`;
-  }).join('；');
+  if (profiles.length) {
+    lines.push(`本地已缓存 ${profiles.length} 套配置：` + profiles.map((item) => {
+      const until = new Date(item.expires_at * 1000);
+      const day = `${until.getFullYear()}-${String(until.getMonth() + 1).padStart(2, '0')}-${String(until.getDate()).padStart(2, '0')}`;
+      return `${item.environment}${item.stale ? '(已过期)' : `(至 ${day})`}`;
+    }).join('、'));
+  }
+  state.textContent = lines.length
+    ? lines.join('。')
+    : '尚未同步应用信息。同步后这里会显示站点品牌名称与环境。';
+}
+
+// 切换测试/生产配置。切换本身不做网络请求也没关系——拉不到就用本地缓存。
+async function switchEnvironment(useTest) {
+  const hint = document.querySelector('#app-profile-hint');
+  const toggle = document.querySelector('#use_test_server');
+  if (hint) hint.textContent = useTest ? '正在切到测试环境…' : '正在切回生产环境…';
+  try {
+    const result = await invoke('set_profile_environment', { useTest });
+    renderAppProfile(result.profile);
+    const failed = result.sync_error;
+    if (hint) {
+      hint.textContent = failed
+        ? `已切换，但拉取失败，继续使用本地配置：${failed}`
+        : `已切换到${useTest ? '测试' : '生产'}环境`;
+    }
+  } catch (error) {
+    if (toggle) toggle.checked = !useTest;
+    if (hint) hint.textContent = `切换失败：${(error && error.message) || error}`;
+  }
 }
 
 async function syncAppProfile() {
@@ -778,6 +813,9 @@ function wire() {
   document.querySelector('#setup-run').onclick = runSetup;
   document.querySelector('#setup-open-dir').onclick = openExtensionDir;
   document.querySelector('#app-profile-sync').onclick = syncAppProfile;
+  // 返回 promise 便于测试等待；浏览器里 onchange 的返回值没有人用。
+  document.querySelector('#use_test_server').onchange = (event) =>
+    switchEnvironment(event.target.checked);
   document.querySelector('#setup-finish').onclick = finishSetup;
   document.querySelector('#setup-ext-dir').onclick = async () => {
     // 浏览器不让程序自动打开扩展管理页，这一步只能靠用户复制路径后再手动粘贴选择。

@@ -359,6 +359,7 @@ mod tests {
             extension_dir: None,
             allow_insecure_update_source: false,
             profile_source: None,
+            profile_sources: Default::default(),
         };
         storage::write(&root.join("config.json"), &config).unwrap();
 
@@ -385,6 +386,7 @@ mod tests {
             extension_dir: None,
             allow_insecure_update_source: false,
             profile_source: None,
+            profile_sources: Default::default(),
         };
         storage::write(&root.join("config.json"), &config).unwrap();
 
@@ -447,6 +449,7 @@ mod tests {
             extension_dir: Some(extension_dir.to_string_lossy().into_owned()),
             allow_insecure_update_source: false,
             profile_source: None,
+            profile_sources: Default::default(),
         };
         storage::write(&root.join("config.json"), &config).unwrap();
         assert!(!find(&run(&root, &host), "extension")["ok"]

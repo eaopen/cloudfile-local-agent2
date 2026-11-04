@@ -431,7 +431,10 @@ fn settings_get(state: tauri::State<'_, State>) -> Result<Value, String> {
 /// 读失败就退回默认名 —— 提示窗口绝不该因为元数据问题画不出来。
 #[tauri::command]
 fn app_brand(state: tauri::State<'_, State>) -> String {
-    profile::overview(&state.root)["brand"]["application_name"]
+    let use_test = settings::load(&state.root)
+        .unwrap_or_default()
+        .use_test_server;
+    profile::overview(&state.root, use_test)["brand"]["application_name"]
         .as_str()
         .filter(|name| !name.is_empty())
         .unwrap_or("CloudFile")
@@ -451,17 +454,34 @@ fn spawn_profile_refresh(app: tauri::AppHandle, root: PathBuf) {
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(30));
         loop {
-            if let Some(address) = profile::refresh_target(&root, profile::REFRESH_INTERVAL) {
+            let use_test = settings::load(&root).unwrap_or_default().use_test_server;
+            let targets = profile::refresh_due(
+                &root,
+                profile::REFRESH_INTERVAL,
+                cloudfile_core::VERSION,
+                use_test,
+            );
+            let mut changed = false;
+            for address in targets {
                 match profile::sync(&root, &address) {
-                    Ok(_) => {
-                        // 记住用过的地址：下次自动刷新不用再猜。
-                        let _ = profile::remember_source(&root, &address);
-                        let _ = app.emit("app-profile", profile::overview(&root));
-                        log_profile_refresh(&root, &format!("ok {address}"));
+                    Ok(result) => {
+                        // 按环境记住这个地址：切环境/下次刷新都不用再逐个候选去试。
+                        let environment = result["environment"].as_str().unwrap_or("prod");
+                        let _ = profile::remember_source(&root, &address, environment);
+                        log_profile_refresh(&root, &format!("ok {environment} {address}"));
+                        changed = true;
                     }
+                    // 两套配置独立：一个环境拉失败不影响另一个，也不清缓存。
                     Err(error) => log_profile_refresh(&root, &format!("failed {address}: {error}")),
                 }
             }
+            if changed {
+                let _ = app.emit("app-profile", profile::overview(&root, use_test));
+            }
+            // 记下"这个版本已经拉过"，升级后版本变了就会立刻再拉一次。
+            let _ = settings::update(&root, |current| {
+                current.profile_pull_version = Some(cloudfile_core::VERSION.to_string());
+            });
             std::thread::sleep(std::time::Duration::from_secs(60 * 60));
         }
     });
@@ -504,9 +524,52 @@ fn log_profile_refresh(root: &Path, line: &str) {
 #[tauri::command]
 async fn app_profile(state: tauri::State<'_, State>) -> Result<Value, String> {
     let root = state.root.clone();
-    tauri::async_runtime::spawn_blocking(move || profile::overview(&root))
-        .await
-        .map_err(|_| "无法读取应用信息".to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        let use_test = settings::load(&root).unwrap_or_default().use_test_server;
+        profile::overview(&root, use_test)
+    })
+    .await
+    .map_err(|_| "无法读取应用信息".to_string())
+}
+
+/// 切换测试/生产配置。
+///
+/// 一套软件、一个更新源，切的是**用哪一套配置**（品牌 + 该环境开放的功能通道）。
+/// 切换本身不改信任关系：另一套配置里声明的文件服务仍必须已经受信任。
+/// 切完立刻尝试拉一次目标环境；拉不到就用本地缓存，缓存也没有就退回默认品牌。
+#[tauri::command]
+async fn set_profile_environment(
+    state: tauri::State<'_, State>,
+    use_test: bool,
+) -> Result<Value, String> {
+    let root = state.root.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<Value, String> {
+        settings::update(&root, |current| current.use_test_server = use_test)
+            .map_err(|error| error.to_string())?;
+        let config = session::config(&root).map_err(|error| error.to_string())?;
+        let mut sync_error = Value::Null;
+        if let Some(target) = profile::default_address(&config, use_test) {
+            match profile::sync(&root, &target) {
+                Ok(result) => {
+                    let environment = result["environment"].as_str().unwrap_or("prod");
+                    let _ = profile::remember_source(&root, &target, environment);
+                }
+                // 拉取失败不是切换失败：按需求"拉不到就用本地配置"。
+                Err(error) => {
+                    log_profile_refresh(&root, &format!("switch failed {target}: {error}"));
+                    sync_error = json!(error.to_string());
+                }
+            }
+        }
+        Ok(json!({
+            "ok": true,
+            "use_test": use_test,
+            "sync_error": sync_error,
+            "profile": profile::overview(&root, use_test),
+        }))
+    })
+    .await
+    .map_err(|_| "切换环境失败".to_string())?
 }
 
 /// 用户点「同步应用信息」时显式拉一次 Profile。
@@ -521,23 +584,25 @@ async fn sync_app_profile(
 ) -> Result<Value, String> {
     let root = state.root.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<Value, String> {
+        let use_test = settings::load(&root).unwrap_or_default().use_test_server;
         let config = session::config(&root).map_err(|error| error.to_string())?;
         let target = address
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
-            .or_else(|| profile::default_address(&config))
+            .or_else(|| profile::default_address(&config, use_test))
             .ok_or_else(|| {
                 "还没有受信任的 CloudFile 服务，无法确定应用信息地址；请先完成安装引导".to_string()
             })?;
         let result = profile::sync(&root, &target).map_err(|error| error.to_string())?;
         // 只记已经成功用过的地址：写失败不算同步失败，本次结果仍然有效。
-        let _ = profile::remember_source(&root, &target);
+        let environment = result["environment"].as_str().unwrap_or("prod");
+        let _ = profile::remember_source(&root, &target, environment);
         Ok(json!({
             "ok": true,
             "source": target,
             "application_name": result["application_name"],
             "file_server": result["file_server"],
-            "profile": profile::overview(&root),
+            "profile": profile::overview(&root, use_test),
         }))
     })
     .await
@@ -1725,6 +1790,7 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
             settings_set,
             app_brand,
             app_profile,
+            set_profile_environment,
             sync_app_profile,
             float_sync,
             open_task_center,

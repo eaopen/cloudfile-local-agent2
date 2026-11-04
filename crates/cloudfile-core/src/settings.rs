@@ -64,6 +64,18 @@ pub struct Settings {
     pub open_rules: Vec<crate::apps::OpenRule>,
     /// Per-display resting positions for the dragging entry.
     pub float_positions: BTreeMap<String, FloatPosition>,
+    /// 用测试环境的应用配置（`profile.environment == "test"`）。
+    ///
+    /// 一套软件、一个更新源，但**两套配置**：测试服会多开放一些生产没有的功能
+    /// （例如只在测试验证的能力通道）。默认 false = 生产。这个开关必须落在文件里
+    /// —— 升级只替换 `bin\`，设置文件不动，所以「更新前后勾选一致」是自然成立的。
+    #[serde(default)]
+    pub use_test_server: bool,
+    /// 上次成功拉取应用信息时程序自身的版本。
+    ///
+    /// 用来实现「升级后立刻拉一次最新配置」：版本对不上就不等那 24 小时。
+    #[serde(default)]
+    pub profile_pull_version: Option<String>,
 }
 
 impl Default for Settings {
@@ -79,6 +91,8 @@ impl Default for Settings {
             workspace_root: None,
             open_rules: Vec::new(),
             float_positions: BTreeMap::new(),
+            use_test_server: false,
+            profile_pull_version: None,
         }
     }
 }
