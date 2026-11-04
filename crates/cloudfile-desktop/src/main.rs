@@ -438,6 +438,65 @@ fn app_brand(state: tauri::State<'_, State>) -> String {
         .to_string()
 }
 
+/// 后台自动刷新应用信息（ApplicationProfile V1）。
+///
+/// 节奏：启动后延迟 30 秒拉一次（不跟启动抢资源），之后每小时问一次
+/// 「该不该刷」，真正刷新的判据在 `profile::refresh_target` 里（过期或超过一天）。
+///
+/// 三条硬约束：
+/// 1. **只影响品牌显示** —— 刷失败保持原样，绝不阻塞文件操作、不弹窗；
+/// 2. **不在登录自启时同步等它** —— 单起线程 + 先 sleep，自启路径零开销；
+/// 3. 结果写 `profile-refresh.log`，现场排查「为什么名字没变」时有据可查。
+fn spawn_profile_refresh(app: tauri::AppHandle, root: PathBuf) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        loop {
+            if let Some(address) = profile::refresh_target(&root, profile::REFRESH_INTERVAL) {
+                match profile::sync(&root, &address) {
+                    Ok(_) => {
+                        // 记住用过的地址：下次自动刷新不用再猜。
+                        let _ = profile::remember_source(&root, &address);
+                        let _ = app.emit("app-profile", profile::overview(&root));
+                        log_profile_refresh(&root, &format!("ok {address}"));
+                    }
+                    Err(error) => log_profile_refresh(&root, &format!("failed {address}: {error}")),
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_secs(60 * 60));
+        }
+    });
+}
+
+/// 追加一行刷新记录，超过 256 KiB 先截掉前一半，避免日志无限长。
+fn log_profile_refresh(root: &Path, line: &str) {
+    let path = root.join("profile-refresh.log");
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if meta.len() > 256 * 1024 {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                let keep = text.len() / 2;
+                let tail = text
+                    .char_indices()
+                    .map(|(index, _)| index)
+                    .find(|index| *index >= keep)
+                    .unwrap_or(keep);
+                let _ = std::fs::write(&path, &text[tail..]);
+            }
+        }
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut file| {
+            use std::io::Write;
+            writeln!(file, "{stamp} {line}")
+        });
+}
+
 /// 设置页的「应用信息」（ApplicationProfile V1）：本地已绑定的品牌 + 默认发现地址。
 ///
 /// 纯读：不联网、不改信任、不碰任务。绑定与否由 [`sync_app_profile`] 决定，
@@ -1940,6 +1999,9 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
                 }
             });
             let guard_handle = handle.clone();
+            // 应用信息（品牌名）自动刷新：跟启动自检一样是「后台顺手做」，
+            // 失败只落日志，不影响任务与文件操作。
+            spawn_profile_refresh(handle.clone(), root.clone());
             std::thread::spawn(move || loop {
                 let state = guard_handle.state::<State>();
                 refresh_tray(&state, &guard_handle);

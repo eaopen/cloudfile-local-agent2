@@ -396,6 +396,65 @@ pub fn summaries(root: &Path) -> Value {
         .collect::<Vec<_>>())
 }
 
+/// 自动刷新判据：返回这次要同步的地址，`None` 表示不用动。
+///
+/// 规则（2026-11-04）：
+/// - **已经绑定过**：已过期、或距上次成功同步超过 `interval` → 刷；
+/// - **从没绑定过**：只有当部署在 config.json 里显式配了 `profile_source` 时才自动绑一次。
+///   否则一律等用户手动点 —— 不能自己拿一个推导出来的地址去敲门户（那台机器上
+///   这条路径可能根本不存在，白敲一次还查不出所以然）。
+///
+/// 只影响品牌显示：刷不动就保持现状，绝不阻塞任何文件操作。
+pub fn refresh_target(root: &Path, interval: u64) -> Option<String> {
+    let config = session::config(root).ok()?;
+    let address = default_address(&config)?;
+    let now = crate::now();
+    let mut bound = false;
+    let mut last_fetch = 0u64;
+    let mut earliest_expiry = u64::MAX;
+    for (fetched_at, expires_at) in bound_snapshots(root) {
+        bound = true;
+        last_fetch = last_fetch.max(fetched_at);
+        earliest_expiry = earliest_expiry.min(expires_at);
+    }
+    if !bound {
+        return config
+            .profile_source
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+    }
+    let expired = now >= earliest_expiry;
+    let aged = now.saturating_sub(last_fetch) >= interval;
+    (expired || aged).then_some(address)
+}
+
+/// 本地已绑定记录的（同步时刻、有效期）。坏文件直接跳过 —— 刷新判据不值得为它失败。
+fn bound_snapshots(root: &Path) -> Vec<(u64, u64)> {
+    let mut result = Vec::new();
+    let Ok(entries) = std::fs::read_dir(root.join("application-profiles")) else {
+        return result;
+    };
+    for entry in entries.flatten().take(32) {
+        let path = entry.path();
+        if path.extension().and_then(|x| x.to_str()) != Some("json")
+            || !matches!(std::fs::metadata(&path), Ok(meta) if meta.len() <= MAX_PROFILE_BYTES)
+        {
+            continue;
+        }
+        if let Ok(record) = storage::read::<BoundProfile>(&path) {
+            if record.profile.origin == record.source_origin {
+                result.push((record.fetched_at, record.profile.expires_at));
+            }
+        }
+    }
+    result
+}
+
+/// 自动刷新的默认间隔：一天。品牌这类元数据没必要更勤，服务端也没有变更通知。
+pub const REFRESH_INTERVAL: u64 = 24 * 60 * 60;
+
 /// 界面用的默认发现地址：`config.profile_source` 显式给了就用它，否则退回
 /// 第一个受信任服务的 origin + 固定发现路径。
 ///
@@ -713,6 +772,63 @@ mod tests {
             page["source"].as_str().unwrap(),
             format!("{base}{DISCOVERY_PATH}")
         );
+    }
+
+    /// 自动刷新判据：不该刷的时候一次都别刷（这是「后台偷偷联网」最容易失控的地方）。
+    #[test]
+    fn auto_refresh_only_happens_when_due_and_never_invents_a_target() {
+        let (_temporary, root) = storage::test_root();
+        let interval = REFRESH_INTERVAL;
+        // 没有受信任服务 → 连地址都没有，什么都不做。
+        assert_eq!(refresh_target(&root, interval), None);
+
+        session::trust(&root, "https://files.example.test/seafile".to_string()).unwrap();
+        // 有服务但从没绑定、也没配部署源 → 不自作主张去敲门户。
+        assert_eq!(refresh_target(&root, interval), None);
+
+        // 部署显式配了发现地址 → 允许自动完成第一次绑定。
+        let mut config = session::config(&root).unwrap();
+        config.profile_source =
+            Some("https://files.example.test/prod-api/admin-api/local-bridge/profile/v1".into());
+        storage::write(&root.join("config.json"), &config).unwrap();
+        assert_eq!(
+            refresh_target(&root, interval).unwrap(),
+            "https://files.example.test/prod-api/admin-api/local-bridge/profile/v1"
+        );
+
+        // 绑定过、还新鲜 → 不动。
+        let now = crate::now();
+        store_bound(&root, "etech-test", now - 3600, now + 86400);
+        assert_eq!(refresh_target(&root, interval), None);
+
+        // 超过间隔 → 刷。
+        store_bound(&root, "etech-test", now - interval - 60, now + 86400);
+        assert_eq!(
+            refresh_target(&root, interval).unwrap(),
+            "https://files.example.test/prod-api/admin-api/local-bridge/profile/v1"
+        );
+
+        // 已过期 → 刷（即使刚同步过）。
+        store_bound(&root, "etech-test", now - 60, now.saturating_sub(10));
+        assert!(refresh_target(&root, interval).is_some());
+    }
+
+    /// 往本地写一条绑定记录（只给刷新判据用，不要求能通过完整校验）。
+    fn store_bound(root: &Path, id: &str, fetched_at: u64, expires_at: u64) {
+        let dir = root.join("application-profiles");
+        storage::private_dir(&dir).unwrap();
+        let mut profile = sample();
+        profile.profile_id = id.to_string();
+        profile.expires_at = expires_at;
+        storage::write(
+            &dir.join(format!("{id}.json")),
+            &BoundProfile {
+                source_origin: profile.origin.clone(),
+                fetched_at,
+                profile,
+            },
+        )
+        .unwrap();
     }
 
     #[test]

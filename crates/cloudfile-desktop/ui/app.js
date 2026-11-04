@@ -999,6 +999,11 @@ function wire() {
   };
 
   listen('tasks-changed', () => refresh());
+  // 后台自动刷新（或别处同步）成功后主进程会推一份新的概览：直接用上，
+  // 不用重启也不用再点一次同步。payload 缺失时保持现状。
+  listen('app-profile', ({ payload }) => {
+    if (payload) renderAppProfile(payload);
+  });
   listen('focus-task', async ({ payload }) => {
     setView('tasks');
     await refresh();
