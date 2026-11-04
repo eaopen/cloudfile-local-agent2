@@ -146,6 +146,9 @@ test('a bound application profile replaces the sidebar brand and names its sourc
   assert.match(elements.get('app-profile-state').textContent, /有效至/);
   // 输入框被默认地址预填，用户点同步前就能看到会去问谁。
   assert.match(elements.get('app-profile-source').value, /profile\/v1$/);
+  // 「左上角」不止侧栏：标题栏与版本行也要用同一个名字。
+  assert.equal(ctx.document.title, 'Etech文件助手 · 任务中心');
+  assert.match(elements.get('version').textContent, /^Etech文件助手 · 2\.2\.0/);
 });
 
 test('without a profile the brand stays CloudFile and the page says it is not synced', async () => {
@@ -165,6 +168,21 @@ test('a failing application profile read never breaks the settings page', async 
   assert.equal(elements.get('brand-name').textContent, '');
   assert.match(html, /<span id="brand-name">CloudFile<\/span>/);
   assert.match(elements.get('version').textContent, /2.2.0/);
+});
+
+// 悬浮入口与轻提示是独立 webview，各自用 `app_brand` 取同一个名字。
+// 这里只钉「不再写死品牌文字」——它们没有可用的 DOM 环境跑整段脚本。
+test('float and toast titles are driven by the shared brand command', () => {
+  const toast = fs.readFileSync(path.join(ui, 'toast.js'), 'utf8');
+  const float = fs.readFileSync(path.join(ui, 'float.js'), 'utf8');
+  for (const [name, source, wanted] of [
+    ['toast.js', toast, '${brand} · 已保存到云端'],
+    ['float.js', float, '${brand} 文件任务'],
+  ]) {
+    assert.match(source, /app_brand/, name + ' 没有读取品牌名');
+    assert.ok(source.includes(wanted), name + ' 没有用品牌名拼标题');
+    assert.doesNotMatch(source, /'CloudFile [·文]/, name + ' 仍然写死 CloudFile');
+  }
 });
 
 test('setup status renders first-run steps without registering an external service', () => {

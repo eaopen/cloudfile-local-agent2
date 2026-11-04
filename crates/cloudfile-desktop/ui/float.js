@@ -12,6 +12,10 @@ const listen = window.__TAURI__.event.listen;
 const handle = document.querySelector('#handle');
 const badge = document.querySelector('#badge');
 
+// 与主窗口/轻提示共用同一个品牌名；读不到就保持默认。
+let brand = 'CloudFile';
+invoke('app_brand').then((name) => { if (name) brand = name; }).catch(() => {});
+
 // Below this many pixels a gesture is a click, not a drag. The OS only takes
 // over once the limit is crossed, otherwise the entry could never be clicked.
 const DRAG_SLOP = 4;
@@ -62,10 +66,10 @@ function render(payload) {
   if (attention > 0) {
     badge.hidden = false;
     badge.textContent = String(attention);
-    handle.title = `CloudFile 文件任务 · ${attention} 项待处理`;
+    handle.title = `${brand} 文件任务 · ${attention} 项待处理`;
   } else {
     badge.hidden = true;
-    handle.title = 'CloudFile 文件任务（点击展开，拖动移动）';
+    handle.title = `${brand} 文件任务（点击展开，拖动移动）`;
   }
 }
 

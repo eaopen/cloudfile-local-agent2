@@ -426,6 +426,18 @@ fn settings_get(state: tauri::State<'_, State>) -> Result<Value, String> {
     }))
 }
 
+/// 悬浮入口与轻提示是**独立的 webview**，拿不到主窗口那份 overview；
+/// 它们各自调这个只读命令取品牌名，避免三处各写一份「CloudFile」。
+/// 读失败就退回默认名 —— 提示窗口绝不该因为元数据问题画不出来。
+#[tauri::command]
+fn app_brand(state: tauri::State<'_, State>) -> String {
+    profile::overview(&state.root)["brand"]["application_name"]
+        .as_str()
+        .filter(|name| !name.is_empty())
+        .unwrap_or("CloudFile")
+        .to_string()
+}
+
 /// 设置页的「应用信息」（ApplicationProfile V1）：本地已绑定的品牌 + 默认发现地址。
 ///
 /// 纯读：不联网、不改信任、不碰任务。绑定与否由 [`sync_app_profile`] 决定，
@@ -1652,6 +1664,7 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
             task_summary,
             settings_get,
             settings_set,
+            app_brand,
             app_profile,
             sync_app_profile,
             float_sync,

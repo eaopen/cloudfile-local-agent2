@@ -10,6 +10,11 @@
 const invoke = window.__TAURI__.core.invoke;
 const listen = window.__TAURI__.event.listen;
 const taskUX = window.CloudFileTaskUX;
+// 标题栏也要跟着站点品牌走，所以需要一个窗口句柄。测试环境里没有 window 命名空间时
+// 就保持 null（测试只验渲染，不去碰真实窗口）。
+const appWindow = window.__TAURI__ && window.__TAURI__.window
+  ? window.__TAURI__.window.getCurrentWindow()
+  : null;
 
 const message = document.querySelector('#message');
 const tasks = document.querySelector('#tasks');
@@ -670,12 +675,30 @@ function showAutostartNote(mechanism) {
   note.textContent = text;
 }
 
+// 当前品牌名：侧栏、窗口标题、版本行三处共用同一个值，避免各写一份「CloudFile」。
+let brandName = 'CloudFile';
+
+// 品牌变化时把「左上角」相关的都同步掉：侧栏文字、标题栏、版本行。
+// 标题栏由系统绘制，改不了样式只能改文字，所以单独走一次窗口 API。
+function applyBrand(name) {
+  brandName = name || 'CloudFile';
+  document.querySelector('#brand-name').textContent = brandName;
+  const title = `${brandName} · 任务中心`;
+  document.title = title;
+  if (appWindow && typeof appWindow.setTitle === 'function') {
+    appWindow.setTitle(title).catch(() => {});
+  }
+  if (component) {
+    document.querySelector('#version').textContent = `${brandName} · ${component.version}`;
+  }
+}
+
 // 应用信息（ApplicationProfile V1）：站点下发的品牌名称与环境。
 // 纯展示 —— 过期或没有 profile 时侧栏就保持「CloudFile」，绝不因为拿不到元数据
 // 而挡住任何文件操作。
 function renderAppProfile(profile) {
   const name = profile && profile.brand && profile.brand.application_name;
-  document.querySelector('#brand-name').textContent = name || 'CloudFile';
+  applyBrand(name);
   const state = document.querySelector('#app-profile-state');
   const source = document.querySelector('#app-profile-source');
   if (source && !source.value && profile && profile.source) source.value = profile.source;
@@ -723,7 +746,9 @@ async function loadSettings() {
   showAutostartNote(current.autostart_mechanism);
   document.querySelector('#workspace_root').value = current.settings.workspace_root || '';
   document.querySelector('#host-extension-id').textContent = (setup && setup.extension_id) || '';
-  document.querySelector('#version').textContent = `CloudFile Agent · ${current.version}`;
+  // 版本行沿用当前品牌名（未绑定 profile 时就是 CloudFile）；applyBrand 会在
+  // 读到应用信息后再覆盖一次，两处都写是为了「先画出页面、后补品牌」不闪烁。
+  document.querySelector('#version').textContent = `${brandName} · ${current.version}`;
   document.querySelector('#sidebar-version').textContent = `v${current.version}`;
   // 徽标跟着真实版本走（原来写死「AGENT 2.2 · 开发版」，正式版里既过时又误导）。
   document.querySelector('#agent-badge').textContent = `AGENT ${current.version}`;
