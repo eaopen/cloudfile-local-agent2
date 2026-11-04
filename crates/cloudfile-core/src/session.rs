@@ -52,6 +52,15 @@ pub struct Task {
     pub server: String,
     pub repo_id: String,
     pub remote_path: String,
+    /// 库名，只用于任务中心显示「这是哪个库的文件」。
+    ///
+    /// 来源是服务端签发的 V2 票据里的 `repo_name` claim（cloudfile-hub 写入，
+    /// 由 `seafile_api.get_repo().name` 得到）。它**不参与任何判断**：能不能读、
+    /// 能不能写仍然只看票据 scope 与文件服务端校验。
+    ///
+    /// 老任务文件没有这个键 → `None`，界面上退回显示路径首段的库号。
+    #[serde(default)]
+    pub library_name: Option<String>,
     pub session_id: String,
     pub baseline_file_id: String,
     pub baseline_digest: String,
@@ -742,6 +751,7 @@ mod tests {
             server: "http://127.0.0.1:6111".into(),
             repo_id: "11111111-1111-4111-8111-111111111111".into(),
             remote_path: remote.into(),
+            library_name: None,
             session_id: "session".into(),
             baseline_file_id: "b".repeat(40),
             baseline_digest: "d".repeat(64),
@@ -750,6 +760,38 @@ mod tests {
         storage::write(&task_dir(root, id).unwrap().join("task.json"), &task).unwrap();
         fs::write(working.join("a.docx"), b"x").unwrap();
         working
+    }
+
+    /// 库名（library_name）是后加的键：升级前写下的 task.json 里没有它。
+    /// 老文件必须照常读出来（退回 None，界面显示路径首段的库号），
+    /// 不能因为多一个展示字段就让用户手上的任务全部失效。
+    #[test]
+    fn task_files_written_before_the_library_name_key_still_load() {
+        let (_dir, root) = storage::test_root();
+        let id = "9".repeat(64);
+        let dir = task_dir(&root, &id).unwrap();
+        crate::storage::private_dir(&dir).unwrap();
+        fs::write(
+            dir.join("task.json"),
+            r#"{"task_id":"9999999999999999999999999999999999999999999999999999999999999999",
+                "file_name":"a.docx","mode":"local-view","server":"http://127.0.0.1:6111",
+                "repo_id":"11111111-1111-4111-8111-111111111111","remote_path":"/10220942/a.docx",
+                "session_id":"session","baseline_file_id":"bbbb","baseline_digest":"dddd","size":1}"#,
+        )
+        .unwrap();
+        let task = load(&root, &id).unwrap();
+        assert_eq!(task.remote_path, "/10220942/a.docx");
+        assert_eq!(task.library_name, None);
+        // 新写出的任务带库名，读回来要一致。
+        let named = Task {
+            library_name: Some("方案设计库".into()),
+            ..task
+        };
+        storage::write(&dir.join("task.json"), &named).unwrap();
+        assert_eq!(
+            load(&root, &id).unwrap().library_name.as_deref(),
+            Some("方案设计库")
+        );
     }
 
     #[test]
@@ -813,6 +855,7 @@ mod tests {
             server: "http://127.0.0.1:6111".into(),
             repo_id: LAYOUT_REPO.into(),
             remote_path: remote.into(),
+            library_name: None,
             session_id: "session".into(),
             baseline_file_id: "b".repeat(40),
             baseline_digest: "d".repeat(64),

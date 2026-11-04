@@ -268,6 +268,7 @@ mod tests {
             server: "https://example.com".into(),
             repo_id: String::new(),
             remote_path: "/a.txt".into(),
+            library_name: None,
             session_id: String::new(),
             baseline_file_id: "b".repeat(40),
             baseline_digest: String::new(),

@@ -576,6 +576,7 @@ mod tests {
             server: "https://example.com".into(),
             repo_id,
             remote_path,
+            library_name: None,
             session_id: "c".repeat(36),
             baseline_file_id: "e".repeat(40),
             baseline_digest: session::digest(&dir.join(name)).unwrap(),

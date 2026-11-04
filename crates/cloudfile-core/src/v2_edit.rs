@@ -51,7 +51,31 @@ struct TicketClaims {
     path: String,
     mode: String,
     exp: i64,
+    /// 库名：hub 签票据时从 `seafile_api.get_repo().name` 写进来，只做显示。
+    /// 没有 `deny_unknown_fields`，所以老 hub 不写这一项也能解析（退化成空串）。
+    #[serde(default)]
+    repo_name: String,
 }
+/// 把票据里的库名补进已有任务（只做显示）。
+///
+/// 为什么需要补：这个字段是后加的，已经建好的任务文件里没有；用户下次重开同一个
+/// 文件时会走到 merge/ resume 两条「复用旧任务」的路径，正是补上的时机 —— 否则那批
+/// 老任务永远只能显示路径首段的库号。写盘失败不算错误：任务本身是好的，只是少一个
+/// 展示字段，绝不能让它挡住打开文件。
+fn adopt_library_name(root: &Path, task: Task, name: &str) -> Task {
+    if name.is_empty() || task.library_name.as_deref() == Some(name) {
+        return task;
+    }
+    let updated = Task {
+        library_name: Some(name.to_string()),
+        ..task
+    };
+    if let Ok(dir) = session::task_dir(root, &updated.task_id) {
+        let _ = storage::write(&dir.join("task.json"), &updated);
+    }
+    updated
+}
+
 /// Routing and expiry hint only: the native fileserver verifies every ticket.
 fn ticket_claims(ticket: &str) -> Option<TicketClaims> {
     let payload = ticket.split('.').nth(1)?;
@@ -158,6 +182,12 @@ pub fn open(root: &Path, uri: &str) -> Result<Task> {
     if !session::config(root)?.allowed_origins.contains(&server) {
         bail!("请在 CloudFile Agent 服务设置中先添加此服务地址")
     }
+    // 库名只从票据里取来显示（hub 用 repo.name 签发）。读 claim 不做验签 ——
+    // 它不参与任何授权判断，验签是文件服务端的事；这里只负责让任务列表能分出
+    // 「同一个 /10220942/a.dta 到底在哪个库」。
+    let library_name = ticket_claims(&ticket)
+        .map(|claims| claims.repo_name)
+        .unwrap_or_default();
     let id = format!(
         "{:x}",
         Sha256::digest(format!("{server}\\0{sid}").as_bytes())
@@ -165,7 +195,7 @@ pub fn open(root: &Path, uri: &str) -> Result<Task> {
     let dir = session::task_dir(root, &id)?;
     if !dir.join("task.json").exists() {
         if let Some(task) = resume(root, &server, &ticket)? {
-            return Ok(task);
+            return Ok(adopt_library_name(root, task, &library_name));
         }
     }
     storage::private_dir(&dir)?;
@@ -260,7 +290,7 @@ pub fn open(root: &Path, uri: &str) -> Result<Task> {
                     res: &mut res,
                 },
             )? {
-                return Ok(merged);
+                return Ok(adopt_library_name(root, merged, &library_name));
             }
         }
     }
@@ -299,6 +329,7 @@ pub fn open(root: &Path, uri: &str) -> Result<Task> {
         server,
         repo_id,
         remote_path: remote,
+        library_name: Some(library_name.clone()).filter(|name| !name.is_empty()),
         session_id: sid,
         baseline_file_id: file_id.clone(),
         baseline_digest: session::digest(file.path())?,
@@ -895,6 +926,7 @@ mod tests {
             server: "https://example.com".into(),
             repo_id: "11111111-1111-4111-8111-111111111111".into(),
             remote_path: "/edit.txt".into(),
+            library_name: None,
             session_id: "22222222-2222-4222-8222-222222222222".into(),
             baseline_file_id: "a".repeat(40),
             baseline_digest: "b".repeat(64),
@@ -934,8 +966,24 @@ mod tests {
         assert_eq!(claims.path, "/a.docx");
         assert_eq!(claims.mode, "exclusive-edit");
         assert_eq!(claims.exp, 1700000000);
+        // 老 hub 不签发这个 claim（升级前签出的票据仍在有效期内），必须照常解析。
+        assert_eq!(claims.repo_name, "");
         assert!(ticket_claims("h.not-json.s").is_none());
         assert!(ticket_claims("nope").is_none());
+    }
+
+    /// 库名只是显示字段：新 hub 签了就要读得到（含中文），且不影响路由用的 claim。
+    #[test]
+    fn ticket_claims_carry_the_library_name_for_display() {
+        let payload = B64.encode(
+            r#"{"repo_id":"r","path":"/10220942/a.dta","mode":"local-view","exp":1700000000,"repo_name":"方案设计库"}"#
+                .as_bytes(),
+        );
+        let claims = ticket_claims(&format!("h.{payload}.s")).unwrap();
+        assert_eq!(claims.repo_name, "方案设计库");
+        assert_eq!(claims.repo_id, "r");
+        assert_eq!(claims.path, "/10220942/a.dta");
+        assert_eq!(claims.mode, "local-view");
     }
 
     fn conflict_fixture(root: &Path, id: &str) -> (std::path::PathBuf, std::path::PathBuf) {
@@ -952,6 +1000,7 @@ mod tests {
             server: "http://127.0.0.1:6111".into(),
             repo_id: "11111111-1111-4111-8111-111111111111".into(),
             remote_path: "/a.docx".into(),
+            library_name: None,
             session_id: "old".into(),
             baseline_file_id: "b".repeat(40),
             baseline_digest: "d".repeat(64),

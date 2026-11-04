@@ -363,6 +363,8 @@ fn summaries(root: &Path, uploading: &Mutex<HashSet<String>>) -> anyhow::Result<
             "application_name": application.map(|p| p.application_name.as_str()),
             "mode":native::mode_label(&task.mode),"internal_mode":task.mode,
             "service":task.server,"remote_path":task.remote_path,
+            // 库名只用于列表里区分文件来自哪个库（同名文件在不同库的路径可能一样）。
+            "library_name":task.library_name,
             "group":group,
             "local_changed":local_changed,
             "needs_review":needs_review,

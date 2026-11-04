@@ -185,6 +185,7 @@ mod tests {
                 server: "https://example.com".into(),
                 repo_id: "b".repeat(36),
                 remote_path: format!("/{name}"),
+                library_name: None,
                 session_id: "c".repeat(36),
                 baseline_file_id: "e".repeat(40),
                 baseline_digest: String::new(),
