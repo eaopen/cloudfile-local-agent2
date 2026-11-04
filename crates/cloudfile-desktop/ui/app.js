@@ -464,16 +464,16 @@ function renderTask(task) {
   info.className = 'info';
   const name = document.createElement('strong');
   name.textContent = task.file_name;
-  const status = document.createElement('span');
   const working = busy.has(task.task_id) || task.uploading;
-  status.textContent = taskUX.status(task, working);
-  const mode = document.createElement('small');
-  mode.className = 'hint';
-  mode.textContent = taskUX.modeLabel(task);
+  // 模式与状态合成一行：只读任务原来这两行说的是同一件事（不自动回传），
+  // 卡片被撑到四五行。异常状态由 summary() 整行接管。
+  const status = document.createElement('span');
+  status.textContent = taskUX.summary(task, working);
   const source = document.createElement('small');
   source.className = 'task-source';
-  source.textContent = [task.application_name || task.service, task.remote_path].filter(Boolean).join(' · ');
-  info.append(name, mode, status);
+  source.textContent = taskUX.sourceLine(task);
+  source.title = taskUX.sourceTitle(task);
+  info.append(name, status);
   if (source.textContent) info.append(source);
   const reference = taskUX.referenceHint(task.file_name);
   if (reference) {
@@ -491,12 +491,14 @@ function renderTask(task) {
     renderOptimistic(buttons, task, working);
   } else {
     buttons.append(openButton(task));
-    const hint = document.createElement('small');
-    hint.className = 'hint';
-    hint.textContent = task.mode === 'local-view'
-      ? '仅供查看，本地修改不会回传云端'
-      : '旧会话仅支持本地打开；要上传请从网页重新发起普通编辑';
-    buttons.append(hint);
+    // 只读任务的「本地修改不会回传」已经写在状态那一行了，这里不再重复一遍，
+    // 否则同一句话一张卡片上出现两次。旧会话的补救办法没有别处可写，仍然保留。
+    if (task.mode !== 'local-view') {
+      const hint = document.createElement('small');
+      hint.className = 'hint';
+      hint.textContent = '旧会话仅支持本地打开；要上传请从网页重新发起普通编辑';
+      buttons.append(hint);
+    }
   }
 
   if (task.conflict) {
