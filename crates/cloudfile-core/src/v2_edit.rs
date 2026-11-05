@@ -1059,6 +1059,66 @@ mod tests {
     }
 
     #[test]
+    fn pending_cdc_intent_queries_status_before_any_transfer() {
+        use crate::v2_cdc::tests::{accept as accept_http, read_request, respond};
+        use std::{net::TcpListener, thread};
+        for already_published in [true, false] {
+            let (_temp, root) = storage::test_root();
+            let id = "f".repeat(64);
+            let (local, _) = conflict_fixture(&root, &id);
+            fs::File::create(&local).unwrap().set_len(16 << 20).unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let mut task = session::load(&root, &id).unwrap();
+            task.server = format!("http://{}", listener.local_addr().unwrap());
+            let dir = session::task_dir(&root, &id).unwrap();
+            storage::write(&dir.join("task.json"), &task).unwrap();
+            store(
+                &root,
+                &id,
+                &State {
+                    ticket: "test-ticket".into(),
+                    guard: None,
+                },
+            )
+            .unwrap();
+            let intent = journal::capture(&root, &id, Action::OptimisticUpdate).unwrap();
+            let digest = intent.content_digest.clone();
+            // Simulate an interrupted publication with its original durable Intent.
+            fs::write(
+                dir.join(format!("{}.cdc.json", intent.intent_id)),
+                b"{broken",
+            )
+            .unwrap();
+            let worker = thread::spawn(move || {
+                let mut stream = accept_http(&listener);
+                let (header, _) = read_request(&mut stream);
+                assert!(header.starts_with("GET /seafhttp/cf-edit/v1/status "));
+                respond(
+                    &mut stream,
+                    200,
+                    json!({"file_id":"c".repeat(40),"sha256":if already_published {digest}else{"d".repeat(64)},"checked_out":false}),
+                );
+                // Dropping the listener makes any unexpected capability/stage/publish fail.
+            });
+            let value = save(&root, &id, None).unwrap();
+            worker.join().unwrap();
+            assert_eq!(
+                value["state"],
+                if already_published {
+                    "published"
+                } else {
+                    "conflict"
+                }
+            );
+            assert_eq!(
+                journal::pending(&root, &id).unwrap().is_some(),
+                !already_published
+            );
+            assert!(local.exists());
+        }
+    }
+
+    #[test]
     fn remote_choice_overwrites_the_copy_and_keeps_one_task() {
         let (_dir, root) = storage::test_root();
         let id = "e".repeat(64);
