@@ -104,7 +104,9 @@ fn store(root: &Path, id: &str, st: &State) -> Result<()> {
 }
 fn client() -> Result<Client> {
     Ok(Client::builder()
-        .timeout(Duration::from_secs(180))
+        // Allow bounded large transfers on slow links; connect failures still fail promptly.
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(3600))
         .redirect(reqwest::redirect::Policy::none())
         .build()?)
 }
@@ -123,6 +125,9 @@ fn read_response(res: reqwest::blocking::Response) -> Result<Value> {
     res.take(65537).read_to_end(&mut buf)?;
     if buf.len() > 65536 {
         bail!("CloudFile 响应过长")
+    }
+    if status.as_u16() == 413 {
+        bail!("文件超过服务端本地编辑上限；工作文件已保留")
     }
     if !status.is_success() {
         bail!("CloudFile 拒绝操作：HTTP {status}；工作文件已保留")
@@ -230,23 +235,17 @@ pub fn open(root: &Path, uri: &str) -> Result<Task> {
         // 404=路径或仓库不对 —— 三者处理方式完全不同。带上状态码与一小段服务端正文。
         let status = res.status();
         let detail: String = res.text().unwrap_or_default().chars().take(160).collect();
-        // 503 + FILE_UNAVAILABLE 在服务端只有两个触发点：文件对象读不出来，或文件
-        // 超过 128 MiB 上限（`cfEditMaxSize`）。给现场一句能自己判断的说明，
-        // 否则「重新从网页发起」会一直重试同一个必然失败的请求。
-        let hint = if status.as_u16() == 503 && detail.contains("FILE_UNAVAILABLE") {
-            "：文件在服务端不可读，或超过 128 MiB 单文件上限；请确认文件大小，大文件改用下载"
-        } else {
-            ""
-        };
+        // Size refusals are deterministic: repeating the browser action cannot fix them.
+        if status.as_u16() == 413 {
+            bail!(
+                "文件超过服务端本地编辑上限：{}；工作文件已保留",
+                detail.trim()
+            )
+        }
         bail!(
-            "CloudFile 原生读取失败（HTTP {}）{}{}，请重新从网页发起",
+            "CloudFile 原生读取失败（HTTP {}）：{}",
             status.as_u16(),
-            hint,
-            if detail.trim().is_empty() {
-                String::new()
-            } else {
-                format!("：{}", detail.trim())
-            }
+            detail.trim()
         )
     }
     let file_id = res
@@ -280,9 +279,11 @@ pub fn open(root: &Path, uri: &str) -> Result<Task> {
         || uuid::Uuid::parse_str(&repo_id).is_err()
         || !session::safe_remote_path(&remote)
         || !supported_open_mode(&mode)
-        || size > crate::device::MAX_FILE
     {
         bail!("服务端文件元数据无效")
+    }
+    if size > crate::device::MAX_FILE {
+        bail!("文件超过客户端本地编辑上限（1 GiB）")
     }
     // 同一文件重复「本地查看 / 本地编辑」时先尝试合并到已有任务，绝不再建第二条。
     if let Some(existing) = session::find_task(root, &repo_id, &remote, &mode)? {

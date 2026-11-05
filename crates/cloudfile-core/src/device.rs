@@ -11,7 +11,8 @@ use std::{
     time::Duration,
 };
 pub const API: &str = "/api/v2.1/cloudfile/extensions/local-edit/v1/agent/";
-pub const MAX_FILE: u64 = 128 * 1024 * 1024;
+// Shared snapshot/read/save bound: opening a file must not make it unsaveable.
+pub const MAX_FILE: u64 = 1024 * 1024 * 1024;
 pub fn hex(value: &str, len: usize) -> bool {
     value.len() == len
         && value

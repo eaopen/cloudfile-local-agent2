@@ -201,7 +201,8 @@ pub fn scan_bytes(data: &[u8]) -> Result<Manifest> {
 }
 fn freeze(source: &Path) -> Result<Vec<u8>> {
     let before = std::fs::symlink_metadata(source)?;
-    if !before.is_file() || before.len() > device::MAX_FILE {
+    // Legacy transport still buffers the entire snapshot; do not expand its memory budget.
+    if !before.is_file() || before.len() > 128 * 1024 * 1024 {
         bail!("冻结快照不是受限的常规文件");
     }
     let data = std::fs::read(source)?;
