@@ -732,13 +732,28 @@ fn issue(root: &Path, id: &str, observed: Option<&str>, action: Action) -> Resul
             .header("X-CF-Guard-Generation", guard.generation.to_string())
             .header("X-CF-Guard-Proof", &guard.proof);
     }
-    let res = request
-        .body(reqwest::blocking::Body::sized(
-            fs::File::open(file)?,
-            intent.snapshot_size,
-        ))
-        .send()?;
-    let value = read_response(res)?;
+    // Transport negotiation occurs before any publish. Once CDC starts, errors
+    // preserve this Intent; never silently retry through a different transport.
+    let value = if let Some(value) = crate::v2_cdc::publish(
+        &client()?,
+        &task.server,
+        &st.ticket,
+        &dir,
+        &intent,
+        request
+            .try_clone()
+            .ok_or_else(|| anyhow::anyhow!("无法复制提交请求"))?,
+    )? {
+        value
+    } else {
+        let res = request
+            .body(reqwest::blocking::Body::sized(
+                fs::File::open(file)?,
+                intent.snapshot_size,
+            ))
+            .send()?;
+        read_response(res)?
+    };
     let file = value["file_id"].as_str().unwrap_or("");
     if value["state"] != "published" || !valid_id(file) || value["checked_in"] != checkin {
         bail!("服务器未确认原生提交")
@@ -773,6 +788,10 @@ fn accept(root: &Path, id: &str, st: &mut State, intent: &Intent, remote: &Value
         checked_in,
     };
     journal::accept(root, id, receipt)?;
+    // Receipts are only needed while the immutable Intent is unresolved.
+    let _ = fs::remove_file(
+        session::task_dir(root, id)?.join(format!("{}.cdc.json", intent.intent_id)),
+    );
     if checked_in {
         st.guard = None
     } else if let Some(g) = st.guard.as_mut() {

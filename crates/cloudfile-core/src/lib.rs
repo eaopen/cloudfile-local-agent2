@@ -76,3 +76,5 @@ pub mod paired_session;
 pub mod selftest;
 pub mod upload;
 pub mod v2_edit;
+
+mod v2_cdc;
