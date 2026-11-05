@@ -29,7 +29,16 @@ pub fn chrome_path() -> Option<PathBuf> {
         .or_else(|| common_paths().into_iter().find(|path| path.is_file()))
 }
 
-#[cfg(not(windows))]
+// Linux 使用标准 Chrome 安装路径；不扫描用户目录或自动安装浏览器。
+#[cfg(target_os = "linux")]
+pub fn chrome_path() -> Option<PathBuf> {
+    ["/usr/bin/google-chrome", "/usr/bin/google-chrome-stable"]
+        .into_iter()
+        .map(PathBuf::from)
+        .find(|path| path.is_file())
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn chrome_path() -> Option<PathBuf> {
     None
 }

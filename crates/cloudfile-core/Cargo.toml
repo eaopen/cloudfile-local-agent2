@@ -25,6 +25,10 @@ zip = { version = "9.0.3", default-features = false, features = ["deflate"] }
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 keyring = { version = "3.6", features = ["apple-native", "windows-native"] }
 
+# Linux 设备密钥使用桌面 Secret Service；缺失或锁定时拒绝配对，不回退到明文文件。
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3.6", features = ["sync-secret-service", "crypto-rust"] }
+
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56.0"
 # GetDriveTypeW：判断某块盘是不是固定本地盘（镜像根不能落在光驱/可移动盘/网络共享上）。

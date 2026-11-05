@@ -5,7 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 
-test('dev packaging preserves Windows fixed Host and isolates macOS Rust Host', () => {
+test('dev packaging preserves Windows fixed Host and shares macOS/Linux Rust Host', () => {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'cloudfile-extension-'));
   try {
     const source = path.join(temporary, 'source');
@@ -15,8 +15,7 @@ test('dev packaging preserves Windows fixed Host and isolates macOS Rust Host', 
     fs.writeFileSync(path.join(source, 'popup.html'), html);
     fs.writeFileSync(path.join(source, 'background.js'), [
       "const AGENT2_HOST = 'com.cloudfile.agent2';",
-      "const CURRENT_HOST = 'com.cloudfile.current_agent';",
-      "const HOST = 'com.cloudfile.local_agent';"
+      "const CURRENT_HOST = 'com.cloudfile.current_agent';"
     ].join('\n'));
     fs.writeFileSync(path.join(source, 'manifest.json'), JSON.stringify({ name: 'CloudFile', permissions: ['nativeMessaging'] }));
     execFileSync(process.platform === 'win32' ? 'python' : 'python3', [
@@ -25,10 +24,10 @@ test('dev packaging preserves Windows fixed Host and isolates macOS Rust Host', 
     assert.equal(fs.readFileSync(path.join(output, 'popup.html'), 'utf8'), html);
     assert.equal(fs.existsSync(path.join(output, 'dev-pairing.js')), false);
     const generated = fs.readFileSync(path.join(output, 'background.js'), 'utf8');
-    assert.match(generated, /const AGENT2_HOST = 'com\.cloudfile\.agent22\.dev';/);
+    assert.match(generated, /const AGENT2_HOST = 'com\.cloudfile\.agent2';/);
     assert.match(generated, /const CURRENT_HOST = 'com\.cloudfile\.current_agent';/);
-    assert.match(generated, /const HOST = 'com\.cloudfile\.local_agent';/);
-    assert.doesNotMatch(generated, /const CURRENT_HOST = 'com\.cloudfile\.agent22\.dev';/);
+    assert.doesNotMatch(generated, /com\.cloudfile\.local_agent/);
+    assert.doesNotMatch(generated, /const CURRENT_HOST = 'com\.cloudfile\.agent2';/);
     assert.deepEqual(JSON.parse(fs.readFileSync(path.join(output, 'manifest.json'))).permissions, ['nativeMessaging']);
     assert.match(fs.readFileSync(path.join(source, 'background.js'), 'utf8'), /const AGENT2_HOST = 'com\.cloudfile\.agent2';/);
   } finally {

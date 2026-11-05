@@ -16,7 +16,7 @@
 
 ## 产品与代码边界
 
-本仓库是唯一 Rust + Tauri v2 CloudFile 桌面 Agent 主仓库。Windows/macOS 共用 Rust Core、Tauri Desktop 与 Chrome Native Messaging Host。旧 Windows .NET Agent 是一次性替代对象；未发布 Go Agent2 只是参考，不承担 Go→Rust 数据、安装、设备、更新或代码兼容义务。
+本仓库是唯一 Rust + Tauri v2 CloudFile 桌面 Agent 主仓库。Windows/macOS/Linux 共用 Rust Core、Tauri Desktop 与 Chrome Native Messaging Host。旧 Windows .NET Agent 是一次性替代对象；未发布 Go Agent2 只是参考，不承担 Go→Rust 数据、安装、设备、更新或代码兼容义务。
 
 外部协议边界：CloudFile Hub/Server、现有 Chrome 扩展、Seafile native CDC/对象 ID、设备 P-256 证明、受控资源与 ACL、Intent/回执。内部实现可改，但不得泄露 Cookie/token、接受浏览器工作副本路径、盲目重发未知提交、失效后继续发布、丢弃用户工作副本。
 
@@ -31,7 +31,7 @@
 - 不擅自更改 Server 端点、Chrome Host 名称、设备签名编码、CDC 块格式、用户数据目录或已有持久 Journal。确需变更要记录契约、测试与迁移边界。
 - Windows 单一 `com.cloudfile.current_agent` 可能仍由旧 .NET 客户端占用；首次安装/一键修复**可以替换已识别的旧 CloudFile Agent**（用户明确安装/升级 Rust 版本即视为替换授权，不再二次确认）。任何非 CloudFile 程序的注册仍必须由用户明确确认或 CLI `--takeover` 才可替换，并保留原 manifest 供回退。Rust→Rust 升级按自有注册规则正常进行。
 
-- 开发版 Chrome 扩展仅将 macOS 的 `AGENT2_HOST` 映射到 `com.cloudfile.agent22.dev`；Windows 的 `CURRENT_HOST` 必须保持 `com.cloudfile.current_agent` 并与本仓 `hostreg::HOST` 一致。不得批量替换所有 Host 字符串。
+- macOS/Linux 使用同一个 Rust Host `com.cloudfile.agent2`；Windows `CURRENT_HOST` 保持 `com.cloudfile.current_agent`。未发布 Go Agent 已废弃，不保留或探测其 Host。开发包与正式包保持 Host 契约一致，不更改数据目录与设备密钥命名空间。
 - 目标机器安装无需管理员、Python/Rust/Go/.NET Runtime；macOS 不清除 quarantine 或绕过 Gatekeeper，Windows 不绕过 WDAC/AppLocker。
 
 ## 优先级
