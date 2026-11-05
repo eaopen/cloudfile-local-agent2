@@ -219,6 +219,46 @@ fn freeze(source: &Path) -> Result<Vec<u8>> {
 pub fn scan(path: &Path) -> Result<Manifest> {
     scan_bytes(&freeze(path)?)
 }
+/// V2 scanner reads at most one native maximum-size chunk, not the whole file.
+/// Seeking back over the unused tail preserves the exact native cut boundaries.
+pub fn scan_streaming(path: &Path) -> Result<Manifest> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path)?;
+    let before = file.metadata()?;
+    if !before.is_file() || before.len() == 0 || before.len() > device::MAX_FILE {
+        bail!("CDC 快照大小无效")
+    }
+    let mut buffer = vec![0u8; MAX_SIZE];
+    let mut offset = 0;
+    let mut blocks = Vec::new();
+    let mut digest = Sha256::new();
+    while offset < before.len() {
+        file.seek(SeekFrom::Start(offset))?;
+        let len = (before.len() - offset).min(MAX_SIZE as u64) as usize;
+        file.read_exact(&mut buffer[..len])?;
+        let cut = find_cut(&buffer[..len], rabin());
+        let bytes = &buffer[..cut];
+        digest.update(bytes);
+        blocks.push(Block {
+            id: format!("{:x}", Sha1::digest(bytes)),
+            offset,
+            size: cut as u64,
+        });
+        offset += cut as u64;
+    }
+    let after = file.metadata()?;
+    if after.len() != before.len() || after.modified()? != before.modified()? {
+        bail!("CDC 扫描期间快照发生变化")
+    }
+    let ids = blocks.iter().map(|b| b.id.clone()).collect::<Vec<_>>();
+    Ok(Manifest {
+        file_id: file_object_id(&ids, offset),
+        sha256: format!("{:x}", digest.finalize()),
+        size: offset,
+        blocks,
+    })
+}
+
 /// Local cost heuristic only: the server's version and Guard fencing remain
 /// authoritative. Requiring a real saving avoids paying CDC cost for documents
 /// that reuse nothing.
@@ -582,6 +622,28 @@ mod tests {
             offset += block.size;
         }
         assert_eq!(offset, manifest.size);
+    }
+    #[test]
+    fn streaming_scan_matches_native_vector_without_whole_file_buffer() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(temp.path(), vector_bytes(32 << 20)).unwrap();
+        let streamed = scan_streaming(temp.path()).unwrap();
+        assert_eq!(streamed.file_id, "72a1aa0bcea4f7e2260656760d57eadcedcc951d");
+        assert_eq!(
+            streamed.sha256,
+            "a964beae05db7b4aa22ffaa4f3ca28c823cad679746d995ca7392e903fbabfd9"
+        );
+        assert_eq!(
+            streamed.blocks.iter().map(|b| b.size).collect::<Vec<_>>(),
+            vec![9332497, 10485760, 7275587, 6298386, 162202]
+        );
+        // A sparse file crosses both the former size ceiling and 64-block cap
+        // without constructing an equally large allocation in the test.
+        temp.as_file().set_len(650 << 20).unwrap();
+        let large = scan_streaming(temp.path()).unwrap();
+        assert_eq!(large.size, 650 << 20);
+        assert!(large.blocks.len() > 64);
+        assert!(large.blocks.iter().all(|b| b.size <= 10 << 20));
     }
     /// A one-byte file still yields the exact block identity the server checks.
     #[test]

@@ -732,13 +732,28 @@ fn issue(root: &Path, id: &str, observed: Option<&str>, action: Action) -> Resul
             .header("X-CF-Guard-Generation", guard.generation.to_string())
             .header("X-CF-Guard-Proof", &guard.proof);
     }
-    let res = request
-        .body(reqwest::blocking::Body::sized(
-            fs::File::open(file)?,
-            intent.snapshot_size,
-        ))
-        .send()?;
-    let value = read_response(res)?;
+    // Transport negotiation occurs before any publish. Once CDC starts, errors
+    // preserve this Intent; never silently retry through a different transport.
+    let value = if let Some(value) = crate::v2_cdc::publish(
+        &client()?,
+        &task.server,
+        &st.ticket,
+        &dir,
+        &intent,
+        request
+            .try_clone()
+            .ok_or_else(|| anyhow::anyhow!("无法复制提交请求"))?,
+    )? {
+        value
+    } else {
+        let res = request
+            .body(reqwest::blocking::Body::sized(
+                fs::File::open(file)?,
+                intent.snapshot_size,
+            ))
+            .send()?;
+        read_response(res)?
+    };
     let file = value["file_id"].as_str().unwrap_or("");
     if value["state"] != "published" || !valid_id(file) || value["checked_in"] != checkin {
         bail!("服务器未确认原生提交")
@@ -773,6 +788,10 @@ fn accept(root: &Path, id: &str, st: &mut State, intent: &Intent, remote: &Value
         checked_in,
     };
     journal::accept(root, id, receipt)?;
+    // Receipts are only needed while the immutable Intent is unresolved.
+    let _ = fs::remove_file(
+        session::task_dir(root, id)?.join(format!("{}.cdc.json", intent.intent_id)),
+    );
     if checked_in {
         st.guard = None
     } else if let Some(g) = st.guard.as_mut() {
@@ -1037,6 +1056,66 @@ mod tests {
         )
         .unwrap();
         (local, working)
+    }
+
+    #[test]
+    fn pending_cdc_intent_queries_status_before_any_transfer() {
+        use crate::v2_cdc::tests::{accept as accept_http, read_request, respond};
+        use std::{net::TcpListener, thread};
+        for already_published in [true, false] {
+            let (_temp, root) = storage::test_root();
+            let id = "f".repeat(64);
+            let (local, _) = conflict_fixture(&root, &id);
+            fs::File::create(&local).unwrap().set_len(16 << 20).unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let mut task = session::load(&root, &id).unwrap();
+            task.server = format!("http://{}", listener.local_addr().unwrap());
+            let dir = session::task_dir(&root, &id).unwrap();
+            storage::write(&dir.join("task.json"), &task).unwrap();
+            store(
+                &root,
+                &id,
+                &State {
+                    ticket: "test-ticket".into(),
+                    guard: None,
+                },
+            )
+            .unwrap();
+            let intent = journal::capture(&root, &id, Action::OptimisticUpdate).unwrap();
+            let digest = intent.content_digest.clone();
+            // Simulate an interrupted publication with its original durable Intent.
+            fs::write(
+                dir.join(format!("{}.cdc.json", intent.intent_id)),
+                b"{broken",
+            )
+            .unwrap();
+            let worker = thread::spawn(move || {
+                let mut stream = accept_http(&listener);
+                let (header, _) = read_request(&mut stream);
+                assert!(header.starts_with("GET /seafhttp/cf-edit/v1/status "));
+                respond(
+                    &mut stream,
+                    200,
+                    json!({"file_id":"c".repeat(40),"sha256":if already_published {digest}else{"d".repeat(64)},"checked_out":false}),
+                );
+                // Dropping the listener makes any unexpected capability/stage/publish fail.
+            });
+            let value = save(&root, &id, None).unwrap();
+            worker.join().unwrap();
+            assert_eq!(
+                value["state"],
+                if already_published {
+                    "published"
+                } else {
+                    "conflict"
+                }
+            );
+            assert_eq!(
+                journal::pending(&root, &id).unwrap().is_some(),
+                !already_published
+            );
+            assert!(local.exists());
+        }
     }
 
     #[test]
