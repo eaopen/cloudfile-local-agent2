@@ -298,4 +298,47 @@ mod tests {
         assert!(pending(root, &id).unwrap().is_none());
         assert_eq!(fs::read(dir.join("a.txt")).unwrap(), b"new local changes");
     }
+    #[test]
+    fn large_snapshot_crosses_old_limit_and_refuses_new_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let id = "e".repeat(64);
+        let dir = session::task_dir(&root, &id).unwrap();
+        storage::private_dir(&dir).unwrap();
+        let path = dir.join("large.prt");
+        let file = fs::File::create(&path).unwrap();
+        // Sparse input exercises real snapshot streaming past the former 128 MiB boundary.
+        file.set_len((128 << 20) + 1).unwrap();
+        let t = session::Task {
+            task_id: id.clone(),
+            device_id: None,
+            file_name: "large.prt".into(),
+            mode: "optimistic-edit".into(),
+            server: "https://example.com".into(),
+            repo_id: String::new(),
+            remote_path: "/large.prt".into(),
+            library_name: None,
+            session_id: String::new(),
+            baseline_file_id: "b".repeat(40),
+            baseline_digest: String::new(),
+            size: (128 << 20) + 1,
+        };
+        storage::write(&dir.join("task.json"), &t).unwrap();
+        let intent = capture(&root, &id, Action::OptimisticUpdate).unwrap();
+        assert_eq!(intent.snapshot_size, (128 << 20) + 1);
+        assert_eq!(
+            fs::metadata(dir.join(format!("{}.snapshot", intent.intent_id)))
+                .unwrap()
+                .len(),
+            intent.snapshot_size
+        );
+        // Use a fresh Journal so refusal is due to size, not a pending intent.
+        fs::remove_file(dir.join("journal.json")).unwrap();
+        file.set_len(crate::device::MAX_FILE + 1).unwrap();
+        assert!(capture(&root, &id, Action::OptimisticUpdate)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("exceeds limit"));
+    }
 }
