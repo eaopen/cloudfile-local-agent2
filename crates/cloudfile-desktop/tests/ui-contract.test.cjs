@@ -149,6 +149,11 @@ function profileFixture(useTest) {
   };
 }
 
+// 地址不允许手改：它由当前环境决定，手工填只会让界面与实际不同步。
+test('the application profile address is read-only in the markup', () => {
+  assert.match(html, /id="app-profile-source"[^>]*readonly/);
+});
+
 test('the active environment drives the brand and the sidebar', async () => {
   const { ctx, elements } = fakeApp([], { appProfile: profileFixture(false) });
   await vm.runInContext('loadSettings()', ctx);
@@ -176,6 +181,9 @@ test('ticking the test switch loads the test configuration and its features', as
   assert.match(elements.get('brand-name').textContent, /测试助手/);
   assert.match(elements.get('app-profile-state').textContent, /当前生效：测试环境/);
   assert.match(elements.get('app-profile-hint').textContent, /已切换到测试环境/);
+  // 地址是推出来的、不可手改：切换环境后必须自动换成对应环境那条。
+  assert.ok(elements.get('app-profile-source').value.startsWith('http://test.example.test/'),
+    elements.get('app-profile-source').value);
 
   // 切回生产：只应剩下生产那套。
   await elements.get('use_test_server').onchange({ target: { checked: false } });

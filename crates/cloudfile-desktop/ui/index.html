@@ -58,7 +58,7 @@
       <p id="app-profile-state" class="hint">尚未同步应用信息。</p>
       <label class="check"><span>使用测试服（切换后加载测试环境的配置与功能）</span><input type="checkbox" id="use_test_server"></label>
       <p class="hint">测试与生产是两套配置：只在测试开放的功能，切到生产后不可用。拉取失败时继续使用本地缓存。</p>
-      <div class="field-block"><span class="hint">应用信息地址（留空使用默认地址）</span><input id="app-profile-source" type="text" spellcheck="false" placeholder="http://服务地址/admin-api/local-bridge/profile/v1"></div>
+      <div class="field-block"><span class="hint">应用信息地址（随测试/生产切换自动变化，不可手工修改）</span><input id="app-profile-source" type="text" readonly spellcheck="false" placeholder="选择环境后自动填入"></div>
       <div class="row"><button id="app-profile-sync" class="secondary" type="button">同步应用信息</button><span id="app-profile-hint" class="hint"></span></div>
     </section>
     <section class="panel"><div class="section-heading"><div><h2>关于与更新</h2><p id="version" class="hint"></p></div><button id="check-update" class="secondary">检查更新</button></div>

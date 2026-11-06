@@ -1396,17 +1396,32 @@ fn exit_risk_text(assessment: &guard::Assessment) -> String {
 
 /// 托盘提示文案。抽成纯函数是为了能测全三个分支（正常 / 缺运行时 / 建窗失败），
 /// 这三种在托盘上必须看起来不一样，否则现场分不清该装运行时还是该查日志。
-fn tray_tooltip(windowed: bool, runtime_missing: bool, summary: &str) -> String {
+///
+/// `brand` 来自当前生效的应用配置（`profile::active`）：托盘的悬停提示就是用户在
+/// 任务栏上看到的名字，必须和侧栏、标题栏一致，不能再写死 `CloudFile`。
+fn tray_tooltip(windowed: bool, runtime_missing: bool, brand: &str, summary: &str) -> String {
     let version = cloudfile_core::VERSION;
-    if windowed {
-        format!("CloudFile Agent {version} · {summary}")
-    } else if runtime_missing {
-        format!("CloudFile Agent {version} · 后台运行（任务中心需要 WebView2 运行时）· {summary}")
+    let brand = if brand.trim().is_empty() {
+        "CloudFile"
     } else {
-        format!(
-            "CloudFile Agent {version} · 后台运行（任务中心窗口启动失败，详见 desktop-launch.log）· {summary}"
-        )
+        brand
+    };
+    if windowed {
+        format!("{brand} {version} · {summary}")
+    } else if runtime_missing {
+        format!("{brand} {version} · 后台运行（任务中心需要 WebView2 运行时）· {summary}")
+    } else {
+        format!("{brand} {version} · 后台运行（任务中心窗口启动失败，详见 desktop-launch.log）· {summary}")
     }
+}
+
+/// 当前环境该显示的名字。读不到配置就退回默认名 —— 托盘不能因为元数据问题空着。
+fn active_brand(root: &Path) -> String {
+    let use_test = settings::load(root).unwrap_or_default().use_test_server;
+    profile::active(root, use_test)
+        .map(|profile| profile.application_name)
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| "CloudFile".to_string())
 }
 
 /// Keeps the tray tooltip and the guard menu row honest about the real store.
@@ -1426,6 +1441,7 @@ fn refresh_tray(state: &State, app: &tauri::AppHandle) {
         let _ = tray.set_tooltip(Some(tray_tooltip(
             state.windowed.load(Ordering::SeqCst),
             state.runtime_missing,
+            &active_brand(&state.root),
             &summary,
         )));
     }
@@ -2201,20 +2217,27 @@ mod degraded_ux_tests {
 
     #[test]
     fn tray_tooltip_tells_apart_no_window_reasons() {
-        let normal = tray_tooltip(true, false, "可以安全退出");
+        let normal = tray_tooltip(true, false, "Etech文件助手", "可以安全退出");
+        // 托盘悬停就是用户在任务栏上看到的名字，必须跟侧栏一致。
+        assert!(normal.starts_with("Etech文件助手 "), "{normal}");
+        assert!(!normal.contains("CloudFile"));
         assert!(normal.contains("可以安全退出"));
         assert!(!normal.contains("后台运行"));
 
-        let missing = tray_tooltip(false, true, "可以安全退出");
+        let missing = tray_tooltip(false, true, "Etech文件助手", "可以安全退出");
         assert!(missing.contains("后台运行"));
         assert!(missing.contains("WebView2"));
         assert!(!missing.contains("启动失败"));
 
         // 运行时在却建不出窗口是另一种故障：不能让用户去装一个已经装好的运行时。
-        let failed = tray_tooltip(false, false, "可以安全退出");
+        let failed = tray_tooltip(false, false, "Etech文件助手", "可以安全退出");
         assert!(failed.contains("启动失败"));
         assert!(failed.contains("desktop-launch.log"));
         assert!(!failed.contains("需要 WebView2"));
+
+        // 没有应用配置时退回默认名，不能出现空白的托盘提示。
+        let fallback = tray_tooltip(true, false, "   ", "可以安全退出");
+        assert!(fallback.starts_with("CloudFile "), "{fallback}");
     }
 
     #[test]

@@ -708,7 +708,9 @@ function renderAppProfile(profile) {
   }
   const state = document.querySelector('#app-profile-state');
   const source = document.querySelector('#app-profile-source');
-  if (source && !source.value && profile && profile.source) source.value = profile.source;
+  // 地址只读：它由「当前环境」推出来（后端 `default_address`），切换环境时直接跟着变。
+  // 手工填地址只会让"界面上写的"和"实际会去问的"不一致，所以不提供编辑。
+  if (source) source.value = (profile && profile.source) || '';
   const profiles = (profile && profile.profiles) || [];
   const active = profile && profile.active;
   const lines = [];
@@ -753,11 +755,11 @@ async function switchEnvironment(useTest) {
 async function syncAppProfile() {
   const button = document.querySelector('#app-profile-sync');
   const hint = document.querySelector('#app-profile-hint');
-  const address = document.querySelector('#app-profile-source').value.trim();
   button.disabled = true;
   hint.textContent = '正在同步…';
   try {
-    const result = await invoke('sync_app_profile', { address: address || null });
+    // 不传地址：由后端按当前环境（测试/生产）自己算，界面不再提供手工覆盖。
+    const result = await invoke('sync_app_profile', { address: null });
     renderAppProfile(result.profile);
     hint.textContent = `已同步：${result.application_name}（${result.source}）`;
   } catch (error) {
