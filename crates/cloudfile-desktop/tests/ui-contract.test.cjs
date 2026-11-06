@@ -152,6 +152,9 @@ function profileFixture(useTest) {
 // 地址不允许手改：它由当前环境决定，手工填只会让界面与实际不同步。
 test('the application profile address is read-only in the markup', () => {
   assert.match(html, /id="app-profile-source"[^>]*readonly/);
+  // 折叠标题就是「应用信息」，不再带「（测试 / 生产）」；也不再单独成块。
+  assert.match(html, /<summary>应用信息<\/summary>/);
+  assert.equal((html.match(/<summary>应用信息/g) || []).length, 1);
 });
 
 test('the active environment drives the brand and the sidebar', async () => {
@@ -165,8 +168,9 @@ test('the active environment drives the brand and the sidebar', async () => {
   assert.match(elements.get('app-profile-source').value, /profile\/v1$/);
   // 「左上角」不止侧栏：标题栏与版本行也要用同一个名字。
   // 三处都要看得出当前环境：左上角品牌、左下角版本、关于与更新里的版本行。
-  assert.equal(ctx.document.title, '生产助手（生产） · 任务中心');
-  assert.match(elements.get('brand-name').textContent, /生产助手（生产）/);
+  // 左上角只放品牌名（带环境会撑破侧栏），环境只出现在两处版本行上。
+  assert.equal(ctx.document.title, '生产助手 · 任务中心');
+  assert.equal(elements.get('brand-name').textContent, '生产助手');
   assert.match(elements.get('version').textContent, /^生产助手 · 2\.2\.0.*（生产）$/);
   assert.match(elements.get('sidebar-version').textContent, /^v2\.2\.0.*（生产）$/);
 });

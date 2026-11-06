@@ -61,14 +61,14 @@
         <p class="hint">固定扩展 ID：<code id="host-extension-id"></code></p><button id="host-register" class="secondary">重新注册 Host</button><button id="update-extension" class="secondary">更新扩展</button>
         <div class="row"><button id="host-rollback" class="secondary">回退 Host 注册</button><button id="host-unregister" class="secondary">卸载本机 Host</button></div>
       </div></details>
+      <details class="advanced"><summary>应用信息</summary><div class="advanced-content">
+        <p id="app-profile-state" class="hint">尚未同步应用信息。</p>
+        <label class="check"><span>使用测试服（切换后加载测试环境的配置与功能）</span><input type="checkbox" id="use_test_server"></label>
+        <p class="hint">测试与生产是两套配置：只在测试开放的功能，切到生产后不可用。切换后会自动拉取，拉不到就继续用本地缓存。</p>
+        <div class="field-block"><span class="hint">应用信息地址（随测试/生产切换自动变化，不可手工修改）</span><input id="app-profile-source" type="text" readonly spellcheck="false" placeholder="选择环境后自动填入"></div>
+        <p id="app-profile-hint" class="hint"></p>
+      </div></details>
     </section>
-    <section class="panel"><details class="advanced"><summary>应用信息（测试 / 生产）</summary><div class="advanced-content">
-      <p id="app-profile-state" class="hint">尚未同步应用信息。</p>
-      <label class="check"><span>使用测试服（切换后加载测试环境的配置与功能）</span><input type="checkbox" id="use_test_server"></label>
-      <p class="hint">测试与生产是两套配置：只在测试开放的功能，切到生产后不可用。切换后会自动拉取，拉不到就继续用本地缓存。</p>
-      <div class="field-block"><span class="hint">应用信息地址（随测试/生产切换自动变化，不可手工修改）</span><input id="app-profile-source" type="text" readonly spellcheck="false" placeholder="选择环境后自动填入"></div>
-      <p id="app-profile-hint" class="hint"></p>
-    </div></details></section>
   </div>
   <div id="view-setup" class="page-view" hidden>
     <section class="panel">

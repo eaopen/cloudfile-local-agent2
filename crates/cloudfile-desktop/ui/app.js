@@ -690,9 +690,9 @@ function envSuffix() {
 function applyBrand(name, environment) {
   brandName = name || 'CloudFile';
   environmentName = environment || '';
-  const shown = brandName + envSuffix();
-  document.querySelector('#brand-name').textContent = shown;
-  const title = `${shown} · 任务中心`;
+  // 左上角只放品牌名：加上「（测试）」会顶到侧栏宽度之外，环境留给两处版本号表达。
+  document.querySelector('#brand-name').textContent = brandName;
+  const title = `${brandName} · 任务中心`;
   document.title = title;
   if (appWindow && typeof appWindow.setTitle === 'function') {
     appWindow.setTitle(title).catch(() => {});
