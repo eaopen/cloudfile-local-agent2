@@ -164,8 +164,11 @@ test('the active environment drives the brand and the sidebar', async () => {
   // 输入框被当前环境的地址预填，用户点同步前就能看到会去问谁。
   assert.match(elements.get('app-profile-source').value, /profile\/v1$/);
   // 「左上角」不止侧栏：标题栏与版本行也要用同一个名字。
-  assert.equal(ctx.document.title, '生产助手 · 任务中心');
-  assert.match(elements.get('version').textContent, /^生产助手 · 2\.2\.0/);
+  // 三处都要看得出当前环境：左上角品牌、左下角版本、关于与更新里的版本行。
+  assert.equal(ctx.document.title, '生产助手（生产） · 任务中心');
+  assert.match(elements.get('brand-name').textContent, /生产助手（生产）/);
+  assert.match(elements.get('version').textContent, /^生产助手 · 2\.2\.0.*（生产）$/);
+  assert.match(elements.get('sidebar-version').textContent, /^v2\.2\.0.*（生产）$/);
 });
 
 test('ticking the test switch loads the test configuration and its features', async () => {

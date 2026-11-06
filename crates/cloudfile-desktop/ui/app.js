@@ -677,19 +677,29 @@ function showAutostartNote(mechanism) {
 
 // 当前品牌名：侧栏、窗口标题、版本行三处共用同一个值，避免各写一份「CloudFile」。
 let brandName = 'CloudFile';
+// 当前生效的环境（'' = 还不知道）。只有一个软件、两套配置，用户必须随时看得出
+// 自己现在在测试还是生产上，否则「为什么这个功能没有」会变成反复排查。
+let environmentName = '';
 
-// 品牌变化时把「左上角」相关的都同步掉：侧栏文字、标题栏、版本行。
+function envSuffix() {
+  return environmentName ? `（${environmentName}）` : '';
+}
+
+// 品牌/环境变化时把「左上角、左下角、关于与更新」三处一起刷掉。
 // 标题栏由系统绘制，改不了样式只能改文字，所以单独走一次窗口 API。
-function applyBrand(name) {
+function applyBrand(name, environment) {
   brandName = name || 'CloudFile';
-  document.querySelector('#brand-name').textContent = brandName;
-  const title = `${brandName} · 任务中心`;
+  environmentName = environment || '';
+  const shown = brandName + envSuffix();
+  document.querySelector('#brand-name').textContent = shown;
+  const title = `${shown} · 任务中心`;
   document.title = title;
   if (appWindow && typeof appWindow.setTitle === 'function') {
     appWindow.setTitle(title).catch(() => {});
   }
   if (component) {
-    document.querySelector('#version').textContent = `${brandName} · ${component.version}`;
+    document.querySelector('#version').textContent = `${brandName} · ${component.version}${envSuffix()}`;
+    document.querySelector('#sidebar-version').textContent = `v${component.version}${envSuffix()}`;
   }
 }
 
@@ -699,9 +709,16 @@ function applyBrand(name) {
 //
 // 测试/生产是**两套配置**（一套软件、一个更新源）：开关切的是用哪一套，
 // 决定品牌名与该环境开放的功能（`active.features`）。
+// 环境标识只认这两个值；其它值（dev/local）按"测试"显示，避免出现英文小字。
+function environmentLabel(profile) {
+  const raw = profile && profile.active && profile.active.environment;
+  if (!raw) return '';
+  return raw === 'prod' ? '生产' : '测试';
+}
+
 function renderAppProfile(profile) {
   const name = profile && profile.brand && profile.brand.application_name;
-  applyBrand(name);
+  applyBrand(name, environmentLabel(profile));
   const toggle = document.querySelector('#use_test_server');
   if (toggle && profile && typeof profile.use_test === 'boolean') {
     toggle.checked = profile.use_test;
@@ -752,20 +769,25 @@ async function switchEnvironment(useTest) {
   }
 }
 
+// 同步应用信息：和「检查更新」一样用弹窗报结果 —— 按钮已经挪到「关于与更新」，
+// 那里没有常驻文案的位置，而且这类"去问服务器"的操作给个明确的结束反馈更稳妥。
 async function syncAppProfile() {
   const button = document.querySelector('#app-profile-sync');
-  const hint = document.querySelector('#app-profile-hint');
   button.disabled = true;
-  hint.textContent = '正在同步…';
+  dialog('正在同步应用信息…', '正在从当前环境的服务读取品牌与功能配置。', []);
   try {
     // 不传地址：由后端按当前环境（测试/生产）自己算，界面不再提供手工覆盖。
     const result = await invoke('sync_app_profile', { address: null });
     renderAppProfile(result.profile);
-    hint.textContent = `已同步：${result.application_name}（${result.source}）`;
+    dialog(
+      '应用信息已同步',
+      `应用名称：${result.application_name}\n环境：${environmentName || '未知'}\n来源：${result.source}`,
+      [['知道了']],
+    );
   } catch (error) {
     // 常见三种：服务没被信任、地址漏了反代前缀、过期/签名不符。原文比笼统的
     // 「同步失败」有用得多，直接透出。
-    hint.textContent = `同步失败：${(error && error.message) || error}`;
+    dialog('同步应用信息失败', String((error && error.message) || error), [['知道了']]);
   } finally {
     button.disabled = false;
   }
@@ -785,8 +807,8 @@ async function loadSettings() {
   document.querySelector('#host-extension-id').textContent = (setup && setup.extension_id) || '';
   // 版本行沿用当前品牌名（未绑定 profile 时就是 CloudFile）；applyBrand 会在
   // 读到应用信息后再覆盖一次，两处都写是为了「先画出页面、后补品牌」不闪烁。
-  document.querySelector('#version').textContent = `${brandName} · ${current.version}`;
-  document.querySelector('#sidebar-version').textContent = `v${current.version}`;
+  document.querySelector('#version').textContent = `${brandName} · ${current.version}${envSuffix()}`;
+  document.querySelector('#sidebar-version').textContent = `v${current.version}${envSuffix()}`;
   // 徽标跟着真实版本走（原来写死「AGENT 2.2 · 开发版」，正式版里既过时又误导）。
   document.querySelector('#agent-badge').textContent = `AGENT ${current.version}`;
   document.querySelector('#install-path').textContent = `安装目录：${current.install_root}`;
