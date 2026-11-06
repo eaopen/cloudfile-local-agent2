@@ -418,26 +418,55 @@ pub fn sources(config: &session::Config) -> Vec<String> {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .collect();
-    if result.is_empty() {
-        if let Some(single) = config
-            .profile_source
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            result.push(single.to_string());
-        }
+    if let Some(single) = config
+        .profile_source
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        result.push(single.to_string());
     }
-    if result.is_empty() {
-        for origin in &config.allowed_origins {
-            result.push(format!("{origin}{DISCOVERY_PATH}"));
-            result.push(format!("{origin}/prod-api{DISCOVERY_PATH}"));
-        }
+    // 推导出来的候选**总是**补在最后，不能因为"已经记住过一个环境"就停掉。
+    // 现场踩过：先成功拉到测试服，`profile_sources` 只剩 `test`，于是生产那条
+    // 再也不会被尝试 —— 生产环境永远没有缓存，界面只能退回默认名。
+    for origin in &config.allowed_origins {
+        result.push(format!("{origin}{DISCOVERY_PATH}"));
+        result.push(format!("{origin}/prod-api{DISCOVERY_PATH}"));
     }
     let mut seen = BTreeSet::new();
     result.retain(|value| seen.insert(value.clone()));
     result.truncate(8);
     result
+}
+
+/// 界面该显示的名字。
+///
+/// 顺序：当前环境的配置 → **任意**已绑定配置 → `CloudFile`。
+/// 中间这层是必要的：开关停在"生产"、但本机只缓存了测试配置时（某一侧拉取失败很常见），
+/// 退回 `CloudFile` 会让用户以为"品牌没生效"，其实站点名字是知道的。
+pub fn display_name(root: &Path, use_test: bool) -> String {
+    if let Some(profile) = active(root, use_test) {
+        if !profile.application_name.trim().is_empty() {
+            return profile.application_name;
+        }
+    }
+    let Ok(entries) = std::fs::read_dir(root.join("application-profiles")) else {
+        return "CloudFile".to_string();
+    };
+    for entry in entries.flatten().take(32) {
+        let path = entry.path();
+        if path.extension().and_then(|x| x.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(record) = storage::read::<BoundProfile>(&path) else {
+            continue;
+        };
+        let name = record.profile.application.name.trim();
+        if !name.is_empty() {
+            return name.to_string();
+        }
+    }
+    "CloudFile".to_string()
 }
 
 /// 当前生效的那一套配置（由「使用测试服」开关选）。
@@ -871,6 +900,23 @@ mod tests {
         .unwrap();
     }
 
+    /// 品牌兜底：当前环境没有配置时，不能直接掉回 CloudFile —— 站点名字明明已经缓存过。
+    #[test]
+    fn display_name_falls_back_to_any_bound_profile_before_the_default() {
+        let (_temporary, root) = storage::test_root();
+        assert_eq!(display_name(&root, false), "CloudFile");
+
+        session::trust(&root, "https://files.example.test/seafile".into()).unwrap();
+        let now = crate::now();
+        // 只绑了测试那一套，但开关停在生产。
+        store_bound(&root, "etech-test", "test", now, now + 86400);
+        assert_eq!(display_name(&root, false), "Sample");
+        // 当前环境有配置时优先用它。
+        store_bound(&root, "etech-prod", "prod", now, now + 86400);
+        assert_eq!(display_name(&root, true), "Sample");
+        assert_eq!(display_name(&root, false), "Sample");
+    }
+
     /// 极简 HTTP 服务：先绑端口、用真实 base 拼响应体，再回答一次 GET。
     /// 这样 profile 的 `origin`/`services.files` 必然与请求地址一致（同源校验的硬要求）。
     fn serve_profile(build: impl FnOnce(&str) -> String) -> String {
@@ -924,8 +970,12 @@ mod tests {
         remember_source(&root, &prod, "prod").unwrap();
         remember_source(&root, &test, "test").unwrap();
 
-        // 两套并存，各自独立（互不覆盖）。
-        assert_eq!(sources(&session::config(&root).unwrap()).len(), 2);
+        // 两套并存，各自独立（互不覆盖）。记住的两条排在最前，推导出来的候选补在后面
+        // —— 候选不能因为"已经记住过"就停止尝试，否则另一侧永远不会再拉。
+        let targets = sources(&session::config(&root).unwrap());
+        assert!(targets.len() >= 2);
+        assert!(targets.contains(&format!("{prod}{DISCOVERY_PATH}")));
+        assert!(targets.contains(&format!("{test}{DISCOVERY_PATH}")));
 
         // 不勾测试服 → 生产那套；勾了 → 测试那套。
         let production = overview(&root, false);

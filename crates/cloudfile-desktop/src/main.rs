@@ -539,11 +539,12 @@ async fn app_profile(state: tauri::State<'_, State>) -> Result<Value, String> {
 /// 切完立刻尝试拉一次目标环境；拉不到就用本地缓存，缓存也没有就退回默认品牌。
 #[tauri::command]
 async fn set_profile_environment(
+    app: tauri::AppHandle,
     state: tauri::State<'_, State>,
     use_test: bool,
 ) -> Result<Value, String> {
     let root = state.root.clone();
-    tauri::async_runtime::spawn_blocking(move || -> Result<Value, String> {
+    let value = tauri::async_runtime::spawn_blocking(move || -> Result<Value, String> {
         settings::update(&root, |current| current.use_test_server = use_test)
             .map_err(|error| error.to_string())?;
         let config = session::config(&root).map_err(|error| error.to_string())?;
@@ -569,7 +570,10 @@ async fn set_profile_environment(
         }))
     })
     .await
-    .map_err(|_| "切换环境失败".to_string())?
+    .map_err(|_| "切换环境失败".to_string())??;
+    // 托盘名字要跟着立刻变，否则用户会以为切换没生效（轮询是 5 秒一次）。
+    refresh_tray(&state, &app);
+    Ok(value)
 }
 
 /// 用户点「同步应用信息」时显式拉一次 Profile。
@@ -579,11 +583,12 @@ async fn set_profile_environment(
 /// 这三种要分别处理，笼统说「同步失败」等于没说。
 #[tauri::command]
 async fn sync_app_profile(
+    app: tauri::AppHandle,
     state: tauri::State<'_, State>,
     address: Option<String>,
 ) -> Result<Value, String> {
     let root = state.root.clone();
-    tauri::async_runtime::spawn_blocking(move || -> Result<Value, String> {
+    let value = tauri::async_runtime::spawn_blocking(move || -> Result<Value, String> {
         let use_test = settings::load(&root).unwrap_or_default().use_test_server;
         let config = session::config(&root).map_err(|error| error.to_string())?;
         let target = address
@@ -606,7 +611,10 @@ async fn sync_app_profile(
         }))
     })
     .await
-    .map_err(|_| "同步应用信息失败".to_string())?
+    .map_err(|_| "同步应用信息失败".to_string())??;
+    // 刚拉到/换了一份配置，托盘名字立刻跟上。
+    refresh_tray(&state, &app);
+    Ok(value)
 }
 
 #[tauri::command]
@@ -1418,10 +1426,7 @@ fn tray_tooltip(windowed: bool, runtime_missing: bool, brand: &str, summary: &st
 /// 当前环境该显示的名字。读不到配置就退回默认名 —— 托盘不能因为元数据问题空着。
 fn active_brand(root: &Path) -> String {
     let use_test = settings::load(root).unwrap_or_default().use_test_server;
-    profile::active(root, use_test)
-        .map(|profile| profile.application_name)
-        .filter(|name| !name.trim().is_empty())
-        .unwrap_or_else(|| "CloudFile".to_string())
+    profile::display_name(root, use_test)
 }
 
 /// Keeps the tray tooltip and the guard menu row honest about the real store.
@@ -1900,7 +1905,12 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
             let tray = TrayIconBuilder::with_id("main")
                 .icon(icon)
                 .icon_as_template(cfg!(target_os = "macos"))
-                .tooltip(format!("CloudFile Agent {}", cloudfile_core::VERSION))
+                .tooltip(tray_tooltip(
+                    windowed,
+                    missing_now,
+                    &active_brand(&root),
+                    "可以安全退出",
+                ))
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     // 用户显式点击：每次都反馈，不能因为「之前提示过」而点了没反应。
