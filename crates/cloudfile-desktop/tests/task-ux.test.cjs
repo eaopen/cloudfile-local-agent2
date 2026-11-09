@@ -70,8 +70,6 @@ test('one summary line states the mode and its write-back rule once', () => {
 test('problem states replace the summary line instead of stacking under it', () => {
   assert.match(ux.summary(task({ pending_upload: true, local_changed: true }), false), /上传结果未确认/);
   assert.match(ux.summary(task({ needs_review: true }), false), /需要检查/);
-  // 大文件下载阶段：任务还没落盘，但列表必须给出"在动"的反馈。
-  assert.match(ux.summary(task({ preparing: true }), false), /正在下载/);
   assert.match(ux.summary(task({ local_changed: true }), true), /正在上传/);
   assert.match(ux.summary(task({ exclusive: true, mode: 'exclusive-edit', has_lease: false }), false), /尚未就绪/);
   assert.match(ux.summary(task({

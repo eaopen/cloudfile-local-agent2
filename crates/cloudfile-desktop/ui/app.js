@@ -342,16 +342,22 @@ function stateText(result) {
   return '操作已完成。';
 }
 
+// 返回 null 表示成功，否则是被命令拒绝的原因。
+// 调用方必须据此决定要不要说"完成了" —— 原来这里吞掉错误，调用方却照样报成功，
+// 于是"删除失败"也会显示"任务已删除"。
 async function action(task, command, args) {
-  if (busy.has(task.task_id)) return;
+  if (busy.has(task.task_id)) return null;
   busy.add(task.task_id);
   say('正在处理，请保留本地文件…');
   refresh();
   try {
     const result = await invoke(command, { taskId: task.task_id, ...args });
     say(stateText(result));
+    return null;
   } catch (error) {
-    say(String(error));
+    const text = String((error && error.message) || error);
+    say(text);
+    return text;
   } finally {
     busy.delete(task.task_id);
     refresh();
@@ -492,10 +498,7 @@ function renderTask(task) {
 
   const buttons = document.createElement('div');
   buttons.className = 'actions';
-  if (task.preparing) {
-    // 还在下载：本地文件都不存在，"打开"之类的按钮点了只会报错。
-    row.classList.add('preparing');
-  } else if (task.exclusive) {
+  if (task.exclusive) {
     renderExclusive(buttons, task, working);
   } else if (task.can_upload) {
     renderOptimistic(buttons, task, working);
@@ -556,7 +559,13 @@ function renderTask(task) {
             lines.push('任务状态本来就读不出来，删除后不再保留任何本地记录。');
           }
           if (!window.confirm(lines.join('\n'))) return;
-          await action(task, 'delete_task');
+          const failure = await action(task, 'delete_task');
+          if (failure) {
+            // 文件被 Office 之类占着时，删除会被拒绝：任务和本地文件都保持原样，
+            // 不能再报"已删除"，否则用户会以为记录没了。
+            dialog('无法删除这个任务', `${failure}\n\n任务和本地文件都保持原样，请关闭文件后再试。`, [['知道了']]);
+            return;
+          }
           say('任务已删除，本地文件也已清理。');
         },
         { secondary: true },
@@ -615,6 +624,24 @@ function renderSummary(result) {
   }
 }
 
+// 「正在下载」不进任务列表：那会让列表里多出一条点不动的任务，也分不清是排队还是失败。
+// 每个文件只在开始时弹一次轻提示（3.5 秒自动消失），进度本身不需要盯。
+const announcedPreparing = new Set();
+function announcePreparing(list) {
+  if (!Array.isArray(list)) return;
+  for (const item of list) {
+    if (!item || !item.task_id) continue;
+    const key = `${item.task_id}:${item.started_at || 0}`;
+    if (announcedPreparing.has(key)) continue;
+    announcedPreparing.add(key);
+    const name = item.file_name || '文件';
+    invoke('toast_show', {
+      level: 'working',
+      text: `正在下载「${name}」到本机…大文件需要一点时间，请稍候。`,
+    }).catch(() => {});
+  }
+}
+
 async function refresh() {
   if (refreshing) return;
   refreshing = true;
@@ -624,6 +651,7 @@ async function refresh() {
     // 服务地址本身是内置的，这里只读状态，不提供任何配置入口。
     services = await invoke('service_status').catch(() => services);
     renderSummary(result);
+    announcePreparing(result.preparing);
     // The entry mirrors the same list, so a task can never be visible in one
     // view and hidden in the other.
     invoke('float_sync').catch(() => {});

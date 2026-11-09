@@ -305,22 +305,19 @@ fn summaries(root: &Path, uploading: &Mutex<HashSet<String>>) -> anyhow::Result<
     let mut tasks = Vec::new();
     // Optional application brand is a read-only label, never a task owner or authorization.
     let application_profiles = profile::labels(root);
-    // 「正在下载」的占位行：大文件读一遍要几十秒，这期间任务还没落盘。
-    // 不补这一行，用户点完「本地查看」会以为按钮没反应。
+    // 「正在下载」不占用任务列表：那不是一条任务，进度也不在列表里体现。
+    // 单独发一份 `preparing`，界面用它弹一次轻提示就够。
+    let mut preparing = Vec::new();
     if let Ok(entries) = std::fs::read_dir(root.join("tasks")) {
         for entry in entries.flatten() {
             let path = entry.path().join("preparing.json");
             let Ok(marker) = cloudfile_core::storage::read::<Value>(&path) else {
                 continue;
             };
-            tasks.push(json!({
+            preparing.push(json!({
                 "task_id": entry.file_name().to_string_lossy(),
                 "file_name": marker["file_name"].as_str().unwrap_or(""),
-                "library_name": marker["library_name"].as_str().unwrap_or(""),
-                "mode": native::mode_label(marker["mode"].as_str().unwrap_or("")),
-                "internal_mode": marker["mode"].as_str().unwrap_or(""),
-                "preparing": true,
-                "group": "in-progress",
+                "started_at": marker["started_at"].as_i64().unwrap_or(0),
             }));
         }
     }
@@ -401,7 +398,7 @@ fn summaries(root: &Path, uploading: &Mutex<HashSet<String>>) -> anyhow::Result<
     }
     let count = |group: &str| tasks.iter().filter(|task| task["group"] == group).count();
     Ok(
-        json!({"ok":true,"cdc_enabled":cloudfile_core::cdc::enabled(),"tasks":tasks,
+        json!({"ok":true,"cdc_enabled":cloudfile_core::cdc::enabled(),"tasks":tasks,"preparing":preparing,
         // 修改原因（2026-10-23）：分组 key 必须和界面用的一致（kebab-case）。原来这里发的是
         // in_progress / needs_attention，而 app.js 按 counts['in-progress'] 取，取到 undefined
         // → 顶部「进行中」永远是 0，即使列表里就有进行中的任务。
@@ -847,10 +844,7 @@ fn present_toast(app: &tauri::AppHandle, level: &str, text: &str) {
         let y = position.y + 16;
         let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
     }
-    let _ = window.emit(
-        "toast",
-        json!({"level": if level == "warning" {"warning"} else {"info"}, "text": text}),
-    );
+    let _ = window.emit("toast", json!({"level": level, "text": text}));
     let _ = window.show();
     let handle = app.clone();
     std::thread::spawn(move || {

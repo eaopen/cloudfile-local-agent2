@@ -529,11 +529,52 @@ pub fn find_task(
 /// 修改原因（2026-10-22）：任务中心只有「打开」，已完成的任务永远留在列表里，
 /// 本地下载的那份也一直占着地方。清理范围严格限制在 workspace 根以下：
 /// 绝不越过 workspace 根去删用户自己的目录；任何一步失败都报错而不是静默跳过。
+/// 删除前先确认本地文件没被别的程序占着。
+///
+/// 现场：Office 还开着的时候删任务，文件删不掉、任务记录却已经被动了 —— 用户看到
+/// "已删除"的提示，任务却变成"待处理"，本地文件还留着。改成先探测再动手：
+/// 探测失败就原样返回，**一个字节都不删**。
+fn ensure_file_released(path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // share_mode(0) = 不共享：只要还有别的句柄开着（Word/Excel/CAD），这里就会失败。
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(path)
+        {
+            Ok(_) => Ok(()),
+            Err(error) if matches!(error.raw_os_error(), Some(32) | Some(33)) => {
+                bail!(
+                    "「{}」正在被其他程序使用，无法删除。请先关闭该文件再重试。",
+                    path.file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| path.to_string_lossy().into_owned())
+                )
+            }
+            // 其它错误（权限、只读属性等）交给真正的删除去报，不在这里臆测。
+            Err(_) => Ok(()),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(())
+    }
+}
+
 pub fn remove_task(root: &Path, id: &str) -> Result<serde_json::Value> {
     let task = load(root, id)?;
     let dir = task_dir(root, id)?;
     let workspace = crate::settings::workspace_root(root);
     let working = working_dir(root, id).ok();
+    // 先探测再删：锁定中的文件一旦删到一半，任务记录和本地副本就对不上了。
+    if let Some(copy) = working.as_ref() {
+        ensure_file_released(&copy.join(&task.file_name))?;
+    }
     if let Some(copy) = working.as_ref() {
         if copy != &dir && copy.starts_with(&workspace) && copy.exists() {
             fs::remove_dir_all(copy)?;
@@ -615,6 +656,58 @@ pub fn launch(root: &Path, id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// 文件被别的程序占着时，删除必须**整体拒绝**：任务记录和本地副本都要原样保留。
+    /// 现场踩过：文件删不掉、记录却被动过，任务变成"待处理"，用户以为已经删了。
+    #[cfg(windows)]
+    #[test]
+    fn removing_a_task_refuses_while_the_copy_is_still_open() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let (_dir, root) = storage::test_root();
+        crate::settings::update(&root, |s| {
+            s.workspace_root = Some(root.join("workspace").to_string_lossy().into_owned())
+        })
+        .unwrap();
+        let id = "d".repeat(64);
+        let private = task_dir(&root, &id).unwrap();
+        storage::private_dir(&private).unwrap();
+        let working = prepare_working_dir(&root, &id).unwrap();
+        fs::write(working.join("a.docx"), b"open me").unwrap();
+        let task = Task {
+            task_id: id.clone(),
+            device_id: None,
+            file_name: "a.docx".into(),
+            mode: "local-view".into(),
+            server: "https://files.example.test".into(),
+            repo_id: "11111111-1111-4111-8111-111111111111".into(),
+            remote_path: "/a.docx".into(),
+            library_name: None,
+            session_id: "s".into(),
+            baseline_file_id: "b".repeat(40),
+            baseline_digest: "c".repeat(64),
+            size: 7,
+        };
+        storage::write(&private.join("task.json"), &task).unwrap();
+
+        // 自己独占打开，模拟 Word 占着这个文件。
+        let _held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(working.join("a.docx"))
+            .unwrap();
+
+        let error = remove_task(&root, &id).unwrap_err().to_string();
+        assert!(error.contains("正在被其他程序使用"), "{error}");
+        assert!(
+            private.join("task.json").is_file(),
+            "删除被拒绝时任务记录必须还在"
+        );
+        assert!(
+            working.join("a.docx").exists(),
+            "删除被拒绝时本地副本必须还在"
+        );
+    }
+
     #[test]
     fn workspace_changes_pin_existing_copies_and_keep_journals_private() {
         let (_dir, root) = storage::test_root();

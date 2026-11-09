@@ -18,9 +18,13 @@ const text = document.querySelector('#text');
 listen('toast', (event) => {
   const payload = event.payload || {};
   const warning = payload.level === 'warning';
-  title.textContent = warning ? `${brand} · 需要处理` : `${brand} · 已保存到云端`;
+  const working = payload.level === 'working';
+  // 三种提示各有各的标题：混用会让"正在下载"看起来像"已完成"。
+  title.textContent = warning
+    ? `${brand} · 需要处理`
+    : working ? `${brand} · 正在准备文件` : `${brand} · 已保存到云端`;
   text.textContent = String(payload.text || '');
-  card.className = warning ? 'toast warning' : 'toast info';
+  card.className = warning ? 'toast warning' : working ? 'toast working' : 'toast info';
   // Restart the fade so two notices in a row both animate.
   card.classList.remove('show');
   void card.offsetWidth;
