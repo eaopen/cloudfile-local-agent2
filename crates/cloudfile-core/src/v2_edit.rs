@@ -51,6 +51,10 @@ struct TicketClaims {
     path: String,
     mode: String,
     exp: i64,
+    /// 用户点开那一刻的文件版本。服务端 `read` 要求它等于当前版本（否则 409），
+    /// 所以它天然就是"云端当前版本"的可信指示 —— 客户端据此判断本地副本是否已是最新。
+    #[serde(default)]
+    file_id: String,
     /// 库名：hub 签票据时从 `seafile_api.get_repo().name` 写进来，只做显示。
     /// 没有 `deny_unknown_fields`，所以老 hub 不写这一项也能解析（退化成空串）。
     #[serde(default)]
@@ -143,6 +147,27 @@ fn request_meta(root: &Path, task: &Task, st: &State) -> Result<Value> {
     read_response(res)
 }
 
+/// 打开流程的现场记录。
+///
+/// 大文件"每次都重新下载"是反复出现的反馈，而界面上看不出任何区别 —— 只能靠这里的
+/// 一行记录区分「复用了」和「为什么没复用」。日志封顶 128 KiB，超了直接重来。
+fn note(root: &Path, line: &str) {
+    use std::io::Write as _;
+    let path = root.join("v2-open.log");
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if meta.len() > 128 * 1024 {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(file, "{} {line}", crate::now());
+    }
+}
+
 /// 本地副本能不能直接复用：同一文件、没改过、云端版本号也没变。
 ///
 /// 为什么值得单独做一条路径：大文件读一次要几十秒（服务端拼块 + 传输 + 落盘），
@@ -156,16 +181,20 @@ fn reuse_local(
     ticket: &str,
 ) -> Result<Option<Task>> {
     let Some(claims) = claims else {
+        note(root, "reuse skip: 票据没有声明");
         return Ok(None);
     };
     if claims.repo_id.is_empty() || !session::safe_remote_path(&claims.path) {
+        note(root, "reuse skip: 票据缺少库或路径");
         return Ok(None);
     }
     let Some(mut task) = session::find_task(root, &claims.repo_id, &claims.path, &claims.mode)?
     else {
+        note(root, "reuse skip: 本机没有同一文件的任务");
         return Ok(None);
     };
     if task.server != server || !is_v2(root, &task.task_id) {
+        note(root, "reuse skip: 任务归属或格式不符");
         return Ok(None);
     }
     let Ok(local) = session::local_path(root, &task) else {
@@ -173,6 +202,7 @@ fn reuse_local(
     };
     // 本地被改过（有未上传修改）就不是"最新副本"，交给原来的下载/合并流程去问用户。
     if session::digest(&local)? != task.baseline_digest {
+        note(root, "reuse skip: 本地副本已被修改");
         return Ok(None);
     }
     let previous = load(root, &task.task_id).unwrap_or(State {
@@ -183,14 +213,33 @@ fn reuse_local(
         ticket: ticket.to_string(),
         guard: previous.guard,
     };
-    // 老服务端没有 meta 路由：静默退回下载流程，不能因为优化让打开失败。
-    let Ok(meta) = request_meta(root, &task, &state) else {
-        return Ok(None);
+    // 云端版本优先看票据：hub 签发的 `file_id` 就是用户点开那一刻的版本，服务端
+    // `read` 也要求它等于当前版本（否则 409）。用它判断是**零请求**的 —— 不需要
+    // 服务端支持任何新路由，老服务端也能立刻生效。
+    let current = if !claims.file_id.is_empty() {
+        if !valid_id(&claims.file_id) {
+            return Ok(None);
+        }
+        claims.file_id.clone()
+    } else {
+        // 老 hub 不带 file_id：退回 meta 查询（服务端没有该路由就再退回下载）。
+        let Ok(meta) = request_meta(root, &task, &state) else {
+            return Ok(None);
+        };
+        meta["file_id"].as_str().unwrap_or("").to_string()
     };
-    let current = meta["file_id"].as_str().unwrap_or("");
-    if !valid_id(current) || current != task.baseline_file_id {
+    if !valid_id(&current) || current != task.baseline_file_id {
+        note(
+            root,
+            &format!(
+                "reuse skip: 云端版本不同 {} != {}",
+                &current[..current.len().min(12)],
+                &task.baseline_file_id[..task.baseline_file_id.len().min(12)]
+            ),
+        );
         return Ok(None);
     }
+    note(root, &format!("reuse hit: {}（未下载）", task.file_name));
     task.session_id = sid.to_string();
     storage::write(
         &session::task_dir(root, &task.task_id)?.join("task.json"),
@@ -1108,6 +1157,7 @@ mod tests {
         let reads = std::sync::Arc::new(AtomicUsize::new(0));
         let counter = reads.clone();
         let meta_counter = std::sync::Arc::new(AtomicUsize::new(0));
+        let meta_seen = meta_counter.clone();
         let payload = b"local copy bytes".to_vec();
         let body = payload.clone();
         let file_id = "b".repeat(40);
@@ -1174,11 +1224,21 @@ mod tests {
             crate::now() + 3600
         );
         let ticket = format!("h.{}.s", B64.encode(claims.as_bytes()));
-        let uri = |sid: &str| {
+        // 新版 hub 会带上 file_id（用户点开那一刻的版本），客户端据此零请求判断；
+        // 老 hub 不带，只能退回 meta 查询。
+        let claims_with_id = |id: &str| {
             format!(
-                "cloudfile-open://v2/open?instance={}&session={sid}&ticket={ticket}",
-                url::form_urlencoded::byte_serialize(server.as_bytes()).collect::<String>()
+                "{{\"repo_id\":\"{repo_id}\",\"path\":\"/a.bin\",\"mode\":\"local-view\",\"exp\":{},\"file_id\":\"{id}\"}}",
+                crate::now() + 3600
             )
+        };
+        let instance = url::form_urlencoded::byte_serialize(server.as_bytes()).collect::<String>();
+        let uri = |sid: &str| {
+            format!("cloudfile-open://v2/open?instance={instance}&session={sid}&ticket={ticket}")
+        };
+        let uri_with_id = |sid: &str, id: &str| {
+            let t = format!("h.{}.s", B64.encode(claims_with_id(id).as_bytes()));
+            format!("cloudfile-open://v2/open?instance={instance}&session={sid}&ticket={t}")
         };
 
         let first = open(&root, &uri("22222222-2222-4222-8222-222222222222")).unwrap();
@@ -1196,8 +1256,30 @@ mod tests {
             "第二次不该再下载：本地副本未改、云端版本未变"
         );
 
+        // 新版 hub：票据自带 file_id，与本地记录的版本一致 —— 一个请求都不该发。
+        let metas_before = meta_seen.load(Ordering::SeqCst);
+        open(
+            &root,
+            &uri_with_id("44444444-4444-4444-8444-444444444444", &file_id),
+        )
+        .unwrap();
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            1,
+            "票据版本与本地一致时不该再下载"
+        );
+        assert_eq!(
+            meta_seen.load(Ordering::SeqCst),
+            metas_before,
+            "票据已经给出云端版本，不该再问 meta"
+        );
+
         // 云端换了版本：必须重新下载，不能拿旧副本糊弄。
-        open(&root, &uri("44444444-4444-4444-8444-444444444444")).unwrap();
+        open(
+            &root,
+            &uri_with_id("55555555-5555-4555-8555-555555555555", &"c".repeat(40)),
+        )
+        .unwrap();
         assert_eq!(
             reads.load(Ordering::SeqCst),
             2,
