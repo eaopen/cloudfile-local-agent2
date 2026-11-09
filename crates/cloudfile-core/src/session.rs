@@ -529,11 +529,14 @@ pub fn find_task(
 /// 修改原因（2026-10-22）：任务中心只有「打开」，已完成的任务永远留在列表里，
 /// 本地下载的那份也一直占着地方。清理范围严格限制在 workspace 根以下：
 /// 绝不越过 workspace 根去删用户自己的目录；任何一步失败都报错而不是静默跳过。
-/// 删除前先确认本地文件没被别的程序占着。
+/// 删除前先确认这个文件**删得掉**（而不是"有没有人打开"）。
 ///
-/// 现场：Office 还开着的时候删任务，文件删不掉、任务记录却已经被动了 —— 用户看到
-/// "已删除"的提示，任务却变成"待处理"，本地文件还留着。改成先探测再动手：
-/// 探测失败就原样返回，**一个字节都不删**。
+/// 踩过的坑：第一版用 `share_mode(0)` 独占打开来探测，结果**我们自己的**摘要读取
+/// （std 默认按 read|write|delete 共享）也会让它失败 —— 用户明明没开文件，却报
+/// "被其他程序占用"。杀毒/索引服务短时持有句柄时同样误判。
+///
+/// 真正决定删除成败的是「能否以 DELETE 访问打开」：Office 之类打开文件时不会给
+/// FILE_SHARE_DELETE，这里就会失败；而共享删除的普通读句柄不受影响。
 fn ensure_file_released(path: &Path) -> Result<()> {
     if !path.exists() {
         return Ok(());
@@ -541,13 +544,15 @@ fn ensure_file_released(path: &Path) -> Result<()> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
-        // share_mode(0) = 不共享：只要还有别的句柄开着（Word/Excel/CAD），这里就会失败。
+        const DELETE: u32 = 0x0001_0000;
+        const SHARE_ALL: u32 = 0x1 | 0x2 | 0x4; // read | write | delete
         match std::fs::OpenOptions::new()
-            .read(true)
-            .share_mode(0)
+            .access_mode(DELETE)
+            .share_mode(SHARE_ALL)
             .open(path)
         {
             Ok(_) => Ok(()),
+            // 32 = ERROR_SHARING_VIOLATION，33 = ERROR_LOCK_VIOLATION
             Err(error) if matches!(error.raw_os_error(), Some(32) | Some(33)) => {
                 bail!(
                     "「{}」正在被其他程序使用，无法删除。请先关闭该文件再重试。",
@@ -556,7 +561,8 @@ fn ensure_file_released(path: &Path) -> Result<()> {
                         .unwrap_or_else(|| path.to_string_lossy().into_owned())
                 )
             }
-            // 其它错误（权限、只读属性等）交给真正的删除去报，不在这里臆测。
+            // 只读属性（本地查看副本）会给出 ACCESS_DENIED，但删除本身是被允许的，
+            // 交给真正的删除去处理。
             Err(_) => Ok(()),
         }
     }
@@ -689,13 +695,12 @@ mod tests {
         };
         storage::write(&private.join("task.json"), &task).unwrap();
 
-        // 自己独占打开，模拟 Word 占着这个文件。
-        let _held = fs::OpenOptions::new()
+        // ① Word 之类：独占打开（不给共享删除）→ 必须拒绝，且什么都不动。
+        let held = fs::OpenOptions::new()
             .read(true)
             .share_mode(0)
             .open(working.join("a.docx"))
             .unwrap();
-
         let error = remove_task(&root, &id).unwrap_err().to_string();
         assert!(error.contains("正在被其他程序使用"), "{error}");
         assert!(
@@ -705,6 +710,20 @@ mod tests {
         assert!(
             working.join("a.docx").exists(),
             "删除被拒绝时本地副本必须还在"
+        );
+        drop(held);
+
+        // ② 我们自己的摘要读取（std 默认共享 read|write|delete）不该被当成"占用"。
+        // 这条是现场回归：以前用独占打开探测，用户根本没开文件也报"被占用"。
+        let reader = fs::OpenOptions::new()
+            .read(true)
+            .open(working.join("a.docx"))
+            .unwrap();
+        remove_task(&root, &id).expect("共享删除的读句柄不应该挡住删除");
+        drop(reader);
+        assert!(
+            !private.join("task.json").exists(),
+            "删除后任务记录应当消失"
         );
     }
 

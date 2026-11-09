@@ -874,9 +874,16 @@ fn present_toast(app: &tauri::AppHandle, level: &str, text: &str) {
     {
         let size = monitor.size();
         let position = monitor.position();
-        let width = 420i32;
-        let x = position.x + size.width as i32 - width - 16;
-        let y = position.y + 16;
+        // 位置全是**物理像素**，窗口尺寸却是逻辑像素：175% 缩放下 420 逻辑 = 735 物理，
+        // 直接拿 420 去减会让窗口右侧探出屏幕 300 多像素。这里取窗口真实外框尺寸。
+        let scale = monitor.scale_factor();
+        let width = window
+            .outer_size()
+            .map(|value| value.width as i32)
+            .unwrap_or((420.0 * scale) as i32);
+        let margin = (16.0 * scale) as i32;
+        let x = (position.x + size.width as i32 - width - margin).max(position.x + margin);
+        let y = position.y + margin;
         let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
     }
     let _ = window.emit("toast", json!({"level": level, "text": text}));
