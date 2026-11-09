@@ -305,6 +305,25 @@ fn summaries(root: &Path, uploading: &Mutex<HashSet<String>>) -> anyhow::Result<
     let mut tasks = Vec::new();
     // Optional application brand is a read-only label, never a task owner or authorization.
     let application_profiles = profile::labels(root);
+    // 「正在下载」的占位行：大文件读一遍要几十秒，这期间任务还没落盘。
+    // 不补这一行，用户点完「本地查看」会以为按钮没反应。
+    if let Ok(entries) = std::fs::read_dir(root.join("tasks")) {
+        for entry in entries.flatten() {
+            let path = entry.path().join("preparing.json");
+            let Ok(marker) = cloudfile_core::storage::read::<Value>(&path) else {
+                continue;
+            };
+            tasks.push(json!({
+                "task_id": entry.file_name().to_string_lossy(),
+                "file_name": marker["file_name"].as_str().unwrap_or(""),
+                "library_name": marker["library_name"].as_str().unwrap_or(""),
+                "mode": native::mode_label(marker["mode"].as_str().unwrap_or("")),
+                "internal_mode": marker["mode"].as_str().unwrap_or(""),
+                "preparing": true,
+                "group": "in-progress",
+            }));
+        }
+    }
     let busy = uploading
         .lock()
         .map_err(|_| anyhow::anyhow!("上传状态不可用"))?
@@ -947,6 +966,15 @@ fn setup_state(state: tauri::State<'_, State>) -> Result<Value, String> {
     // A reusable Agent has no embedded enterprise trust origins.
     // Administrators or users configure actual services in the Services view.
     let trusted = config.allowed_origins.len();
+    // 只有真正的「全新机器」才停在引导页。升级、自启动、扩展里点开任务中心时，
+    // 本机其实已经装好了 —— 引导页每次都挡在前面只会让用户每天多点一次。
+    // 判据只看安装事实（Host 已注册 + 有受信任服务 + 扩展已部署），
+    // 不看"用户是否点过完成"，点没点过是界面状态，不该决定要不要拦人。
+    let ready = registered && trusted > 0 && extension::installed_version(&dir).is_some();
+    let completed = current.setup_completed || ready;
+    if completed && !current.setup_completed {
+        let _ = settings::update(root, |value| value.setup_completed = true);
+    }
     Ok(json!({
         "version": cloudfile_core::VERSION,
         "install_root": update::install_root(&desktop_binary()).to_string_lossy(),
@@ -968,7 +996,7 @@ fn setup_state(state: tauri::State<'_, State>) -> Result<Value, String> {
         "trusted_count": trusted,
         "trusted_ready": trusted > 0,
         "update_source": config.update_source,
-        "setup_completed": current.setup_completed,
+        "setup_completed": completed,
         "chrome_found": browser::chrome_path().is_some(),
     }))
 }
@@ -1033,7 +1061,20 @@ async fn setup_apply(state: tauri::State<'_, State>) -> Result<Value, String> {
         // 5) 部署扩展：从通道下载并解包到 <agent 根>\extension。
         //    没有更新源时这一步会失败 —— 那也不阻塞其余四步，用户可手动解压。
         steps.push(match native::update_extension(&root) {
-            Ok(detail) => json!({"key":"extension","ok":true,"detail":detail}),
+            Ok(detail) => {
+                // 把扩展实际解压到的目录记进 config：引导页、设置页、后续更新都读同一处，
+                // 免得"装好了但不知道该去哪儿加载"。
+                let target = extension_dir(&root);
+                if let Ok(mut config) = session::config(&root) {
+                    let text = target.to_string_lossy().into_owned();
+                    if config.extension_dir.as_deref() != Some(text.as_str()) {
+                        config.extension_dir = Some(text);
+                        let _ =
+                            cloudfile_core::storage::write(&root.join("config.json"), &config);
+                    }
+                }
+                json!({"key":"extension","ok":true,"detail":format!("{detail}；目录 {}", target.display())})
+            }
             Err(error) => json!({"key":"extension","ok":false,"detail":format!("{error:#}")}),
         });
 
@@ -2094,6 +2135,16 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
             // 应用信息（品牌名）自动刷新：跟启动自检一样是「后台顺手做」，
             // 失败只落日志，不影响任务与文件操作。
             spawn_profile_refresh(handle.clone(), root.clone());
+            // 首次安装时把扩展自动解压到位：不该让用户先点「一键完成」才拿到扩展包。
+            // 已经有扩展（升级/日常启动）就什么都不做，避免每次启动都去问通道。
+            let extension_root = root.clone();
+            std::thread::spawn(move || {
+                if cloudfile_core::extension::installed_version(&extension_dir(&extension_root))
+                    .is_none()
+                {
+                    let _ = cloudfile_core::native::update_extension(&extension_root);
+                }
+            });
             std::thread::spawn(move || loop {
                 let state = guard_handle.state::<State>();
                 refresh_tray(&state, &guard_handle);

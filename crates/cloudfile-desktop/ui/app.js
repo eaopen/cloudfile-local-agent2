@@ -191,7 +191,7 @@ const SETUP_STEPS = [
   {
     key: 'extension',
     title: '安装浏览器扩展',
-    hint: '下载扩展包并解压到下面的目录，再到 Chrome 里加载这个目录',
+    hint: '扩展包会自动下载并解压到下面目录，然后在 Chrome 里加载这个目录',
     state: (s) => ({
       ok: Boolean(s.extension_version),
       // 第 5 步要回答两个问题：解压到哪、完成没有。目录是固定路径（D 盘优先），
@@ -224,6 +224,8 @@ function renderSetup(state) {
     hint.className = 'hint';
     hint.textContent = step.hint;
     body.append(title, detail, hint);
+    // 一行一条装不下解释文字：挂到 title 上，鼠标停留还能看到。
+    item.title = step.hint;
     item.append(mark, body);
     setupSteps.append(item);
   }
@@ -299,7 +301,7 @@ async function runSetup() {
     say(
       failed.length
         ? `${failed.length} 步没成功，原因见上面的记录；修好后可以再点一次「一键完成」。`
-        : '五步都完成了；最后在 Chrome 里加载扩展，然后点「完成，进入任务中心」。',
+        : '五步都完成了；扩展已自动解压，最后在 Chrome 里加载它，然后点「完成，进入任务中心」。',
     );
     setupHelp.hidden = false;
   } catch (error) {
@@ -490,7 +492,10 @@ function renderTask(task) {
 
   const buttons = document.createElement('div');
   buttons.className = 'actions';
-  if (task.exclusive) {
+  if (task.preparing) {
+    // 还在下载：本地文件都不存在，"打开"之类的按钮点了只会报错。
+    row.classList.add('preparing');
+  } else if (task.exclusive) {
     renderExclusive(buttons, task, working);
   } else if (task.can_upload) {
     renderOptimistic(buttons, task, working);

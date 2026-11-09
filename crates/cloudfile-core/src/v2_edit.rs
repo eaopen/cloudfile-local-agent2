@@ -182,6 +182,41 @@ fn uri_parts(uri: &str) -> Result<(String, String, String)> {
 }
 /// Trust is granted by the user's desktop service settings. A signed Hub
 /// token is NEVER treated as proof until the native fileserver verifies it.
+/// 「正在准备」标记。大文件读一遍要几十秒，这段时间里任务列表原来是空的，
+/// 用户点了「本地查看」之后只能干等 —— 网页那边早就返回了，看不出是本机在忙。
+/// 标记随 Drop 删除，任何提前 return 都不会留下垃圾。
+struct Preparing(std::path::PathBuf);
+
+impl Drop for Preparing {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn mark_preparing(
+    dir: &Path,
+    claims: Option<&TicketClaims>,
+    library_name: &str,
+) -> Option<Preparing> {
+    let file_name = claims
+        .and_then(|c| c.path.rsplit('/').next())
+        .unwrap_or_default()
+        .to_string();
+    if file_name.is_empty() {
+        return None;
+    }
+    storage::private_dir(dir).ok()?;
+    let path = dir.join("preparing.json");
+    let value = serde_json::json!({
+        "file_name": file_name,
+        "library_name": library_name,
+        "mode": claims.map(|c| c.mode.clone()).unwrap_or_default(),
+        "started_at": crate::now(),
+    });
+    storage::write(&path, &value).ok()?;
+    Some(Preparing(path))
+}
+
 pub fn open(root: &Path, uri: &str) -> Result<Task> {
     let (server, sid, ticket) = uri_parts(uri)?;
     if !session::config(root)?.allowed_origins.contains(&server) {
@@ -190,14 +225,18 @@ pub fn open(root: &Path, uri: &str) -> Result<Task> {
     // 库名只从票据里取来显示（hub 用 repo.name 签发）。读 claim 不做验签 ——
     // 它不参与任何授权判断，验签是文件服务端的事；这里只负责让任务列表能分出
     // 「同一个 /10220942/a.dta 到底在哪个库」。
-    let library_name = ticket_claims(&ticket)
-        .map(|claims| claims.repo_name)
+    let claims = ticket_claims(&ticket);
+    let library_name = claims
+        .as_ref()
+        .map(|claims| claims.repo_name.clone())
         .unwrap_or_default();
     let id = format!(
         "{:x}",
         Sha256::digest(format!("{server}\\0{sid}").as_bytes())
     );
     let dir = session::task_dir(root, &id)?;
+    // 先亮出「正在下载」：后面的 read 可能是几十秒，这期间列表不能是空的。
+    let _preparing = mark_preparing(&dir, claims.as_ref(), &library_name);
     if !dir.join("task.json").exists() {
         if let Some(task) = resume(root, &server, &ticket)? {
             return Ok(adopt_library_name(root, task, &library_name));

@@ -31,13 +31,18 @@ button.nav-item.active{background:var(--accent-soft);color:var(--accent);border-
 code{background:#eef1f5;border-radius:4px;padding:1px 5px;font-family:Consolas,"Courier New",monospace;font-size:12px;overflow-wrap:anywhere}
 
 /* 安装引导 */
-ol.steps{list-style:none;padding:0;margin:0 0 16px}
-li.step{display:flex;gap:12px;align-items:flex-start;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 14px;margin:8px 0}
-li.step .mark{width:22px;height:22px;flex:0 0 22px;border-radius:50%;border:1px solid var(--line);color:var(--muted);display:flex;align-items:center;justify-content:center;font-size:12px}
-li.step.done .mark{background:var(--accent-soft);border-color:#c7dcfd;color:var(--accent)}
-li.step strong{display:block;font-size:13px}
-li.step span{display:block;color:var(--text);overflow-wrap:anywhere}
-li.step small{display:block;margin-top:2px}
+/* 引导五步：一行一条。原来每步一张卡片要占三行，五步就把整屏吃掉了。 */
+ol.steps{list-style:none;padding:0;margin:0 0 10px;border-top:1px solid var(--line)}
+li.step{display:flex;align-items:center;gap:8px;background:none;border:0;border-bottom:1px solid var(--line);border-radius:0;padding:6px 2px;margin:0}
+li.step .mark{width:18px;height:18px;flex:0 0 18px;border-radius:50%;border:1px solid var(--line);color:var(--muted);display:flex;align-items:center;justify-content:center;font-size:11px}
+li.step.done .mark{background:#e9f6f0;border-color:#bfe3d0;color:var(--green)}
+li.step>div{display:flex;align-items:baseline;gap:8px;min-width:0;flex:1}
+li.step strong{display:inline;font-size:12px;font-weight:600;white-space:nowrap}
+li.step span:not(.mark){display:inline;flex:1;min-width:0;color:var(--muted);font-size:11px;text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+li.step small{display:none}
+/* 下载中的任务：给个呼吸点，和静止的任务区分开。 */
+article.task.preparing strong::after{content:'';display:inline-block;width:6px;height:6px;margin-left:6px;border-radius:50%;background:var(--accent);animation:cf-pulse 1.1s ease-in-out infinite}
+@keyframes cf-pulse{0%,100%{opacity:.25;transform:scale(.8)}50%{opacity:1;transform:scale(1)}}
 ol.howto{margin:6px 0 10px 18px;padding:0;color:var(--text)}
 ol.howto li{margin:2px 0}
 pre.log{background:#0f172a;color:#e2e8f0;border-radius:8px;padding:10px 12px;font:12px/1.5 Consolas,"Courier New",monospace;max-height:220px;overflow:auto;margin:12px 0 0}

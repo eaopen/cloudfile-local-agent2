@@ -22,6 +22,8 @@
     return '';
   }
   function status(task, working, now = Date.now()) {
+    // 大文件从点击到任务落盘要等几十秒，这一段必须有可见的进行中状态。
+    if (task.preparing) return '正在下载到本机…大文件需要一点时间，请稍候';
     // An uncertain publish takes priority over everything else. Never imply
     // that an expired ticket or a missing lease erased a pending write.
     if (task.pending_upload) {
@@ -68,7 +70,7 @@
   //
   // 异常状态（待确认 / 需检查 / 授权问题 / 上传中）**优先整行显示原文**：
   // 那才是用户要做的事，前面再挂一个模式名只会把一句有用的提示挤成两行。
-  const PROBLEM = /未确认|需要检查|正在上传|正在提交|尚未就绪|已过期|即将过期/;
+  const PROBLEM = /未确认|需要检查|正在上传|正在提交|正在下载|尚未就绪|已过期|即将过期/;
 
   function summary(task, working, now = Date.now()) {
     const state = status(task, working, now);
