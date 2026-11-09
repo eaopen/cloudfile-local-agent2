@@ -24,6 +24,8 @@ struct State {
     uploading: Arc<Mutex<HashSet<String>>>,
     quitting: Arc<AtomicBool>,
     toast: Arc<Mutex<u64>>,
+    /// 已经弹过"正在下载"的文件，key = 任务目录 + 开始时间。
+    announced_downloads: Arc<Mutex<HashSet<String>>>,
     /// Live handle to the tray's status row. The tray is the only place the
     /// guard verdict is visible without opening a window, so the row is kept
     /// addressable instead of being rebuilt on every refresh.
@@ -305,22 +307,6 @@ fn summaries(root: &Path, uploading: &Mutex<HashSet<String>>) -> anyhow::Result<
     let mut tasks = Vec::new();
     // Optional application brand is a read-only label, never a task owner or authorization.
     let application_profiles = profile::labels(root);
-    // 「正在下载」不占用任务列表：那不是一条任务，进度也不在列表里体现。
-    // 单独发一份 `preparing`，界面用它弹一次轻提示就够。
-    let mut preparing = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(root.join("tasks")) {
-        for entry in entries.flatten() {
-            let path = entry.path().join("preparing.json");
-            let Ok(marker) = cloudfile_core::storage::read::<Value>(&path) else {
-                continue;
-            };
-            preparing.push(json!({
-                "task_id": entry.file_name().to_string_lossy(),
-                "file_name": marker["file_name"].as_str().unwrap_or(""),
-                "started_at": marker["started_at"].as_i64().unwrap_or(0),
-            }));
-        }
-    }
     let busy = uploading
         .lock()
         .map_err(|_| anyhow::anyhow!("上传状态不可用"))?
@@ -398,7 +384,7 @@ fn summaries(root: &Path, uploading: &Mutex<HashSet<String>>) -> anyhow::Result<
     }
     let count = |group: &str| tasks.iter().filter(|task| task["group"] == group).count();
     Ok(
-        json!({"ok":true,"cdc_enabled":cloudfile_core::cdc::enabled(),"tasks":tasks,"preparing":preparing,
+        json!({"ok":true,"cdc_enabled":cloudfile_core::cdc::enabled(),"tasks":tasks,
         // 修改原因（2026-10-23）：分组 key 必须和界面用的一致（kebab-case）。原来这里发的是
         // in_progress / needs_attention，而 app.js 按 counts['in-progress'] 取，取到 undefined
         // → 顶部「进行中」永远是 0，即使列表里就有进行中的任务。
@@ -816,6 +802,53 @@ fn open_task_center(app: tauri::AppHandle) {
     show(&app);
 }
 
+/// 正在下载的文件（在 `tasks/<id>/preparing.json` 里）。
+///
+/// 返回值第一个元素是幂等键：同一份文件重复标记只提示一次。
+fn preparing_files(root: &Path) -> Vec<(String, String)> {
+    let mut result = Vec::new();
+    let Ok(entries) = std::fs::read_dir(root.join("tasks")) else {
+        return result;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path().join("preparing.json");
+        let Ok(marker) = cloudfile_core::storage::read::<Value>(&path) else {
+            continue;
+        };
+        let name = marker["file_name"].as_str().unwrap_or("").to_string();
+        if name.is_empty() {
+            continue;
+        }
+        let key = format!(
+            "{}:{}",
+            entry.file_name().to_string_lossy(),
+            marker["started_at"].as_i64().unwrap_or(0)
+        );
+        result.push((key, name));
+    }
+    result
+}
+
+/// 任务目录的"指纹"：哪些目录已经有 task.json、哪些还在下载中。
+/// 用来判断"列表该刷新了"，比等 10 秒定时器快得多。
+fn task_signature(root: &Path) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let Ok(entries) = std::fs::read_dir(root.join("tasks")) else {
+        return String::new();
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if path.join("task.json").exists() {
+            parts.push(format!("{name}:task"));
+        } else if path.join("preparing.json").exists() {
+            parts.push(format!("{name}:preparing"));
+        }
+    }
+    parts.sort();
+    parts.join(",")
+}
+
 /// Non-focusing notice. The window is only ever shown, never focused, and is
 /// hidden again after a fixed interval unless a newer notice replaced it.
 fn present_toast(app: &tauri::AppHandle, level: &str, text: &str) {
@@ -831,6 +864,8 @@ fn present_toast(app: &tauri::AppHandle, level: &str, text: &str) {
         return;
     };
     let _ = window.set_ignore_cursor_events(true);
+    // 明确抬到最前：只靠 show() 在部分机器上会被主窗口压住。
+    let _ = window.set_always_on_top(true);
     if let Some(monitor) = window
         .current_monitor()
         .ok()
@@ -839,7 +874,7 @@ fn present_toast(app: &tauri::AppHandle, level: &str, text: &str) {
     {
         let size = monitor.size();
         let position = monitor.position();
-        let width = 360i32;
+        let width = 420i32;
         let x = position.x + size.width as i32 - width - 16;
         let y = position.y + 16;
         let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
@@ -847,8 +882,10 @@ fn present_toast(app: &tauri::AppHandle, level: &str, text: &str) {
     let _ = window.emit("toast", json!({"level": level, "text": text}));
     let _ = window.show();
     let handle = app.clone();
+    // 「正在下载」要留够时间看清；其余照旧。
+    let stay = if level == "working" { 5_000 } else { 3_500 };
     std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(3_500));
+        std::thread::sleep(std::time::Duration::from_millis(stay));
         let state = handle.state::<State>();
         let Ok(current) = state.toast.lock().map(|value| *value) else {
             return;
@@ -1832,6 +1869,7 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
         uploading: uploading.clone(),
         quitting: quitting.clone(),
         toast: Arc::new(Mutex::new(0)),
+        announced_downloads: Arc::new(Mutex::new(HashSet::new())),
         guard_row: Arc::new(Mutex::new(None)),
         float_moves: Arc::new(Mutex::new(0)),
         windowed: Arc::new(AtomicBool::new(false)),
@@ -2129,6 +2167,41 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
             // 应用信息（品牌名）自动刷新：跟启动自检一样是「后台顺手做」，
             // 失败只落日志，不影响任务与文件操作。
             spawn_profile_refresh(handle.clone(), root.clone());
+            // 「正在下载」要尽早看见：界面转的是 10 秒一次的全量刷新，等它太慢。
+            // 这里 400ms 看一眼任务目录里的标记，出现就立刻弹提示。
+            let download_handle = handle.clone();
+            let mut last_signature = String::new();
+            let mut first = true;
+            std::thread::spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                let state = download_handle.state::<State>();
+                // 任务落盘/消失都通知界面刷新：否则文件都打开了，列表里还要等好几秒。
+                let signature = task_signature(&state.root);
+                if signature != last_signature || first {
+                    last_signature = signature;
+                    first = false;
+                    let _ = download_handle.emit("tasks-changed", ());
+                }
+                let files = preparing_files(&state.root);
+                let live: HashSet<String> = files.iter().map(|(key, _)| key.clone()).collect();
+                let mut announce: Vec<String> = Vec::new();
+                if let Ok(mut seen) = state.announced_downloads.lock() {
+                    // 已经消失的标记要清掉，否则集合只增不减。
+                    seen.retain(|key| live.contains(key));
+                    for (key, name) in &files {
+                        if seen.insert(key.clone()) {
+                            announce.push(name.clone());
+                        }
+                    }
+                }
+                for name in announce {
+                    present_toast(
+                        &download_handle,
+                        "working",
+                        &format!("正在下载「{name}」到本机…大文件需要一点时间，请稍候。"),
+                    );
+                }
+            });
             // 首次安装时把扩展自动解压到位：不该让用户先点「一键完成」才拿到扩展包。
             // 已经有扩展（升级/日常启动）就什么都不做，避免每次启动都去问通道。
             let extension_root = root.clone();

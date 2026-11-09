@@ -67,14 +67,18 @@ body.float-body{background:transparent;display:block;overflow:hidden}
 #badge{position:absolute;top:2px;right:2px;min-width:16px;height:16px;border-radius:8px;background:var(--danger);color:#fff;font-size:10px;line-height:16px;padding:0 4px}
 
 /* Light notice */
-body.toast-body{background:transparent;display:block;overflow:hidden;padding:6px}
-.toast{display:flex;flex-direction:column;gap:2px;background:#fff;border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:8px;padding:10px 12px;box-shadow:0 4px 16px rgba(0,0,0,.16);opacity:0;transition:opacity .18s ease}
-.toast.show{opacity:1}
-.toast.warning{border-left-color:var(--warn)}
-/* 正在下载：蓝色（默认 accent）已经用于"已保存"，用虚线左边框区分"进行中"。 */
-.toast.working{border-left-style:dashed}
-.toast strong{font-size:12px}
-.toast span{font-size:12.5px;color:var(--text)}
+body.toast-body{background:transparent;display:block;overflow:hidden;padding:8px}
+.toast{display:flex;flex-direction:column;gap:4px;background:#fff;border:2px solid var(--accent);
+  border-left-width:6px;border-radius:10px;padding:12px 14px;
+  box-shadow:0 10px 30px rgba(15,23,42,.28);
+  opacity:0;transform:translateY(-8px);transition:opacity .16s ease,transform .16s ease}
+.toast.show{opacity:1;transform:translateY(0)}
+.toast.warning{border-color:var(--warn)}
+/* 正在下载：整块淡蓝底 + 深蓝边框，和"已保存"的一眼能分开。 */
+.toast.working{border-color:#2563eb;background:#eff6ff}
+.toast strong{font-size:13px;letter-spacing:.2px}
+.toast.working strong{color:#1d4ed8}
+.toast span{font-size:13px;line-height:1.45;color:var(--text)}
 .toast.warning span{color:var(--warn)}
 
 /* The same approved mark identifies the task centre, floating entry and tray. */

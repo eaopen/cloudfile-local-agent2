@@ -566,7 +566,10 @@ function renderTask(task) {
             dialog('无法删除这个任务', `${failure}\n\n任务和本地文件都保持原样，请关闭文件后再试。`, [['知道了']]);
             return;
           }
+          // 先让这一行立刻消失，再让列表去对账 —— 等刷新会有一段"说删了却没删"的错觉。
+          row.remove();
           say('任务已删除，本地文件也已清理。');
+          refresh();
         },
         { secondary: true },
       ),
@@ -624,37 +627,29 @@ function renderSummary(result) {
   }
 }
 
-// 「正在下载」不进任务列表：那会让列表里多出一条点不动的任务，也分不清是排队还是失败。
-// 每个文件只在开始时弹一次轻提示（3.5 秒自动消失），进度本身不需要盯。
-const announcedPreparing = new Set();
-function announcePreparing(list) {
-  if (!Array.isArray(list)) return;
-  for (const item of list) {
-    if (!item || !item.task_id) continue;
-    const key = `${item.task_id}:${item.started_at || 0}`;
-    if (announcedPreparing.has(key)) continue;
-    announcedPreparing.add(key);
-    const name = item.file_name || '文件';
-    invoke('toast_show', {
-      level: 'working',
-      text: `正在下载「${name}」到本机…大文件需要一点时间，请稍候。`,
-    }).catch(() => {});
-  }
-}
-
+// 刷新是串行的：同一时刻只跑一个。
+// 修改逻辑（2026-11-09）：以前并发时直接丢弃后到的请求 —— 删除任务后那次刷新被丢掉，
+// 于是"已删除"的提示先出来，卡片要等好几秒（甚至 10 秒定时器）才消失。
+// 现在改成"排队重跑"：进行中再来请求，就在这一轮结束后立刻补一次。
+let refreshQueued = false;
 async function refresh() {
-  if (refreshing) return;
+  if (refreshing) {
+    refreshQueued = true;
+    return;
+  }
   refreshing = true;
   try {
-    const result = await invoke('task_summary');
-    // 服务连接页已删除，但欢迎卡仍需要「设备是否已配对」这一个状态；
-    // 服务地址本身是内置的，这里只读状态，不提供任何配置入口。
-    services = await invoke('service_status').catch(() => services);
-    renderSummary(result);
-    announcePreparing(result.preparing);
-    // The entry mirrors the same list, so a task can never be visible in one
-    // view and hidden in the other.
-    invoke('float_sync').catch(() => {});
+    do {
+      refreshQueued = false;
+      const result = await invoke('task_summary');
+      // 服务连接页已删除，但欢迎卡仍需要「设备是否已配对」这一个状态；
+      // 服务地址本身是内置的，这里只读状态，不提供任何配置入口。
+      services = await invoke('service_status').catch(() => services);
+      renderSummary(result);
+      // The entry mirrors the same list, so a task can never be visible in one
+      // view and hidden in the other.
+      invoke('float_sync').catch(() => {});
+    } while (refreshQueued);
   } catch (error) {
     say(String(error));
   } finally {

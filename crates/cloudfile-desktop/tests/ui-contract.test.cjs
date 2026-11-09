@@ -53,7 +53,7 @@ function fakeApp(serviceList, options = {}) {
           calls.push({ name, args });
           if (name === 'service_status') return serviceList;
           if (name === 'task_summary') return {
-            ok: true, tasks: options.tasks || [], preparing: options.preparing || [],
+            ok: true, tasks: options.tasks || [],
             counts: { 'in-progress': 0, 'needs-attention': 0, done: 0 },
           };
           if (name === 'setup_state') return {
@@ -156,24 +156,6 @@ function profileFixture(useTest) {
 
 // 地址不允许手改：它由当前环境决定，手工填只会让界面与实际不同步。
 // 引导页五步必须一行一条。曾经和欢迎卡共用 .setup-steps 类，三列网格把第 3 步顶出界面。
-// 「正在下载」不进任务列表（那不是一条能操作的任务），只弹一次轻提示。
-test('a downloading file raises one toast instead of a task row', async () => {
-  const { ctx, elements, calls } = fakeApp([], {
-    preparing: [
-      { task_id: 'abc', file_name: '图纸.dwg', started_at: 111 },
-      { task_id: 'abc', file_name: '图纸.dwg', started_at: 111 },
-    ],
-  });
-  await vm.runInContext('refresh()', ctx);
-  const toasts = calls.filter((call) => call.name === 'toast_show');
-  assert.equal(toasts.length, 1, '同一个文件只提示一次');
-  assert.equal(toasts[0].args.level, 'working');
-  assert.match(toasts[0].args.text, /图纸\.dwg/);
-  // 空列表会画欢迎卡，所以按"有没有 task 卡片"判断，而不是看子节点数量。
-  const cards = elements.get('tasks').children.filter((node) => node.className === 'task');
-  assert.equal(cards.length, 0, '任务列表里不该多出一行');
-});
-
 test('the setup step list is one row per step', () => {
   assert.doesNotMatch(css, /\.setup-steps\{display:grid/);
   assert.match(css, /ol\.setup-steps\{/);
