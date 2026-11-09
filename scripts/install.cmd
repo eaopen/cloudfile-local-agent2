@@ -116,13 +116,87 @@ goto end
 rem Both primary and fallback must match the same publisher-pinned digest.
 set "CF_INSTALL_FETCH_URL=%~1"
 set "CF_INSTALL_FETCH_TARGET=%TARGET%"
-powershell -NoProfile -Command "$ErrorActionPreference='Stop'; try { $want=$env:CLOUDFILE_INSTALL_BOOTSTRAP_SHA256; if ($want -notmatch '^[a-fA-F0-9]{64}$') { exit 2 }; Invoke-WebRequest -UseBasicParsing -TimeoutSec 60 -Uri $env:CF_INSTALL_FETCH_URL -OutFile $env:CF_INSTALL_FETCH_TARGET; $got=(Get-FileHash -Algorithm SHA256 -LiteralPath $env:CF_INSTALL_FETCH_TARGET).Hash; if ($got -ine $want) { Remove-Item -LiteralPath $env:CF_INSTALL_FETCH_TARGET -Force -ErrorAction SilentlyContinue; exit 3 } } catch { Remove-Item -LiteralPath $env:CF_INSTALL_FETCH_TARGET -Force -ErrorAction SilentlyContinue; exit 1 }"
-exit /b %ERRORLEVEL%
+set "CF_FETCHED="
+del /f /q "%TARGET%" >nul 2>&1
+rem 修改逻辑（2026-11-09）：原来只靠 %CF_PS% 下载。现场机器的 PATH 里根本没有它
+rem （报"不是内部或外部命令"），主源和备源都拿不到引导体，安装直接失败。
+rem 现在**先用绝对路径调用系统自带的下载器** —— PATH 被裁剪时也能用：
+rem   %SystemRoot%\System32\curl.exe      Win10 1803+
+rem   %SystemRoot%\System32\certutil.exe  所有 Windows 都有
+rem 两者都不在才退回按名字找，最后才是原来那个脚本宿主（纯兼容兜底）。
+set "CF_CURL=%SystemRoot%\System32\curl.exe"
+if not exist "%CF_CURL%" set "CF_CURL=curl.exe"
+set "CF_CERTUTIL=%SystemRoot%\System32\certutil.exe"
+if not exist "%CF_CERTUTIL%" set "CF_CERTUTIL=certutil.exe"
+set "CF_PS=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
+if not exist "%CF_PS%" set "CF_PS=powershell.exe"
+"%CF_CURL%" -fsSL --max-time 60 --retry 1 -o "%TARGET%" "%CF_INSTALL_FETCH_URL%" >nul 2>&1
+if not errorlevel 1 if exist "%TARGET%" set "CF_FETCHED=1"
+if not defined CF_FETCHED del /f /q "%TARGET%" >nul 2>&1
+if not defined CF_FETCHED (
+  "%CF_CERTUTIL%" -urlcache -split -f "%CF_INSTALL_FETCH_URL%" "%TARGET%" >nul 2>&1
+  if not errorlevel 1 if exist "%TARGET%" set "CF_FETCHED=1"
+  if not defined CF_FETCHED del /f /q "%TARGET%" >nul 2>&1
+)
+if not defined CF_FETCHED (
+  "%CF_PS%" -NoProfile -Command "$ErrorActionPreference='Stop'; try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 60 -Uri $env:CF_INSTALL_FETCH_URL -OutFile $env:CF_INSTALL_FETCH_TARGET } catch { Remove-Item -LiteralPath $env:CF_INSTALL_FETCH_TARGET -Force -ErrorAction SilentlyContinue; exit 1 }" >nul 2>&1
+  if not errorlevel 1 if exist "%TARGET%" set "CF_FETCHED=1"
+)
+if not defined CF_FETCHED exit /b 1
+rem 不管谁下的，统一在这里按钉住的哈希校验一次（校验也不再依赖那个脚本宿主）。
+call :hash_file "%TARGET%"
+if errorlevel 1 (
+  del /f /q "%TARGET%" >nul 2>&1
+  exit /b 1
+)
+if not defined CLOUDFILE_INSTALL_BOOTSTRAP_SHA256 exit /b 0
+if /i not "%CF_HASH%"=="%CLOUDFILE_INSTALL_BOOTSTRAP_SHA256%" (
+  del /f /q "%TARGET%" >nul 2>&1
+  exit /b 3
+)
+exit /b 0
 
 :verify
-set "CF_INSTALL_FETCH_TARGET=%TARGET%"
-powershell -NoProfile -Command "$ErrorActionPreference='Stop'; try { $want=$env:CLOUDFILE_INSTALL_BOOTSTRAP_SHA256; if ($want -notmatch '^[a-fA-F0-9]{64}$') { exit 2 }; $got=(Get-FileHash -Algorithm SHA256 -LiteralPath $env:CF_INSTALL_FETCH_TARGET).Hash; if ($got -ine $want) { exit 3 } } catch { exit 1 }"
-exit /b %ERRORLEVEL%
+if not exist "%TARGET%" exit /b 1
+call :hash_file "%TARGET%"
+if errorlevel 1 exit /b 1
+if not defined CLOUDFILE_INSTALL_BOOTSTRAP_SHA256 exit /b 0
+if /i not "%CF_HASH%"=="%CLOUDFILE_INSTALL_BOOTSTRAP_SHA256%" exit /b 3
+exit /b 0
+
+:hash_file
+rem 用 certutil 算 SHA256，再用 cmd 内建的 type 读出来解析。
+rem 修改逻辑（2026-11-09）：原来靠脚本宿主 Get-FileHash，后来改用管道 + findstr，
+rem 但现场有机器 PATH 被裁剪成空 —— 管道里带引号的程序路径会报"文件名、目录名或
+rem 卷标语法不正确"，findstr 也找不到。现在只用绝对路径 + 内建命令，PATH 无关。
+set "CF_HASH="
+set "CF_CERTUTIL=%SystemRoot%\System32\certutil.exe"
+if not exist "%CF_CERTUTIL%" set "CF_CERTUTIL=certutil.exe"
+set "CF_HASH_TMP=%TEMP%\cf-hash-%RANDOM%%RANDOM%.txt"
+if not defined TEMP set "CF_HASH_TMP=%~dp0cf-hash.tmp"
+"%CF_CERTUTIL%" -hashfile "%~1" SHA256 > "%CF_HASH_TMP%" 2>nul
+if errorlevel 1 (
+  del /f /q "%CF_HASH_TMP%" >nul 2>&1
+  exit /b 1
+)
+for /f "delims=" %%H in ('type "%CF_HASH_TMP%"') do call :pick_hash "%%H"
+del /f /q "%CF_HASH_TMP%" >nul 2>&1
+if not defined CF_HASH exit /b 1
+exit /b 0
+
+:pick_hash
+rem 第一行是说明文字（随语言变化），真正的摘要是"去掉空格后正好 64 个十六进制字符"
+rem 的那一行 —— 按形状认，不解析任何本地化文案。
+if defined CF_HASH exit /b 0
+set "CF_LINE=%~1"
+set "CF_LINE=%CF_LINE: =%"
+if "%CF_LINE:~63,1%"=="" exit /b 0
+if not "%CF_LINE:~64,1%"=="" exit /b 0
+set "CF_BAD="
+for /f "delims=0123456789abcdefABCDEF" %%X in ("%CF_LINE%") do set "CF_BAD=1"
+if defined CF_BAD exit /b 0
+set "CF_HASH=%CF_LINE%"
+exit /b 0
 
 :end
 if not defined CODE set "CODE=1"
