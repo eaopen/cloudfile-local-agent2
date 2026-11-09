@@ -2139,11 +2139,16 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
             // 已经有扩展（升级/日常启动）就什么都不做，避免每次启动都去问通道。
             let extension_root = root.clone();
             std::thread::spawn(move || {
-                if cloudfile_core::extension::installed_version(&extension_dir(&extension_root))
-                    .is_none()
-                {
-                    let _ = cloudfile_core::native::update_extension(&extension_root);
+                let dir = extension_dir(&extension_root);
+                if cloudfile_core::extension::installed_version(&dir).is_some() {
+                    return;
                 }
+                // 失败不能静默：引导页第 5 步会一直是"未完成"，没有日志就查不出原因。
+                let line = match cloudfile_core::native::update_extension(&extension_root) {
+                    Ok(detail) => format!("ok {detail}"),
+                    Err(error) => format!("failed {error:#}"),
+                };
+                log_profile_refresh(&extension_root, &format!("extension {line}"));
             });
             std::thread::spawn(move || loop {
                 let state = guard_handle.state::<State>();

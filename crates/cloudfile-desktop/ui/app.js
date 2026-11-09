@@ -123,7 +123,7 @@ function renderWelcome() {
     card.append(note);
   } else {
     const steps = document.createElement('div');
-    steps.className = 'setup-steps';
+    steps.className = 'welcome-steps';
     for (const [index, title, description, complete] of [
       [1, '安装浏览器扩展', registered ? '本机连接组件已注册' : '在 Chrome 里加载扩展并连接本机 Agent', registered],
       [2, '从网页开始编辑', paired ? '设备已配对' : '登录网盘，首次编辑时自动完成配对', paired],

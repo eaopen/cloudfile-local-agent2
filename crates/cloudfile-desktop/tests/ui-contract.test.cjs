@@ -7,6 +7,7 @@ const vm = require('node:vm');
 const ui = path.join(__dirname, '../ui');
 const html = fs.readFileSync(path.join(ui, 'index.html'), 'utf8');
 const script = fs.readFileSync(path.join(ui, 'app.js'), 'utf8');
+const css = fs.readFileSync(path.join(ui, 'style.css'), 'utf8');
 
 class FakeElement {
   constructor(tag = 'div') {
@@ -150,6 +151,13 @@ function profileFixture(useTest) {
 }
 
 // 地址不允许手改：它由当前环境决定，手工填只会让界面与实际不同步。
+// 引导页五步必须一行一条。曾经和欢迎卡共用 .setup-steps 类，三列网格把第 3 步顶出界面。
+test('the setup step list is one row per step', () => {
+  assert.doesNotMatch(css, /\.setup-steps\{display:grid/);
+  assert.match(css, /ol\.setup-steps\{/);
+  assert.match(css, /\.welcome-steps\{display:grid/);
+});
+
 test('the application profile address is read-only in the markup', () => {
   assert.match(html, /id="app-profile-source"[^>]*readonly/);
   // 折叠标题就是「应用信息」，不再带「（测试 / 生产）」；也不再单独成块。

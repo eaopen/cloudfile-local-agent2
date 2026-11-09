@@ -513,9 +513,6 @@ pub fn update_extension(root: &Path) -> Result<String> {
     let config = session::config(root)?;
     // 先算策略：下面两个 `.context()` 会把 Option<String> 字段移走，之后再借 config 就晚了。
     let policy = config.update_policy();
-    let source = config
-        .update_source
-        .context("尚未配置更新源；请先在 config.json 里设置 update_source")?;
     let directory = config.extension_dir.clone().unwrap_or_else(|| {
         // 没配置就用 agent 根目录下的 `extension\`：引导页一键部署扩展时
         // 不能让用户先去 config.json 里手写一个目录。
@@ -524,8 +521,33 @@ pub fn update_extension(root: &Path) -> Result<String> {
             .into_owned()
     });
     let dir = Path::new(&directory);
-    let release = crate::extension::fetch_release(policy, &source)?;
+    // 修改逻辑（2026-11-09）：原来先要 update_source，没配就直接报错 —— 于是
+    // **扩展明明已经部署好了**，引导页第 5 步也显示"未完成"。现场就是这么看到的。
+    // 现在先看本地：已经有扩展就别把"没有更新源"当成失败，它只是跳过了升级检查。
     let installed = crate::extension::installed_version(dir);
+    let Some(source) = config.update_source.clone() else {
+        return match installed {
+            Some(current) => Ok(format!(
+                "扩展已就位：{current}（未配置更新源，跳过版本检查；目录 {}）",
+                dir.display()
+            )),
+            None => bail!("尚未配置更新源；无法自动下载扩展"),
+        };
+    };
+    // 连不上更新源时，只要本机已经有扩展，这一"步"其实已经是完成的 ——
+    // 把它报成失败会让引导页永远差一步，而用户要的扩展明明就在那儿。
+    let release = match crate::extension::fetch_release(policy, &source) {
+        Ok(release) => release,
+        Err(error) => match installed.as_deref() {
+            Some(current) => {
+                return Ok(format!(
+                    "扩展已就位：{current}（检查更新失败：{error:#}；目录 {}）",
+                    dir.display()
+                ))
+            }
+            None => return Err(error),
+        },
+    };
     if let Some(current) = installed.as_deref() {
         if !update::compare(&release.version, current).is_gt() {
             return Ok(format!(
@@ -555,6 +577,33 @@ pub fn exit_assessment(root: &Path) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 扩展已经在磁盘上时，「没有更新源 / 更新源连不上」不算第 5 步失败。
+    ///
+    /// 现场：引导页明明装好了扩展，却因为 config 里没有 update_source 一直显示未完成，
+    /// 用户只能一直差这一步。
+    #[test]
+    fn deployed_extension_is_complete_even_without_an_update_source() {
+        let (_temporary, root) = crate::storage::test_root();
+        let dir = root.join(crate::extension::DIR_NAME);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("manifest.json"),
+            br#"{"manifest_version":3,"name":"t","version":"9.9.9"}"#,
+        )
+        .unwrap();
+
+        let detail = update_extension(&root).unwrap();
+        assert!(detail.contains("已就位"), "{detail}");
+        assert!(detail.contains("9.9.9"), "{detail}");
+    }
+
+    /// 一份都没有、又没有更新源时，仍要如实报错（不能假装成功）。
+    #[test]
+    fn missing_extension_without_a_source_still_fails() {
+        let (_temporary, root) = crate::storage::test_root();
+        assert!(update_extension(&root).is_err());
+    }
 
     fn store(root: &Path, mode: &str, name: &str) -> session::Task {
         let repo_id = "22222222-2222-4222-8222-222222222222".to_string();
