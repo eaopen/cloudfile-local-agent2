@@ -36,6 +36,11 @@ if exist "D:\" set "WORKDIR=D:\CloudFileAgent"
 if not "%CLOUDFILE_AGENT2_HOME%"=="" set "WORKDIR=%CLOUDFILE_AGENT2_HOME%"
 if not exist "%WORKDIR%" mkdir "%WORKDIR%" >nul 2>&1
 
+rem 现场排查用：只验证"能不能下载到引导体并通过哈希校验"，不执行安装、不碰系统。
+rem 用法：install.cmd --fetch-only
+rem 想模拟"PATH 被裁剪"的机器：cmd /c "set PATH=&& install.cmd --fetch-only"
+if /i "%~1"=="--fetch-only" goto fetch_only
+
 set "TARGET=%~dp0%INSTALLER%"
 if exist "%TARGET%" (
   set "SOURCE_KIND=bundle"
@@ -111,6 +116,34 @@ if defined BASE_MIRROR (
 )
 set "CODE=%ERRORLEVEL%"
 goto end
+
+:fetch_only
+set "TARGET=%WORKDIR%\cloudfile-install.test.exe"
+if not defined CLOUDFILE_INSTALL_BOOTSTRAP_SHA256 (
+  echo [TEST] 没有内置的引导体哈希，无法校验；请用发布包里带签名的那份脚本。
+  set "CODE=1"
+  goto end
+)
+echo [TEST] 只测试下载与校验，不安装。目标：%TARGET%
+echo [TEST] 主源：%BASE_PRIMARY%
+call :fetch "%BASE_PRIMARY%/%INSTALLER%"
+set "CODE=%ERRORLEVEL%"
+if not "%CODE%"=="0" if defined BASE_MIRROR (
+  echo [TEST] 主源失败（退出码 %CODE%），改试备用源：%BASE_MIRROR%
+  call :fetch "%BASE_MIRROR%/%INSTALLER%"
+  set "CODE=%ERRORLEVEL%"
+)
+if "%CODE%"=="0" (
+  echo [OK] 下载并通过 sha256 校验：%TARGET%
+) else (
+  echo [FAIL] 下载或校验失败，退出码 %CODE%。
+  echo        已依次尝试 curl.exe / certutil.exe / 脚本宿主；三者都不可用或都失败。
+)
+del /f /q "%TARGET%" >nul 2>&1
+rem 测试模式到此为止：不能落到「安装完成」的横幅，那会把自检结果说成装好了。
+if not "%CLOUDFILE_NO_PAUSE%"=="" exit /b %CODE%
+pause
+exit /b %CODE%
 
 :fetch
 rem Both primary and fallback must match the same publisher-pinned digest.
