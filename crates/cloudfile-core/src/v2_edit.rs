@@ -134,6 +134,72 @@ fn read_response(res: reqwest::blocking::Response) -> Result<Value> {
     }
     Ok(serde_json::from_slice(&buf)?)
 }
+/// 只读的版本查询：不带正文、不落盘，用于判断本地副本是否已经是最新。
+fn request_meta(root: &Path, task: &Task, st: &State) -> Result<Value> {
+    let res = client()?
+        .get(endpoint(root, task, "meta")?)
+        .bearer_auth(&st.ticket)
+        .send()?;
+    read_response(res)
+}
+
+/// 本地副本能不能直接复用：同一文件、没改过、云端版本号也没变。
+///
+/// 为什么值得单独做一条路径：大文件读一次要几十秒（服务端拼块 + 传输 + 落盘），
+/// 而「再点一次本地查看」绝大多数时候文件根本没变，这次下载是纯浪费。
+/// `merge()` 里已经有"线上没变就丢弃刚下载的内容"的判断，但那时字节已经搬完了。
+fn reuse_local(
+    root: &Path,
+    server: &str,
+    sid: &str,
+    claims: Option<&TicketClaims>,
+    ticket: &str,
+) -> Result<Option<Task>> {
+    let Some(claims) = claims else {
+        return Ok(None);
+    };
+    if claims.repo_id.is_empty() || !session::safe_remote_path(&claims.path) {
+        return Ok(None);
+    }
+    let Some(mut task) = session::find_task(root, &claims.repo_id, &claims.path, &claims.mode)?
+    else {
+        return Ok(None);
+    };
+    if task.server != server || !is_v2(root, &task.task_id) {
+        return Ok(None);
+    }
+    let Ok(local) = session::local_path(root, &task) else {
+        return Ok(None);
+    };
+    // 本地被改过（有未上传修改）就不是"最新副本"，交给原来的下载/合并流程去问用户。
+    if session::digest(&local)? != task.baseline_digest {
+        return Ok(None);
+    }
+    let previous = load(root, &task.task_id).unwrap_or(State {
+        ticket: ticket.to_string(),
+        guard: None,
+    });
+    let state = State {
+        ticket: ticket.to_string(),
+        guard: previous.guard,
+    };
+    // 老服务端没有 meta 路由：静默退回下载流程，不能因为优化让打开失败。
+    let Ok(meta) = request_meta(root, &task, &state) else {
+        return Ok(None);
+    };
+    let current = meta["file_id"].as_str().unwrap_or("");
+    if !valid_id(current) || current != task.baseline_file_id {
+        return Ok(None);
+    }
+    task.session_id = sid.to_string();
+    storage::write(
+        &session::task_dir(root, &task.task_id)?.join("task.json"),
+        &task,
+    )?;
+    store(root, &task.task_id, &state)?;
+    Ok(Some(task))
+}
+
 fn request_json(root: &Path, task: &Task, st: &State, op: &str, body: &Value) -> Result<Value> {
     let res = client()?
         .post(endpoint(root, task, op)?)
@@ -235,6 +301,10 @@ pub fn open(root: &Path, uri: &str) -> Result<Task> {
         Sha256::digest(format!("{server}\\0{sid}").as_bytes())
     );
     let dir = session::task_dir(root, &id)?;
+    // 本地已经有同一文件、没改过、云端版本也没变 → 直接复用，一个字节都不下载。
+    if let Some(task) = reuse_local(root, &server, &sid, claims.as_ref(), &ticket)? {
+        return Ok(adopt_library_name(root, task, &library_name));
+    }
     // 先亮出「正在下载」：后面的 read 可能是几十秒，这期间列表不能是空的。
     let _preparing = mark_preparing(&dir, claims.as_ref(), &library_name);
     if !dir.join("task.json").exists() {
@@ -1024,6 +1094,118 @@ mod tests {
         assert!(commit(&root, &id, true).is_err());
         assert!(commit(&root, &id, false).is_err());
     }
+    /// 第二次「本地查看」不该再搬一遍字节：本地没改、云端版本没变时只查 meta。
+    ///
+    /// 现场：1 GiB 的图纸第二次点开还要等几十秒，用户以为缓存没生效。
+    #[test]
+    fn second_open_reuses_the_local_copy_instead_of_downloading_again() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let server = format!("http://{}", listener.local_addr().unwrap());
+        let reads = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = reads.clone();
+        let meta_counter = std::sync::Arc::new(AtomicUsize::new(0));
+        let payload = b"local copy bytes".to_vec();
+        let body = payload.clone();
+        let file_id = "b".repeat(40);
+        let repo_id = "11111111-1111-4111-8111-111111111111".to_string();
+        let worker_id = file_id.clone();
+        let worker = std::thread::spawn(move || {
+            // 第一次 open：一次 read。第二次 open：只允许 meta。
+            for _ in 0..4 {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut header = Vec::new();
+                let mut byte = [0u8; 1];
+                while !header.ends_with(b"\r\n\r\n") {
+                    if stream.read_exact(&mut byte).is_err() {
+                        return;
+                    }
+                    header.push(byte[0]);
+                }
+                let text = String::from_utf8_lossy(&header).to_string();
+                let line = text.lines().next().unwrap_or("").to_string();
+                if line.contains("/read") {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nX-CF-File-ID: {}\r\nX-CF-Repo-ID: {}\r\nX-CF-Path-B64: {}\r\nX-CF-Mode: local-view\r\n\r\n",
+                        body.len(),
+                        worker_id,
+                        "11111111-1111-4111-8111-111111111111",
+                        B64.encode("/a.bin"),
+                    );
+                    let _ = stream.write_all(head.as_bytes());
+                    let _ = stream.write_all(&body);
+                } else if line.contains("/meta") {
+                    // 第三次问的时候假装云端出了新版本，客户端必须老老实实重新下载。
+                    let metas = meta_counter.fetch_add(1, Ordering::SeqCst);
+                    let answer = if metas == 0 {
+                        worker_id.clone()
+                    } else {
+                        "c".repeat(40)
+                    };
+                    let json = format!("{{\"file_id\":\"{answer}\",\"size\":{}}}", body.len());
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                        json.len()
+                    );
+                    let _ = stream.write_all(head.as_bytes());
+                    let _ = stream.write_all(json.as_bytes());
+                } else {
+                    let _ =
+                        stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+                }
+            }
+        });
+
+        let (_temp, root) = storage::test_root();
+        crate::settings::update(&root, |settings| {
+            settings.workspace_root = Some(root.join("workspace").to_string_lossy().into_owned())
+        })
+        .unwrap();
+        session::trust(&root, format!("{server}/seafile")).unwrap();
+
+        let claims = format!(
+            "{{\"repo_id\":\"{repo_id}\",\"path\":\"/a.bin\",\"mode\":\"local-view\",\"exp\":{}}}",
+            crate::now() + 3600
+        );
+        let ticket = format!("h.{}.s", B64.encode(claims.as_bytes()));
+        let uri = |sid: &str| {
+            format!(
+                "cloudfile-open://v2/open?instance={}&session={sid}&ticket={ticket}",
+                url::form_urlencoded::byte_serialize(server.as_bytes()).collect::<String>()
+            )
+        };
+
+        let first = open(&root, &uri("22222222-2222-4222-8222-222222222222")).unwrap();
+        assert_eq!(reads.load(Ordering::SeqCst), 1, "第一次必须真的下载");
+        assert_eq!(
+            fs::read(session::local_path(&root, &first).unwrap()).unwrap(),
+            payload
+        );
+
+        let second = open(&root, &uri("33333333-3333-4333-8333-333333333333")).unwrap();
+        assert_eq!(second.task_id, first.task_id, "同一文件只能有一条任务");
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            1,
+            "第二次不该再下载：本地副本未改、云端版本未变"
+        );
+
+        // 云端换了版本：必须重新下载，不能拿旧副本糊弄。
+        open(&root, &uri("44444444-4444-4444-8444-444444444444")).unwrap();
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            2,
+            "云端版本变了就要重新拉一次"
+        );
+        drop(worker);
+    }
+
     #[test]
     fn ticket_claims_route_reopen_without_trusting_signature() {
         let payload = B64.encode(
