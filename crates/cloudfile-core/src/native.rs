@@ -5,7 +5,7 @@
 //! browser-side code already checks. Everything here is derived from the
 //! durable store on each call; nothing is cached between requests.
 use crate::{apps, device, guard, journal, session, settings, update};
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use serde_json::{json, Value};
 use sha2::Digest as _;
 use std::path::Path;

@@ -138,15 +138,6 @@ fn read_response(res: reqwest::blocking::Response) -> Result<Value> {
     }
     Ok(serde_json::from_slice(&buf)?)
 }
-/// 只读的版本查询：不带正文、不落盘，用于判断本地副本是否已经是最新。
-fn request_meta(root: &Path, task: &Task, st: &State) -> Result<Value> {
-    let res = client()?
-        .get(endpoint(root, task, "meta")?)
-        .bearer_auth(&st.ticket)
-        .send()?;
-    read_response(res)
-}
-
 /// 打开流程的现场记录。
 ///
 /// 大文件"每次都重新下载"是反复出现的反馈，而界面上看不出任何区别 —— 只能靠这里的
@@ -213,21 +204,16 @@ fn reuse_local(
         ticket: ticket.to_string(),
         guard: previous.guard,
     };
-    // 云端版本优先看票据：hub 签发的 `file_id` 就是用户点开那一刻的版本，服务端
-    // `read` 也要求它等于当前版本（否则 409）。用它判断是**零请求**的 —— 不需要
-    // 服务端支持任何新路由，老服务端也能立刻生效。
-    let current = if !claims.file_id.is_empty() {
-        if !valid_id(&claims.file_id) {
-            return Ok(None);
-        }
-        claims.file_id.clone()
-    } else {
-        // 老 hub 不带 file_id：退回 meta 查询（服务端没有该路由就再退回下载）。
-        let Ok(meta) = request_meta(root, &task, &state) else {
-            return Ok(None);
-        };
-        meta["file_id"].as_str().unwrap_or("").to_string()
-    };
+    // 云端版本只看票据：hub 签发的 `file_id` 就是用户点开那一刻的版本，服务端
+    // `read` 也要求它等于当前版本（否则 409）。所以判断是**零请求**的，
+    // 不需要服务端为"判断要不要下载"额外提供接口。
+    // 票据没带版本号就没法判断云端是否变了 —— 这种情况直接走下载，
+    // 不为了省一次下载去要求服务端多一个接口。
+    if claims.file_id.is_empty() {
+        note(root, "reuse skip: 票据未携带文件版本");
+        return Ok(None);
+    }
+    let current = claims.file_id.clone();
     if !valid_id(&current) || current != task.baseline_file_id {
         note(
             root,
@@ -1156,15 +1142,13 @@ mod tests {
         let server = format!("http://{}", listener.local_addr().unwrap());
         let reads = std::sync::Arc::new(AtomicUsize::new(0));
         let counter = reads.clone();
-        let meta_counter = std::sync::Arc::new(AtomicUsize::new(0));
-        let meta_seen = meta_counter.clone();
         let payload = b"local copy bytes".to_vec();
         let body = payload.clone();
         let file_id = "b".repeat(40);
         let repo_id = "11111111-1111-4111-8111-111111111111".to_string();
         let worker_id = file_id.clone();
         let worker = std::thread::spawn(move || {
-            // 第一次 open：一次 read。第二次 open：只允许 meta。
+            // 只处理 read：判断要不要下载完全靠票据里的版本号，不需要额外接口。
             for _ in 0..4 {
                 let Ok((mut stream, _)) = listener.accept() else {
                     return;
@@ -1190,21 +1174,6 @@ mod tests {
                     );
                     let _ = stream.write_all(head.as_bytes());
                     let _ = stream.write_all(&body);
-                } else if line.contains("/meta") {
-                    // 第三次问的时候假装云端出了新版本，客户端必须老老实实重新下载。
-                    let metas = meta_counter.fetch_add(1, Ordering::SeqCst);
-                    let answer = if metas == 0 {
-                        worker_id.clone()
-                    } else {
-                        "c".repeat(40)
-                    };
-                    let json = format!("{{\"file_id\":\"{answer}\",\"size\":{}}}", body.len());
-                    let head = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
-                        json.len()
-                    );
-                    let _ = stream.write_all(head.as_bytes());
-                    let _ = stream.write_all(json.as_bytes());
                 } else {
                     let _ =
                         stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
@@ -1248,16 +1217,16 @@ mod tests {
             payload
         );
 
+        // 票据没有版本号就无从判断云端是否变化：只能照老样子再下载一次。
         let second = open(&root, &uri("33333333-3333-4333-8333-333333333333")).unwrap();
         assert_eq!(second.task_id, first.task_id, "同一文件只能有一条任务");
         assert_eq!(
             reads.load(Ordering::SeqCst),
-            1,
-            "第二次不该再下载：本地副本未改、云端版本未变"
+            2,
+            "没有版本号时按老流程重新下载"
         );
 
         // 新版 hub：票据自带 file_id，与本地记录的版本一致 —— 一个请求都不该发。
-        let metas_before = meta_seen.load(Ordering::SeqCst);
         open(
             &root,
             &uri_with_id("44444444-4444-4444-8444-444444444444", &file_id),
@@ -1265,13 +1234,8 @@ mod tests {
         .unwrap();
         assert_eq!(
             reads.load(Ordering::SeqCst),
-            1,
+            2,
             "票据版本与本地一致时不该再下载"
-        );
-        assert_eq!(
-            meta_seen.load(Ordering::SeqCst),
-            metas_before,
-            "票据已经给出云端版本，不该再问 meta"
         );
 
         // 云端换了版本：必须重新下载，不能拿旧副本糊弄。
@@ -1282,7 +1246,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             reads.load(Ordering::SeqCst),
-            2,
+            3,
             "云端版本变了就要重新拉一次"
         );
         drop(worker);
