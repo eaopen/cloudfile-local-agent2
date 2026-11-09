@@ -36,6 +36,11 @@ if exist "D:\" set "WORKDIR=D:\CloudFileAgent"
 if not "%CLOUDFILE_AGENT2_HOME%"=="" set "WORKDIR=%CLOUDFILE_AGENT2_HOME%"
 if not exist "%WORKDIR%" mkdir "%WORKDIR%" >nul 2>&1
 
+rem 现场排查用：只验证"能不能下载到引导体并通过哈希校验"，不执行安装、不碰系统。
+rem 用法：install.cmd --fetch-only
+rem 想模拟"PATH 被裁剪"的机器：cmd /c "set PATH=&& install.cmd --fetch-only"
+if /i "%~1"=="--fetch-only" goto fetch_only
+
 set "TARGET=%~dp0%INSTALLER%"
 if exist "%TARGET%" (
   set "SOURCE_KIND=bundle"
@@ -112,17 +117,119 @@ if defined BASE_MIRROR (
 set "CODE=%ERRORLEVEL%"
 goto end
 
+:fetch_only
+set "TARGET=%WORKDIR%\cloudfile-install.test.exe"
+if not defined CLOUDFILE_INSTALL_BOOTSTRAP_SHA256 (
+  echo [TEST] 没有内置的引导体哈希，无法校验；请用发布包里带签名的那份脚本。
+  set "CODE=1"
+  goto end
+)
+echo [TEST] 只测试下载与校验，不安装。目标：%TARGET%
+echo [TEST] 主源：%BASE_PRIMARY%
+call :fetch "%BASE_PRIMARY%/%INSTALLER%"
+set "CODE=%ERRORLEVEL%"
+if not "%CODE%"=="0" if defined BASE_MIRROR (
+  echo [TEST] 主源失败（退出码 %CODE%），改试备用源：%BASE_MIRROR%
+  call :fetch "%BASE_MIRROR%/%INSTALLER%"
+  set "CODE=%ERRORLEVEL%"
+)
+if "%CODE%"=="0" (
+  echo [OK] 下载并通过 sha256 校验：%TARGET%
+) else (
+  echo [FAIL] 下载或校验失败，退出码 %CODE%。
+  echo        已依次尝试 curl.exe / certutil.exe / 脚本宿主；三者都不可用或都失败。
+)
+del /f /q "%TARGET%" >nul 2>&1
+rem 测试模式到此为止：不能落到「安装完成」的横幅，那会把自检结果说成装好了。
+if not "%CLOUDFILE_NO_PAUSE%"=="" exit /b %CODE%
+pause
+exit /b %CODE%
+
 :fetch
 rem Both primary and fallback must match the same publisher-pinned digest.
 set "CF_INSTALL_FETCH_URL=%~1"
 set "CF_INSTALL_FETCH_TARGET=%TARGET%"
-powershell -NoProfile -Command "$ErrorActionPreference='Stop'; try { $want=$env:CLOUDFILE_INSTALL_BOOTSTRAP_SHA256; if ($want -notmatch '^[a-fA-F0-9]{64}$') { exit 2 }; Invoke-WebRequest -UseBasicParsing -TimeoutSec 60 -Uri $env:CF_INSTALL_FETCH_URL -OutFile $env:CF_INSTALL_FETCH_TARGET; $got=(Get-FileHash -Algorithm SHA256 -LiteralPath $env:CF_INSTALL_FETCH_TARGET).Hash; if ($got -ine $want) { Remove-Item -LiteralPath $env:CF_INSTALL_FETCH_TARGET -Force -ErrorAction SilentlyContinue; exit 3 } } catch { Remove-Item -LiteralPath $env:CF_INSTALL_FETCH_TARGET -Force -ErrorAction SilentlyContinue; exit 1 }"
-exit /b %ERRORLEVEL%
+set "CF_FETCHED="
+del /f /q "%TARGET%" >nul 2>&1
+rem 修改逻辑（2026-11-09）：原来只靠 %CF_PS% 下载。现场机器的 PATH 里根本没有它
+rem （报"不是内部或外部命令"），主源和备源都拿不到引导体，安装直接失败。
+rem 现在**先用绝对路径调用系统自带的下载器** —— PATH 被裁剪时也能用：
+rem   %SystemRoot%\System32\curl.exe      Win10 1803+
+rem   %SystemRoot%\System32\certutil.exe  所有 Windows 都有
+rem 两者都不在才退回按名字找，最后才是原来那个脚本宿主（纯兼容兜底）。
+set "CF_CURL=%SystemRoot%\System32\curl.exe"
+if not exist "%CF_CURL%" set "CF_CURL=curl.exe"
+set "CF_CERTUTIL=%SystemRoot%\System32\certutil.exe"
+if not exist "%CF_CERTUTIL%" set "CF_CERTUTIL=certutil.exe"
+set "CF_PS=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
+if not exist "%CF_PS%" set "CF_PS=powershell.exe"
+"%CF_CURL%" -fsSL --max-time 60 --retry 1 -o "%TARGET%" "%CF_INSTALL_FETCH_URL%" >nul 2>&1
+if not errorlevel 1 if exist "%TARGET%" set "CF_FETCHED=1"
+if not defined CF_FETCHED del /f /q "%TARGET%" >nul 2>&1
+if not defined CF_FETCHED (
+  "%CF_CERTUTIL%" -urlcache -split -f "%CF_INSTALL_FETCH_URL%" "%TARGET%" >nul 2>&1
+  if not errorlevel 1 if exist "%TARGET%" set "CF_FETCHED=1"
+  if not defined CF_FETCHED del /f /q "%TARGET%" >nul 2>&1
+)
+if not defined CF_FETCHED (
+  "%CF_PS%" -NoProfile -Command "$ErrorActionPreference='Stop'; try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 60 -Uri $env:CF_INSTALL_FETCH_URL -OutFile $env:CF_INSTALL_FETCH_TARGET } catch { Remove-Item -LiteralPath $env:CF_INSTALL_FETCH_TARGET -Force -ErrorAction SilentlyContinue; exit 1 }" >nul 2>&1
+  if not errorlevel 1 if exist "%TARGET%" set "CF_FETCHED=1"
+)
+if not defined CF_FETCHED exit /b 1
+rem 不管谁下的，统一在这里按钉住的哈希校验一次（校验也不再依赖那个脚本宿主）。
+call :hash_file "%TARGET%"
+if errorlevel 1 (
+  del /f /q "%TARGET%" >nul 2>&1
+  exit /b 1
+)
+if not defined CLOUDFILE_INSTALL_BOOTSTRAP_SHA256 exit /b 0
+if /i not "%CF_HASH%"=="%CLOUDFILE_INSTALL_BOOTSTRAP_SHA256%" (
+  del /f /q "%TARGET%" >nul 2>&1
+  exit /b 3
+)
+exit /b 0
 
 :verify
-set "CF_INSTALL_FETCH_TARGET=%TARGET%"
-powershell -NoProfile -Command "$ErrorActionPreference='Stop'; try { $want=$env:CLOUDFILE_INSTALL_BOOTSTRAP_SHA256; if ($want -notmatch '^[a-fA-F0-9]{64}$') { exit 2 }; $got=(Get-FileHash -Algorithm SHA256 -LiteralPath $env:CF_INSTALL_FETCH_TARGET).Hash; if ($got -ine $want) { exit 3 } } catch { exit 1 }"
-exit /b %ERRORLEVEL%
+if not exist "%TARGET%" exit /b 1
+call :hash_file "%TARGET%"
+if errorlevel 1 exit /b 1
+if not defined CLOUDFILE_INSTALL_BOOTSTRAP_SHA256 exit /b 0
+if /i not "%CF_HASH%"=="%CLOUDFILE_INSTALL_BOOTSTRAP_SHA256%" exit /b 3
+exit /b 0
+
+:hash_file
+rem 用 certutil 算 SHA256，再用 cmd 内建的 type 读出来解析。
+rem 修改逻辑（2026-11-09）：原来靠脚本宿主 Get-FileHash，后来改用管道 + findstr，
+rem 但现场有机器 PATH 被裁剪成空 —— 管道里带引号的程序路径会报"文件名、目录名或
+rem 卷标语法不正确"，findstr 也找不到。现在只用绝对路径 + 内建命令，PATH 无关。
+set "CF_HASH="
+set "CF_CERTUTIL=%SystemRoot%\System32\certutil.exe"
+if not exist "%CF_CERTUTIL%" set "CF_CERTUTIL=certutil.exe"
+set "CF_HASH_TMP=%TEMP%\cf-hash-%RANDOM%%RANDOM%.txt"
+if not defined TEMP set "CF_HASH_TMP=%~dp0cf-hash.tmp"
+"%CF_CERTUTIL%" -hashfile "%~1" SHA256 > "%CF_HASH_TMP%" 2>nul
+if errorlevel 1 (
+  del /f /q "%CF_HASH_TMP%" >nul 2>&1
+  exit /b 1
+)
+for /f "delims=" %%H in ('type "%CF_HASH_TMP%"') do call :pick_hash "%%H"
+del /f /q "%CF_HASH_TMP%" >nul 2>&1
+if not defined CF_HASH exit /b 1
+exit /b 0
+
+:pick_hash
+rem 第一行是说明文字（随语言变化），真正的摘要是"去掉空格后正好 64 个十六进制字符"
+rem 的那一行 —— 按形状认，不解析任何本地化文案。
+if defined CF_HASH exit /b 0
+set "CF_LINE=%~1"
+set "CF_LINE=%CF_LINE: =%"
+if "%CF_LINE:~63,1%"=="" exit /b 0
+if not "%CF_LINE:~64,1%"=="" exit /b 0
+set "CF_BAD="
+for /f "delims=0123456789abcdefABCDEF" %%X in ("%CF_LINE%") do set "CF_BAD=1"
+if defined CF_BAD exit /b 0
+set "CF_HASH=%CF_LINE%"
+exit /b 0
 
 :end
 if not defined CODE set "CODE=1"
