@@ -2190,9 +2190,16 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
             let download_handle = handle.clone();
             let mut last_signature = String::new();
             let mut first = true;
-            std::thread::spawn(move || loop {
+            std::thread::spawn(move || {
+                let mut ticks = 0u32;
+                loop {
                 std::thread::sleep(std::time::Duration::from_millis(400));
                 let state = download_handle.state::<State>();
+                // 每 ~60 秒扫一次：删除时程序还开着导致没清掉的空目录，等它退出后补删。
+                ticks = ticks.wrapping_add(1);
+                if ticks % 150 == 0 {
+                    cloudfile_core::session::prune_empty_workspace(&state.root);
+                }
                 // 任务落盘/消失都通知界面刷新：否则文件都打开了，列表里还要等好几秒。
                 let signature = task_signature(&state.root);
                 if signature != last_signature || first {
@@ -2218,6 +2225,7 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
                         "working",
                         &format!("正在下载「{name}」到本机…大文件需要一点时间，请稍候。"),
                     );
+                }
                 }
             });
             // 首次安装时把扩展自动解压到位：不该让用户先点「一键完成」才拿到扩展包。

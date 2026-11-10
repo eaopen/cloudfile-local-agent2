@@ -663,6 +663,48 @@ fn remove_dir_quiet(path: &Path) {
     let _ = fs::remove_dir_all(path);
 }
 
+/// 清掉工作副本下已经空了的目录：`<workspace>/<view|edit>/<库>/<文件目录>`。
+///
+/// 删除任务时如果打开它的程序还开着（尤其是把那个目录当工作目录的 CAD），目录当场删不掉；
+/// 等程序退出后扫一遍就干净了。只删**空**目录，非空的一律不碰。
+pub fn prune_empty_workspace(root: &Path) -> Vec<String> {
+    let workspace = crate::settings::workspace_root(root);
+    let mut removed = Vec::new();
+    for mode in ["view", "edit"] {
+        let base = workspace.join(mode);
+        let Ok(libraries) = fs::read_dir(&base) else {
+            continue;
+        };
+        for library in libraries.flatten() {
+            if !library.path().is_dir() {
+                continue;
+            }
+            if let Ok(entries) = fs::read_dir(library.path()) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if !path.is_dir() || !is_empty_directory(&path) {
+                        continue;
+                    }
+                    remove_dir_quiet(&path);
+                    if !path.exists() {
+                        removed.push(path.to_string_lossy().into_owned());
+                    }
+                }
+            }
+            if is_empty_directory(&library.path()) {
+                remove_dir_quiet(&library.path());
+            }
+        }
+    }
+    removed
+}
+
+fn is_empty_directory(path: &Path) -> bool {
+    fs::read_dir(path)
+        .map(|mut entries| entries.next().is_none())
+        .unwrap_or(false)
+}
+
 pub fn remove_task(root: &Path, id: &str) -> Result<serde_json::Value> {
     remove_task_confirming(root, id, false)
 }
@@ -922,6 +964,30 @@ mod tests {
         );
         assert!(!working.join("a.docx").exists(), "主文件必须被删掉");
         drop(held);
+    }
+
+    /// 空掉的工作副本目录要被扫掉；还有文件的目录一律不动。
+    #[test]
+    fn empty_workspace_directories_are_swept_away() {
+        let (_dir, root) = storage::test_root();
+        let workspace = root.join("workspace");
+        crate::settings::update(&root, |s| {
+            s.workspace_root = Some(workspace.to_string_lossy().into_owned())
+        })
+        .unwrap();
+        let empty = workspace.join("view").join("lib1").join("gone");
+        fs::create_dir_all(&empty).unwrap();
+        let busy = workspace.join("view").join("lib1").join("kept");
+        fs::create_dir_all(&busy).unwrap();
+        fs::write(busy.join("a.docx"), b"still here").unwrap();
+        let empty_edit = workspace.join("edit").join("lib2").join("gone");
+        fs::create_dir_all(&empty_edit).unwrap();
+
+        let removed = prune_empty_workspace(&root);
+        assert!(!empty.exists(), "空目录应当被清掉");
+        assert!(!empty_edit.exists(), "edit 下的空目录同样");
+        assert!(busy.join("a.docx").exists(), "有文件的目录必须保留");
+        assert_eq!(removed.len(), 2, "{removed:?}");
     }
 
     /// 删除只清掉"这份文件"和它的冲突副本，同目录里别人的文件一律不动。

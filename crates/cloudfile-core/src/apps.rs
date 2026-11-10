@@ -249,6 +249,17 @@ pub fn for_file<'a>(apps: &'a [Application], name: &str) -> Option<&'a Applicati
     apps.iter().find(|app| app.extensions.contains(&extension))
 }
 
+/// 子进程的工作目录：`<agent 根>/spawn`。
+///
+/// 不能用文档目录 —— 那会让"删掉一个文件"变成"删不掉一个空文件夹"。
+fn spawn_directory(root: &Path) -> PathBuf {
+    let dir = root.join("spawn");
+    if !dir.is_dir() {
+        let _ = std::fs::create_dir_all(&dir);
+    }
+    dir
+}
+
 /// Rule, then detected application, then the OS default. The first two carry an
 /// explicit program chosen by the user or by this table; the default handler is
 /// only used for known document types.
@@ -261,13 +272,17 @@ pub fn open_path(
     if !path.is_absolute() {
         bail!("working copy path is not absolute");
     }
+    // 修改逻辑（2026-11-10）：不要把"文件所在目录"设成子进程的工作目录。
+    // Windows 不允许删除某个进程的当前目录 —— 于是删完文件、目录空了，只要程序还开着，
+    // 那个空目录就永远删不掉（现场就是这样）。给它一个专用的中转目录当代工位。
+    let cwd = spawn_directory(root);
     let rules = crate::settings::load(root)
         .map(|settings| settings.open_rules)
         .unwrap_or_default();
     if let Some(rule) = resolve_open_rule(&rules, mode, name) {
         let mut command = rule.render(path);
         let program = command.remove(0);
-        return spawn(&program, &command, path.parent());
+        return spawn(&program, &command, Some(&cwd));
     }
     let apps = detect();
     if let Some(app) = for_file(&apps, name) {
@@ -286,7 +301,7 @@ pub fn open_path(
                 .iter()
                 .map(|argument| argument.replace(PLACEHOLDER, &text))
                 .collect();
-            return spawn(&program, &command, path.parent());
+            return spawn(&program, &command, Some(&cwd));
         }
     }
     let extension = extension_of(name);
