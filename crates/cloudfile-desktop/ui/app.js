@@ -342,22 +342,22 @@ function stateText(result) {
   return '操作已完成。';
 }
 
-// 返回 null 表示成功，否则是被命令拒绝的原因。
+// 返回 { error, result }：error 非空表示被命令拒绝。
 // 调用方必须据此决定要不要说"完成了" —— 原来这里吞掉错误，调用方却照样报成功，
 // 于是"删除失败"也会显示"任务已删除"。
 async function action(task, command, args) {
-  if (busy.has(task.task_id)) return null;
+  if (busy.has(task.task_id)) return { error: null, result: null };
   busy.add(task.task_id);
   say('正在处理，请保留本地文件…');
   refresh();
   try {
     const result = await invoke(command, { taskId: task.task_id, ...args });
     say(stateText(result));
-    return null;
+    return { error: null, result };
   } catch (error) {
     const text = String((error && error.message) || error);
     say(text);
-    return text;
+    return { error: text, result: null };
   } finally {
     busy.delete(task.task_id);
     refresh();
@@ -559,16 +559,21 @@ function renderTask(task) {
             lines.push('任务状态本来就读不出来，删除后不再保留任何本地记录。');
           }
           if (!window.confirm(lines.join('\n'))) return;
-          const failure = await action(task, 'delete_task');
-          if (failure) {
-            // 文件被 Office 之类占着时，删除会被拒绝：任务和本地文件都保持原样，
+          const outcome = await action(task, 'delete_task');
+          if (outcome.error) {
+            // 文件被 Office/NX 之类占着时，删除会被拒绝：任务和本地文件都保持原样，
             // 不能再报"已删除"，否则用户会以为记录没了。
-            dialog('无法删除这个任务', `${failure}\n\n任务和本地文件都保持原样，请关闭文件后再试。`, [['知道了']]);
+            dialog('无法删除这个任务', `${outcome.error}\n\n任务和本地文件都保持原样，请关闭文件后再试。`, [['知道了']]);
             return;
           }
           // 先让这一行立刻消失，再让列表去对账 —— 等刷新会有一段"说删了却没删"的错觉。
           row.remove();
-          say('任务已删除，本地文件也已清理。');
+          const leftover = Number(outcome.result && outcome.result.leftover_files) || 0;
+          say(
+            leftover
+              ? `任务已删除，本地文件也已清理。目录里还有 ${leftover} 个其他文件，已保留未删。`
+              : '任务已删除，本地文件也已清理。',
+          );
           refresh();
         },
         { secondary: true },

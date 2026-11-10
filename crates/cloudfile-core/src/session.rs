@@ -537,6 +537,50 @@ pub fn find_task(
 ///
 /// 真正决定删除成败的是「能否以 DELETE 访问打开」：Office 之类打开文件时不会给
 /// FILE_SHARE_DELETE，这里就会失败；而共享删除的普通读句柄不受影响。
+/// 这个 PID 现在还是当初那个程序吗？
+///
+/// 只比 PID 会被复用坑到（重启后 1234 可能是别的程序），所以连映像名一起比。
+#[cfg(windows)]
+fn process_alive(pid: u32, app: &str) -> bool {
+    use std::ffi::c_void;
+    const QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const SYNCHRONIZE: u32 = 0x0010_0000;
+    const WAIT_TIMEOUT: u32 = 258;
+    extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
+        fn QueryFullProcessImageNameW(
+            handle: *mut c_void,
+            flags: u32,
+            buffer: *mut u16,
+            size: *mut u32,
+        ) -> i32;
+        fn WaitForSingleObject(handle: *mut c_void, millis: u32) -> u32;
+        fn CloseHandle(handle: *mut c_void) -> i32;
+    }
+    unsafe {
+        let handle = OpenProcess(QUERY_LIMITED_INFORMATION | SYNCHRONIZE, 0, pid);
+        if handle.is_null() {
+            return false;
+        }
+        let mut buffer = [0u16; 1024];
+        let mut size = buffer.len() as u32;
+        let queried = QueryFullProcessImageNameW(handle, 0, buffer.as_mut_ptr(), &mut size);
+        let running = WaitForSingleObject(handle, 0) == WAIT_TIMEOUT;
+        CloseHandle(handle);
+        if queried == 0 || !running {
+            return false;
+        }
+        let path = String::from_utf16_lossy(&buffer[..size as usize]);
+        let name = path.rsplit(['\\', '/']).next().unwrap_or("");
+        !app.is_empty() && name.eq_ignore_ascii_case(app)
+    }
+}
+
+#[cfg(not(windows))]
+fn process_alive(_pid: u32, _app: &str) -> bool {
+    false
+}
+
 fn ensure_file_released(path: &Path) -> Result<()> {
     if !path.exists() {
         return Ok(());
@@ -633,7 +677,23 @@ pub fn remove_task(root: &Path, id: &str) -> Result<serde_json::Value> {
         ensure_file_released(&copy.join(&task.file_name))?;
     }
 
+    // 1b) 有些 CAD 读完文件就把句柄放掉了（NX 就是这样），操作系统层面看不出占用。
+    //     这时只能看"我们启动的那个程序还在不在"。
+    if let Ok(marker) = crate::storage::read::<serde_json::Value>(&dir.join("opened.json")) {
+        let pid = marker["pid"].as_u64().unwrap_or(0) as u32;
+        let app = marker["app"].as_str().unwrap_or("");
+        if pid != 0 && process_alive(pid, app) {
+            bail!(
+                "「{}」还开在 {} 里，请先在该程序中关闭文件（或退出它）再删除。",
+                task.file_name,
+                app
+            );
+        }
+    }
+
     // 2) 删文件本身 —— 这一步的成功与否决定整个删除的成败。
+    //    只删这一份文件及其冲突副本：同目录里别人放的东西一律不动。
+    let mut leftover = 0usize;
     if let Some(copy) = working.as_ref() {
         let local = copy.join(&task.file_name);
         if local.exists() {
@@ -648,8 +708,15 @@ pub fn remove_task(root: &Path, id: &str) -> Result<serde_json::Value> {
                 }
             })?;
         }
-        // 目录清理是"顺手做的事"，失败不改变结论。
-        if copy != &dir && copy.starts_with(&workspace) {
+        let conflict = copy.join(format!("{}.cloudfile-conflict", task.file_name));
+        if conflict.exists() {
+            let _ = fs::remove_file(&conflict);
+        }
+        // 目录空了才清；还有别的文件就留着，并在结果里说明。
+        leftover = fs::read_dir(copy)
+            .map(|entries| entries.flatten().count())
+            .unwrap_or(0);
+        if leftover == 0 && copy != &dir && copy.starts_with(&workspace) {
             remove_dir_quiet(copy);
         }
     }
@@ -687,6 +754,8 @@ pub fn remove_task(root: &Path, id: &str) -> Result<serde_json::Value> {
         "task_id": id,
         "file_name": task.file_name,
         "removed_local": working.map(|path| path.to_string_lossy().into_owned()),
+        // 目录里还有别人的文件时不删目录，把这个数交给界面说明。
+        "leftover_files": leftover,
         "pruned": pruned,
     }))
 }
@@ -774,7 +843,16 @@ pub fn digest(path: &Path) -> Result<String> {
 pub fn launch(root: &Path, id: &str) -> Result<()> {
     let task = load(root, id)?;
     let path = local_path(root, &task)?;
-    crate::apps::open_path(root, &task.mode, &task.file_name, &path)
+    let opened = crate::apps::open_path(root, &task.mode, &task.file_name, &path)?;
+    // 记下"这份文件交给了哪个进程"。NX 这类程序读完就放句柄，操作系统看不出占用，
+    // 只能靠这个记录在删除时提醒用户先关掉程序。
+    if let Some((pid, app)) = opened {
+        let marker = serde_json::json!({"pid": pid, "app": app, "at": crate::now()});
+        if let Ok(dir) = task_dir(root, id) {
+            let _ = crate::storage::write(&dir.join("opened.json"), &marker);
+        }
+    }
+    Ok(())
 }
 #[cfg(test)]
 mod tests {
@@ -827,6 +905,105 @@ mod tests {
         );
         assert!(!working.join("a.docx").exists(), "主文件必须被删掉");
         drop(held);
+    }
+
+    /// 删除只清掉"这份文件"和它的冲突副本，同目录里别人的文件一律不动。
+    #[test]
+    fn deletion_only_removes_this_files_own_copies() {
+        let (_dir, root) = storage::test_root();
+        crate::settings::update(&root, |s| {
+            s.workspace_root = Some(root.join("workspace").to_string_lossy().into_owned())
+        })
+        .unwrap();
+        let id = "f".repeat(64);
+        let private = task_dir(&root, &id).unwrap();
+        storage::private_dir(&private).unwrap();
+        let working = prepare_working_dir(&root, &id).unwrap();
+        fs::write(working.join("a.docx"), b"mine").unwrap();
+        fs::write(working.join("a.docx.cloudfile-conflict"), b"theirs").unwrap();
+        fs::write(working.join("会议记录.txt"), b"not ours").unwrap();
+        storage::write(
+            &private.join("task.json"),
+            &Task {
+                task_id: id.clone(),
+                device_id: None,
+                file_name: "a.docx".into(),
+                mode: "local-view".into(),
+                server: "https://files.example.test".into(),
+                repo_id: "11111111-1111-4111-8111-111111111111".into(),
+                remote_path: "/a.docx".into(),
+                library_name: None,
+                session_id: "s".into(),
+                baseline_file_id: "b".repeat(40),
+                baseline_digest: "c".repeat(64),
+                size: 4,
+            },
+        )
+        .unwrap();
+
+        let result = remove_task(&root, &id).unwrap();
+        assert!(!working.join("a.docx").exists(), "自己的文件应当被删掉");
+        assert!(
+            !working.join("a.docx.cloudfile-conflict").exists(),
+            "冲突副本也属于这份文件，应当一起删"
+        );
+        assert!(
+            working.join("会议记录.txt").exists(),
+            "同目录里的其他文件不是我们的，绝不能删"
+        );
+        assert_eq!(result["leftover_files"], 1, "要如实报告还有别的文件");
+        assert!(working.is_dir(), "还有别人的文件时目录必须保留");
+    }
+
+    /// 文件还开在我们启动的那个程序里（NX 这类读完就放句柄的），不能删。
+    #[cfg(windows)]
+    #[test]
+    fn a_task_opened_in_a_running_application_is_not_deleted() {
+        let (_dir, root) = storage::test_root();
+        crate::settings::update(&root, |s| {
+            s.workspace_root = Some(root.join("workspace").to_string_lossy().into_owned())
+        })
+        .unwrap();
+        let id = "a".repeat(64);
+        let private = task_dir(&root, &id).unwrap();
+        storage::private_dir(&private).unwrap();
+        let working = prepare_working_dir(&root, &id).unwrap();
+        fs::write(working.join("part.prt"), b"model").unwrap();
+        storage::write(
+            &private.join("task.json"),
+            &Task {
+                task_id: id.clone(),
+                device_id: None,
+                file_name: "part.prt".into(),
+                mode: "local-view".into(),
+                server: "https://files.example.test".into(),
+                repo_id: "11111111-1111-4111-8111-111111111111".into(),
+                remote_path: "/part.prt".into(),
+                library_name: None,
+                session_id: "s".into(),
+                baseline_file_id: "b".repeat(40),
+                baseline_digest: "c".repeat(64),
+                size: 5,
+            },
+        )
+        .unwrap();
+        // 用"测试进程自己"冒充打开文件的程序：它当然还活着，映像名也对得上。
+        let exe = std::env::current_exe()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        storage::write(
+            &private.join("opened.json"),
+            &serde_json::json!({"pid": std::process::id(), "app": exe, "at": crate::now()}),
+        )
+        .unwrap();
+
+        let error = remove_task(&root, &id).unwrap_err().to_string();
+        assert!(error.contains("还开在"), "{error}");
+        assert!(working.join("part.prt").exists(), "拒绝删除时文件必须还在");
+        assert!(private.join("task.json").is_file(), "任务记录也要保留");
     }
 
     /// 文件被占用时摘要读不到，这是**暂时**状态，不是"任务坏了"。

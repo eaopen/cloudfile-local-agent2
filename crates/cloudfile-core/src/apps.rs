@@ -252,7 +252,12 @@ pub fn for_file<'a>(apps: &'a [Application], name: &str) -> Option<&'a Applicati
 /// Rule, then detected application, then the OS default. The first two carry an
 /// explicit program chosen by the user or by this table; the default handler is
 /// only used for known document types.
-pub fn open_path(root: &Path, mode: &str, name: &str, path: &Path) -> Result<()> {
+pub fn open_path(
+    root: &Path,
+    mode: &str,
+    name: &str,
+    path: &Path,
+) -> Result<Option<(u32, String)>> {
     if !path.is_absolute() {
         bail!("working copy path is not absolute");
     }
@@ -294,13 +299,12 @@ pub fn open_path(root: &Path, mode: &str, name: &str, path: &Path) -> Result<()>
              把 .{extension} 关联到它"
         );
     }
-    open::that(path).map_err(|error| {
+    open::that(path).map(|_| None).map_err(|error| {
         anyhow::anyhow!(
             "这台机器没有为 .{extension} 指定默认程序（{error}）。\
              装好对应软件后，在 Windows「设置 → 应用 → 默认应用」里按文件类型关联一次即可"
         )
-    })?;
-    Ok(())
+    })
 }
 
 /// NX 7.x 走 ANSI 文件名接口，**中文路径会静默失败**：进程起来了，但停在空会话
@@ -327,7 +331,14 @@ fn nx_reads_unicode_paths(_program: &str) -> bool {
 /// 继承来的目录未必是它能接受的（真机实测：不设工作目录，NX 直接
 /// `NX Initialization Error`；设成部件所在目录就正常）。UNC 路径不能当工作目录
 /// —— 用 `\\?\` 前缀的私有路径同理，遇到就保持继承。
-fn spawn(program: &str, arguments: &[String], directory: Option<&Path>) -> Result<()> {
+/// 返回被启动进程的 PID：调用方要据此判断"这个文件是不是还开在那个程序里"。
+/// 有些 CAD（比如 NX）读完文件就把句柄放掉了，操作系统层面看不出占用，
+/// 只能靠"我们启动的那个进程还在不在"来判断。
+fn spawn(
+    program: &str,
+    arguments: &[String],
+    directory: Option<&Path>,
+) -> Result<Option<(u32, String)>> {
     if program.contains('\0') || arguments.iter().any(|argument| argument.contains('\0')) {
         bail!("invalid application command");
     }
@@ -343,10 +354,14 @@ fn spawn(program: &str, arguments: &[String], directory: Option<&Path>) -> Resul
             command.current_dir(directory);
         }
     }
-    command
+    let child = command
         .spawn()
         .with_context(|| format!("could not start {program}"))?;
-    Ok(())
+    let exe = std::path::Path::new(program)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| program.to_string());
+    Ok(Some((child.id(), exe)))
 }
 
 /// Opens a directory in the platform file manager.
@@ -360,7 +375,7 @@ pub fn open_directory(path: &Path) -> Result<()> {
     let program = "explorer";
     #[cfg(not(any(target_os = "macos", windows)))]
     let program = "xdg-open";
-    spawn(program, &[path.to_string_lossy().into_owned()], None)
+    spawn(program, &[path.to_string_lossy().into_owned()], None).map(|_| ())
 }
 
 /// Version of the WebView2 runtime the Windows desktop shell needs, if present.
