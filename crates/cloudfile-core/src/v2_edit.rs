@@ -192,9 +192,13 @@ fn reuse_local(
         return Ok(None);
     };
     // 本地被改过（有未上传修改）就不是"最新副本"，交给原来的下载/合并流程去问用户。
-    if session::digest(&local)? != task.baseline_digest {
-        note(root, "reuse skip: 本地副本已被修改");
-        return Ok(None);
+    // 读不到（文件被占用）时按"可能被改过"处理：退回下载/合并，绝不误判为最新。
+    match session::digest_soft(&local)? {
+        Some(digest) if digest == task.baseline_digest => {}
+        _ => {
+            note(root, "reuse skip: 本地副本已被修改或暂时读不到");
+            return Ok(None);
+        }
     }
     let previous = load(root, &task.task_id).unwrap_or(State {
         ticket: ticket.to_string(),
@@ -639,8 +643,12 @@ fn merge(root: &Path, mut task: Task, input: Merge<'_>) -> Result<Option<Task>> 
     state.ticket = ticket;
     // 修改逻辑（2026-10-23）：本地改过但没上传时，重复点「本地编辑」不能再静默复用本地那份 ——
     // 用户可能忘了自己有未上传的修改，所以要给一次明确选择（用本地已编辑的 / 用线上覆盖本地）。
-    let local_dirty = session::digest(&local)
-        .map(|digest| digest != task.baseline_digest)
+    let local_dirty = session::digest_soft(&local)
+        .map(|digest| {
+            digest
+                .map(|value| value != task.baseline_digest)
+                .unwrap_or(true)
+        })
         .unwrap_or(true);
     let remote_changed = file_id != task.baseline_file_id;
     if mode != "local-view" && !remote_changed && !local_dirty {

@@ -205,9 +205,14 @@ pub fn task_summary(root: &Path) -> Value {
         Err(error) => return json!({"ok": false, "error": error.to_string()}),
     };
     for task in tasks {
-        let changed = session::local_path(root, &task)
-            .and_then(|path| session::digest(&path))
-            .map(|digest| digest != task.baseline_digest);
+        // 文件被占用只是暂时读不到，不算"状态异常"（与任务中心同一判据）。
+        let changed = session::local_path(root, &task).and_then(|path| {
+            session::digest_soft(&path).map(|digest| {
+                digest
+                    .map(|value| value != task.baseline_digest)
+                    .unwrap_or(false)
+            })
+        });
         let pending = journal::pending(root, &task.task_id);
         let needs_review = changed.is_err() || pending.is_err() || pending.ok().flatten().is_some();
         rows.push(json!({

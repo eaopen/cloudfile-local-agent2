@@ -638,6 +638,30 @@ fn filename(name: &str) -> Result<()> {
     }
     Ok(())
 }
+/// 读摘要，但把"文件正被别的程序占用"当成**暂时读不到**而不是错误。
+///
+/// 现场：Word/CAD 打开着文件时，界面上这条任务会突然变成"待处理" —— 其实是
+/// `digest` 拿不到句柄，被 `summaries` 当成"本地状态读不出来"（需要检查）。
+/// 占用是暂时的、和任务本身健康无关，不能因此改变任务的状态。
+pub fn digest_soft(path: &Path) -> Result<Option<String>> {
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        // 32 = ERROR_SHARING_VIOLATION，33 = ERROR_LOCK_VIOLATION
+        Err(error) if matches!(error.raw_os_error(), Some(32) | Some(33)) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let mut hash = Sha256::new();
+    let mut buffer = [0; 65536];
+    loop {
+        let n = file.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        hash.update(&buffer[..n]);
+    }
+    Ok(Some(format!("{:x}", hash.finalize())))
+}
+
 pub fn digest(path: &Path) -> Result<String> {
     let mut file = fs::File::open(path)?;
     let mut hash = Sha256::new();
@@ -662,6 +686,32 @@ pub fn launch(root: &Path, id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// 文件被占用时摘要读不到，这是**暂时**状态，不是"任务坏了"。
+    /// 现场：Word 开着文件，任务会自己跳进「待处理」。
+    #[cfg(windows)]
+    #[test]
+    fn digest_soft_reports_a_busy_file_as_temporarily_unreadable() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let (_dir, root) = storage::test_root();
+        let path = root.join("a.bin");
+        fs::write(&path, b"hello").unwrap();
+        let free = digest_soft(&path).unwrap();
+        assert!(free.is_some(), "正常文件应能算出摘要");
+
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
+        assert!(
+            digest_soft(&path).unwrap().is_none(),
+            "被占用时应返回 None，而不是把任务判成异常"
+        );
+        drop(held);
+        assert_eq!(digest_soft(&path).unwrap(), free);
+    }
+
     /// 文件被别的程序占着时，删除必须**整体拒绝**：任务记录和本地副本都要原样保留。
     /// 现场踩过：文件删不掉、记录却被动过，任务变成"待处理"，用户以为已经删了。
     #[cfg(windows)]

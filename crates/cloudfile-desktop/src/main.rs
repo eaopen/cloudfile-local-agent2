@@ -312,9 +312,15 @@ fn summaries(root: &Path, uploading: &Mutex<HashSet<String>>) -> anyhow::Result<
         .map_err(|_| anyhow::anyhow!("上传状态不可用"))?
         .clone();
     for task in session::tasks(root)? {
-        let changed = session::local_path(root, &task)
-            .and_then(|path| session::digest(&path))
-            .map(|digest| digest != task.baseline_digest);
+        // 「读不到」和「读出来不一样」要分开：文件被别的程序占用时只是暂时读不到，
+        // 不能因此把任务判成"状态异常"（现场就表现为删不掉之后任务自己跳进待处理）。
+        let changed = session::local_path(root, &task).and_then(|path| {
+            session::digest_soft(&path).map(|digest| {
+                digest
+                    .map(|value| value != task.baseline_digest)
+                    .unwrap_or(false)
+            })
+        });
         let pending = journal::pending(root, &task.task_id);
         let lease = journal::lease(root, &task.task_id);
         let acknowledged = journal::lease_acknowledged(root, &task.task_id);
