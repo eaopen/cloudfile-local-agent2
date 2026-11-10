@@ -663,6 +663,14 @@ fn remove_dir_quiet(path: &Path) {
     let _ = fs::remove_dir_all(path);
 }
 
+/// 「文件已关闭、但程序还开着」时的确认文案。
+///
+/// 一行一句，不要用 `\n\` 续行 —— 续行虽然会吃掉缩进，但一旦有人补了个空格或者
+/// 编辑器做了对齐，弹窗里就会出现参差不齐的缩进（现场就是这么看到的）。
+fn opened_confirm_message(file: &str, app: &str) -> String {
+    format!("「{file}」已经不在任何程序里打开了，但 {app} 还在运行。\n如果你刚刚关掉了这个文件，可以放心删除；否则请先回到 {app} 里确认。")
+}
+
 /// 清掉工作副本下已经空了的目录：`<workspace>/<view|edit>/<库>/<文件目录>`。
 ///
 /// 删除任务时如果打开它的程序还开着（尤其是把那个目录当工作目录的 CAD），目录当场删不掉；
@@ -741,10 +749,7 @@ pub fn remove_task_confirming(root: &Path, id: &str, force: bool) -> Result<serd
                     "task_id": id,
                     "file_name": task.file_name,
                     "app": app,
-                    "message": format!(
-                        "「{}」已经不在任何程序里打开了，但 {} 还在运行。\n                         如果你刚刚关掉了这个文件，可以放心删除；否则请先回到 {} 里确认。",
-                        task.file_name, app, app
-                    ),
+                    "message": opened_confirm_message(&task.file_name, app),
                 }));
             }
         }
@@ -964,6 +969,19 @@ mod tests {
         );
         assert!(!working.join("a.docx").exists(), "主文件必须被删掉");
         drop(held);
+    }
+
+    /// 弹窗正文是 pre-wrap：行首多一个空格/制表符就会歪，这里钉住它。
+    #[test]
+    fn confirm_message_has_no_stray_indentation() {
+        let text = opened_confirm_message("ug7.5.prt", "ugraf.exe");
+        let lines: Vec<&str> = text.split('\n').collect();
+        assert_eq!(lines.len(), 2, "应当正好两句：{text}");
+        for line in &lines {
+            assert!(!line.starts_with([' ', '\t']), "行首不该有空白：{line:?}");
+            assert!(!line.ends_with([' ', '\t']), "行尾不该有空白：{line:?}");
+        }
+        assert!(text.contains("ug7.5.prt") && text.contains("ugraf.exe"));
     }
 
     /// 空掉的工作副本目录要被扫掉；还有文件的目录一律不动。
