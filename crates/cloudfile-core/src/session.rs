@@ -572,23 +572,78 @@ fn ensure_file_released(path: &Path) -> Result<()> {
     }
 }
 
+/// 清理目录：**失败不算删除失败**。
+///
+/// 现场：工作副本里的文件删掉了，紧接着 `remove_dir_all` 因为目录只读属性（或别的
+/// 程序短暂持有目录句柄）失败 —— 于是整个删除被报成"失败"，可文件其实已经没了，
+/// 任务记录还在，任务就变成一条"本地文件不见了"的待处理项。
+/// 目录残留是脏但无害的（`tasks()` 只认带 task.json 的目录），绝不能因为它毁掉整个操作。
+fn remove_dir_quiet(path: &Path) {
+    if !path.exists() {
+        return;
+    }
+    if fs::remove_dir_all(path).is_ok() {
+        return;
+    }
+    #[cfg(windows)]
+    {
+        // 只读属性会让 RemoveDirectory 报拒绝访问：清掉再试一次。
+        // 这里就是要清掉只读**属性**（不是改 ACL），clippy 的通用告警不适用于该场景。
+        #[allow(clippy::permissions_set_readonly_false)]
+        if let Ok(metadata) = fs::metadata(path) {
+            let mut permissions = metadata.permissions();
+            if permissions.readonly() {
+                permissions.set_readonly(false);
+                if fs::set_permissions(path, permissions).is_ok()
+                    && fs::remove_dir_all(path).is_ok()
+                {
+                    return;
+                }
+            }
+        }
+    }
+    let _ = fs::remove_dir_all(path);
+}
+
 pub fn remove_task(root: &Path, id: &str) -> Result<serde_json::Value> {
     let task = load(root, id)?;
     let dir = task_dir(root, id)?;
     let workspace = crate::settings::workspace_root(root);
     let working = working_dir(root, id).ok();
-    // 先探测再删：锁定中的文件一旦删到一半，任务记录和本地副本就对不上了。
+
+    // 1) 先说清楚"这份文件删不删得掉"。删不掉就整体拒绝，什么都不动。
     if let Some(copy) = working.as_ref() {
         ensure_file_released(&copy.join(&task.file_name))?;
     }
+
+    // 2) 删文件本身 —— 这一步的成功与否决定整个删除的成败。
     if let Some(copy) = working.as_ref() {
-        if copy != &dir && copy.starts_with(&workspace) && copy.exists() {
-            fs::remove_dir_all(copy)?;
+        let local = copy.join(&task.file_name);
+        if local.exists() {
+            fs::remove_file(&local).map_err(|error| {
+                if matches!(error.raw_os_error(), Some(32) | Some(33)) {
+                    anyhow::anyhow!(
+                        "「{}」正在被其他程序使用，无法删除。请先关闭该文件再重试。",
+                        task.file_name
+                    )
+                } else {
+                    anyhow::anyhow!("删除本地文件失败：{error}")
+                }
+            })?;
+        }
+        // 目录清理是"顺手做的事"，失败不改变结论。
+        if copy != &dir && copy.starts_with(&workspace) {
+            remove_dir_quiet(copy);
         }
     }
-    if dir.exists() {
-        fs::remove_dir_all(&dir)?;
+
+    // 3) 删任务记录：task.json 是"这条任务还在"的唯一判据，必须删掉。
+    let record = dir.join("task.json");
+    if record.exists() {
+        fs::remove_file(&record)?;
     }
+    remove_dir_quiet(&dir);
+
     let mut pruned: Vec<String> = Vec::new();
     if let Some(copy) = working.as_ref() {
         let mut current = copy.parent().map(Path::to_path_buf);
@@ -686,6 +741,56 @@ pub fn launch(root: &Path, id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// 目录清理失败不能把整个删除判成失败：现场就是这样留下"文件已删、任务还在"，
+    /// 那条任务随即变成待处理。
+    #[cfg(windows)]
+    #[test]
+    fn a_leftover_directory_does_not_fail_the_deletion() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let (_dir, root) = storage::test_root();
+        crate::settings::update(&root, |s| {
+            s.workspace_root = Some(root.join("workspace").to_string_lossy().into_owned())
+        })
+        .unwrap();
+        let id = "e".repeat(64);
+        let private = task_dir(&root, &id).unwrap();
+        storage::private_dir(&private).unwrap();
+        let working = prepare_working_dir(&root, &id).unwrap();
+        fs::write(working.join("a.docx"), b"open me").unwrap();
+        // 冲突副本被占着：目录清不掉，但主文件能删。
+        fs::write(working.join("a.docx.cloudfile-conflict"), b"theirs").unwrap();
+        let task = Task {
+            task_id: id.clone(),
+            device_id: None,
+            file_name: "a.docx".into(),
+            mode: "local-view".into(),
+            server: "https://files.example.test".into(),
+            repo_id: "11111111-1111-4111-8111-111111111111".into(),
+            remote_path: "/a.docx".into(),
+            library_name: None,
+            session_id: "s".into(),
+            baseline_file_id: "b".repeat(40),
+            baseline_digest: "c".repeat(64),
+            size: 7,
+        };
+        storage::write(&private.join("task.json"), &task).unwrap();
+
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(working.join("a.docx.cloudfile-conflict"))
+            .unwrap();
+
+        remove_task(&root, &id).expect("目录清不掉也只是脏目录，不该让删除失败");
+        assert!(
+            !private.join("task.json").exists(),
+            "任务记录必须被删掉，否则会变成一条待处理任务"
+        );
+        assert!(!working.join("a.docx").exists(), "主文件必须被删掉");
+        drop(held);
+    }
+
     /// 文件被占用时摘要读不到，这是**暂时**状态，不是"任务坏了"。
     /// 现场：Word 开着文件，任务会自己跳进「待处理」。
     #[cfg(windows)]
