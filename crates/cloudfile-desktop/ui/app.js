@@ -559,7 +559,38 @@ function renderTask(task) {
             lines.push('任务状态本来就读不出来，删除后不再保留任何本地记录。');
           }
           if (!window.confirm(lines.join('\n'))) return;
-          const outcome = await action(task, 'delete_task');
+          let outcome = await action(task, 'delete_task');
+          // 句柄已经没了，但我们启动的那个程序还开着：这种只能问一次。
+          if (!outcome.error && outcome.result && outcome.result.requires_confirm) {
+            closeDialog();
+            dialog(
+              '这个文件可能还开着',
+              outcome.result.message,
+              [
+                [
+                  '仍然删除',
+                  async () => {
+                    closeDialog();
+                    const forced = await action(task, 'delete_task', { force: true });
+                    if (forced.error) {
+                      dialog('无法删除这个任务', `${forced.error}\n\n任务和本地文件都保持原样。`, [['知道了']]);
+                      return;
+                    }
+                    row.remove();
+                    const left = Number(forced.result && forced.result.leftover_files) || 0;
+                    say(
+                      left
+                        ? `任务已删除，本地文件也已清理。目录里还有 ${left} 个其他文件，已保留未删。`
+                        : '任务已删除，本地文件也已清理。',
+                    );
+                    refresh();
+                  },
+                ],
+                ['取消', closeDialog, true],
+              ],
+            );
+            return;
+          }
           if (outcome.error) {
             // 文件被 Office/NX 之类占着时，删除会被拒绝：任务和本地文件都保持原样，
             // 不能再报"已删除"，否则用户会以为记录没了。

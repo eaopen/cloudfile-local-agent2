@@ -664,6 +664,13 @@ fn remove_dir_quiet(path: &Path) {
 }
 
 pub fn remove_task(root: &Path, id: &str) -> Result<serde_json::Value> {
+    remove_task_confirming(root, id, false)
+}
+
+/// `force = false` 时，若"文件已经不被任何程序占用、但我们启动的那个程序还开着"，
+/// 不会直接删，而是回一个需要确认的结果 —— 这种状态没法从系统层面判断文件是否还开着，
+/// 只能问用户一次。
+pub fn remove_task_confirming(root: &Path, id: &str, force: bool) -> Result<serde_json::Value> {
     let task = load(root, id)?;
     let dir = task_dir(root, id)?;
     let workspace = crate::settings::workspace_root(root);
@@ -679,15 +686,25 @@ pub fn remove_task(root: &Path, id: &str) -> Result<serde_json::Value> {
 
     // 1b) 有些 CAD 读完文件就把句柄放掉了（NX 就是这样），操作系统层面看不出占用。
     //     这时只能看"我们启动的那个程序还在不在"。
-    if let Ok(marker) = crate::storage::read::<serde_json::Value>(&dir.join("opened.json")) {
-        let pid = marker["pid"].as_u64().unwrap_or(0) as u32;
-        let app = marker["app"].as_str().unwrap_or("");
-        if pid != 0 && process_alive(pid, app) {
-            bail!(
-                "「{}」还开在 {} 里，请先在该程序中关闭文件（或退出它）再删除。",
-                task.file_name,
-                app
-            );
+    if !force {
+        if let Ok(marker) = crate::storage::read::<serde_json::Value>(&dir.join("opened.json")) {
+            let pid = marker["pid"].as_u64().unwrap_or(0) as u32;
+            let app = marker["app"].as_str().unwrap_or("");
+            if pid != 0 && process_alive(pid, app) {
+                // 句柄已经没了（上面那步通过了），但开它的程序还在跑：可能只是关了文件，
+                // 也可能只是把文档关到后台。这种只能问一次，不能自己拍板。
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "requires_confirm": true,
+                    "task_id": id,
+                    "file_name": task.file_name,
+                    "app": app,
+                    "message": format!(
+                        "「{}」已经不在任何程序里打开了，但 {} 还在运行。\n                         如果你刚刚关掉了这个文件，可以放心删除；否则请先回到 {} 里确认。",
+                        task.file_name, app, app
+                    ),
+                }));
+            }
         }
     }
 
@@ -1000,10 +1017,20 @@ mod tests {
         )
         .unwrap();
 
-        let error = remove_task(&root, &id).unwrap_err().to_string();
-        assert!(error.contains("还开在"), "{error}");
-        assert!(working.join("part.prt").exists(), "拒绝删除时文件必须还在");
-        assert!(private.join("task.json").is_file(), "任务记录也要保留");
+        // 不直接删：先回一个"需要确认"（文件已不在任何程序里，但程序还开着）。
+        let pending = remove_task(&root, &id).unwrap();
+        assert_eq!(pending["requires_confirm"], true, "{pending}");
+        assert!(working.join("part.prt").exists(), "确认前文件必须还在");
+        assert!(
+            private.join("task.json").is_file(),
+            "确认前任务记录也要保留"
+        );
+
+        // 用户点"仍然删除"之后才真的删掉。
+        let done = remove_task_confirming(&root, &id, true).unwrap();
+        assert_eq!(done["ok"], true, "{done}");
+        assert!(!working.join("part.prt").exists());
+        assert!(!private.join("task.json").exists());
     }
 
     /// 文件被占用时摘要读不到，这是**暂时**状态，不是"任务坏了"。

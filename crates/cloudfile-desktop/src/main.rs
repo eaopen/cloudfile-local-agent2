@@ -1254,10 +1254,15 @@ fn open_workspace(state: tauri::State<'_, State>) -> Result<(), String> {
 /// 删除任务：任务目录 + 工作副本 + 空目录清理（只在 workspace 根以下）。
 /// 已完成的任务才在界面上给出按钮，但这里不做门禁 —— 用户主动删除永远该被尊重。
 #[tauri::command]
-async fn delete_task(state: tauri::State<'_, State>, task_id: String) -> Result<Value, String> {
+async fn delete_task(
+    state: tauri::State<'_, State>,
+    task_id: String,
+    force: Option<bool>,
+) -> Result<Value, String> {
     let root = state.root.clone();
+    let force = force.unwrap_or(false);
     tauri::async_runtime::spawn_blocking(move || {
-        session::remove_task(&root, &task_id).map_err(|error| error.to_string())
+        session::remove_task_confirming(&root, &task_id, force).map_err(|error| error.to_string())
     })
     .await
     .map_err(|_| "删除任务失败".to_string())?
