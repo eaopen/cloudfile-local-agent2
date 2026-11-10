@@ -544,27 +544,41 @@ fn ensure_file_released(path: &Path) -> Result<()> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
-        const DELETE: u32 = 0x0001_0000;
-        const SHARE_ALL: u32 = 0x1 | 0x2 | 0x4; // read | write | delete
-        match std::fs::OpenOptions::new()
-            .access_mode(DELETE)
-            .share_mode(SHARE_ALL)
-            .open(path)
-        {
-            Ok(_) => Ok(()),
-            // 32 = ERROR_SHARING_VIOLATION，33 = ERROR_LOCK_VIOLATION
-            Err(error) if matches!(error.raw_os_error(), Some(32) | Some(33)) => {
-                bail!(
-                    "「{}」正在被其他程序使用，无法删除。请先关闭该文件再重试。",
-                    path.file_name()
-                        .map(|name| name.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| path.to_string_lossy().into_owned())
-                )
+        // 不共享的独占打开：只要有**任何**程序打开着这个文件（不管它给不给删除共享），
+        // 这里就失败。自家读取由 OPEN_GUARD 排队排除，不会造成误报。
+        let mut blocked = false;
+        for _ in 0..3 {
+            match std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(path)
+            {
+                Ok(_) => {
+                    blocked = false;
+                    break;
+                }
+                // 32 = ERROR_SHARING_VIOLATION，33 = ERROR_LOCK_VIOLATION
+                Err(error) if matches!(error.raw_os_error(), Some(32) | Some(33)) => {
+                    // 杀毒/索引的瞬时句柄重试一次就散了；真有人开着则一直失败。
+                    blocked = true;
+                    std::thread::sleep(std::time::Duration::from_millis(120));
+                }
+                // 只读属性（本地查看副本）会给出 ACCESS_DENIED，删除本身是允许的。
+                Err(_) => {
+                    blocked = false;
+                    break;
+                }
             }
-            // 只读属性（本地查看副本）会给出 ACCESS_DENIED，但删除本身是被允许的，
-            // 交给真正的删除去处理。
-            Err(_) => Ok(()),
         }
+        if blocked {
+            bail!(
+                "「{}」正在被其他程序使用，无法删除。请先关闭该文件再重试。",
+                path.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.to_string_lossy().into_owned())
+            );
+        }
+        Ok(())
     }
     #[cfg(not(windows))]
     {
@@ -610,6 +624,9 @@ pub fn remove_task(root: &Path, id: &str) -> Result<serde_json::Value> {
     let dir = task_dir(root, id)?;
     let workspace = crate::settings::workspace_root(root);
     let working = working_dir(root, id).ok();
+
+    // 整段持写锁：探测和删除期间不让自家读取插进来，否则又会误判成"被占用"。
+    let _exclusive = hold_write();
 
     // 1) 先说清楚"这份文件删不删得掉"。删不掉就整体拒绝，什么都不动。
     if let Some(copy) = working.as_ref() {
@@ -693,12 +710,32 @@ fn filename(name: &str) -> Result<()> {
     }
     Ok(())
 }
+/// 谁在打开本地文件、谁在删它 —— 全在这个锁里排队。
+///
+/// 现场两种相反的事故：独占打开探测会把**自家摘要读取**误判成"被占用"（明明没开文件
+/// 也拒绝删除）；反过来只看"能否以 DELETE 打开"，又会让共享删除的程序（很多看图/CAD
+/// 软件这么开）被直接删掉、用户看不到任何提示。
+/// 现在以"有没有任何程序打开着"为准：探测前先拿到写锁，自家读取（持读锁）一旦结束
+/// 就会让路，别人（Word/CAD/查看器）的句柄则一定还在，探测就能如实拒绝。
+static OPEN_GUARD: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+fn hold_read() -> std::sync::RwLockReadGuard<'static, ()> {
+    OPEN_GUARD.read().unwrap_or_else(|error| error.into_inner())
+}
+
+fn hold_write() -> std::sync::RwLockWriteGuard<'static, ()> {
+    OPEN_GUARD
+        .write()
+        .unwrap_or_else(|error| error.into_inner())
+}
+
 /// 读摘要，但把"文件正被别的程序占用"当成**暂时读不到**而不是错误。
 ///
 /// 现场：Word/CAD 打开着文件时，界面上这条任务会突然变成"待处理" —— 其实是
 /// `digest` 拿不到句柄，被 `summaries` 当成"本地状态读不出来"（需要检查）。
 /// 占用是暂时的、和任务本身健康无关，不能因此改变任务的状态。
 pub fn digest_soft(path: &Path) -> Result<Option<String>> {
+    let _reading = hold_read();
     let mut file = match fs::File::open(path) {
         Ok(file) => file,
         // 32 = ERROR_SHARING_VIOLATION，33 = ERROR_LOCK_VIOLATION
@@ -718,6 +755,7 @@ pub fn digest_soft(path: &Path) -> Result<Option<String>> {
 }
 
 pub fn digest(path: &Path) -> Result<String> {
+    let _reading = hold_read();
     let mut file = fs::File::open(path)?;
     let mut hash = Sha256::new();
     let mut buffer = [0; 65536];
@@ -868,14 +906,25 @@ mod tests {
         );
         drop(held);
 
-        // ② 我们自己的摘要读取（std 默认共享 read|write|delete）不该被当成"占用"。
-        // 这条是现场回归：以前用独占打开探测，用户根本没开文件也报"被占用"。
-        let reader = fs::OpenOptions::new()
-            .read(true)
-            .open(working.join("a.docx"))
-            .unwrap();
-        remove_task(&root, &id).expect("共享删除的读句柄不应该挡住删除");
-        drop(reader);
+        // ② 我们自己的摘要读取不该被当成"占用"：它持的是读锁，删除会等它结束再探测。
+        // 这条是现场回归：以前用户根本没开文件也报"被占用"。
+        // 读锁在**本线程**持有（Guard 不能跨线程），删除交给另一个线程：
+        // 它必须排队等读锁释放，而不是直接报"被占用"。
+        let reading = hold_read();
+        let root_copy = root.clone();
+        let id_copy = id.clone();
+        let started = std::time::Instant::now();
+        let worker = std::thread::spawn(move || remove_task(&root_copy, &id_copy));
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        drop(reading);
+        worker
+            .join()
+            .expect("删除线程不应崩溃")
+            .expect("自家读取不该挡住删除");
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(150),
+            "删除应当等自家读取结束，而不是直接误报被占用"
+        );
         assert!(
             !private.join("task.json").exists(),
             "删除后任务记录应当消失"
