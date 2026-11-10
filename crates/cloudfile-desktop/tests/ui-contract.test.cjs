@@ -155,6 +155,18 @@ function profileFixture(useTest) {
 }
 
 // 地址不允许手改：它由当前环境决定，手工填只会让界面与实际不同步。
+// 设置页的偏好项默认折叠，和「关于与更新」里的高级项保持一致（页面别一进来就拉得很长）。
+test('the preference sections are collapsed by default', () => {
+  for (const title of ['通知提醒', '常驻与启动', '工作副本目录']) {
+    assert.match(
+      html,
+      new RegExp(`<details class="settings-group"><summary>${title}</summary>`),
+      `${title} 应当是默认折叠的 details`,
+    );
+  }
+  assert.doesNotMatch(html, /<div class="settings-group"><h3>/, '不要再留展开的旧结构');
+});
+
 // 引导页五步必须一行一条。曾经和欢迎卡共用 .setup-steps 类，三列网格把第 3 步顶出界面。
 test('the setup step list is one row per step', () => {
   assert.doesNotMatch(css, /\.setup-steps\{display:grid/);
