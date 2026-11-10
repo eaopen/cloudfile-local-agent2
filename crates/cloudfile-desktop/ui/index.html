@@ -50,8 +50,7 @@
       <form id="settings" class="settings-form">
         <details class="settings-group"><summary>通知提醒</summary><label class="check"><span>保存后显示轻提示</span><input type="checkbox" id="notify_on_saved"></label><label class="check"><span>需要检查时显示警告提示</span><input type="checkbox" id="notify_on_review"></label></details>
         <details class="settings-group"><summary>常驻与启动</summary><label class="check"><span>显示可拖动悬浮入口</span><input type="checkbox" id="float_enabled"></label><label class="check"><span>没有任务时隐藏悬浮入口</span><input type="checkbox" id="float_hidden_when_empty"></label><label class="check"><span>登录时启动 Agent</span><input type="checkbox" id="autostart"></label><p class="hint" id="autostart_note" hidden></p></details>
-        <details class="settings-group"><summary>工作副本目录</summary><label class="field"><span class="hint">修改仅影响新任务；留空恢复默认目录。</span><input id="workspace_root" type="text" aria-label="工作副本目录" placeholder="默认：用户主目录 / CloudFile-Dev / Workspace"></label></details>
-        <div class="form-footer"><button>保存设置</button><button type="button" id="workspace-reset" class="secondary">恢复默认目录</button><span class="hint">已有文件和编辑任务会保留在原位置。</span></div>
+        <details class="settings-group"><summary>工作副本目录</summary><label class="field"><span class="hint">修改仅影响新任务；留空恢复默认目录。</span><input id="workspace_root" type="text" aria-label="工作副本目录" placeholder="默认：用户主目录 / CloudFile-Dev / Workspace"></label><div class="form-footer"><button>保存设置</button><button type="button" id="workspace-reset" class="secondary">恢复默认目录</button><span class="hint">已有文件和编辑任务会保留在原位置。</span></div></details>
       </form>
     </section>
     <section class="panel"><div class="section-heading"><div><h2>关于与更新</h2><p id="version" class="hint"></p></div><div class="row"><button id="app-profile-sync" class="secondary" type="button">同步应用信息</button><button id="check-update" class="secondary">检查更新</button></div></div>

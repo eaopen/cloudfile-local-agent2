@@ -52,6 +52,8 @@ function fakeApp(serviceList, options = {}) {
         core: { invoke: async (name, args) => {
           calls.push({ name, args });
           if (name === 'service_status') return serviceList;
+          if (name === 'settings_set') return { version: 'test' };
+          if (name === 'autostart_set') return { autostart_enabled: Boolean(args && args.enabled), autostart_mechanism: null };
           if (name === 'task_summary') return {
             ok: true, tasks: options.tasks || [],
             counts: { 'in-progress': 0, 'needs-attention': 0, done: 0 },
@@ -155,6 +157,30 @@ function profileFixture(useTest) {
 }
 
 // 地址不允许手改：它由当前环境决定，手工填只会让界面与实际不同步。
+// 「保存设置 / 恢复默认目录」属于工作副本目录那一块，收进折叠里之后仍要在同一块内。
+test('the save row lives inside the workspace section', () => {
+  const section = html.match(
+    /<details class="settings-group"><summary>工作副本目录<\/summary>[\s\S]*?<\/details>/,
+  );
+  assert.ok(section, '找不到工作副本目录这一块');
+  assert.match(section[0], /保存设置/);
+  assert.match(section[0], /恢复默认目录/);
+  assert.equal((html.match(/class="form-footer"/g) || []).length, 1, '不能留两份按钮行');
+});
+
+// 按钮藏进折叠块后，上面两个分区的开关必须改了即时保存，否则用户找不到保存入口。
+test('toggling a switch saves immediately', async () => {
+  const { ctx, elements, calls } = fakeApp([]);
+  vm.runInContext('wire()', ctx);
+  const toggle = elements.get('notify_on_saved');
+  toggle.checked = true;
+  await toggle.onchange();
+  assert.ok(
+    calls.some((call) => call.name === 'settings_set' && call.args.notifyOnSaved === true),
+    '开关变化应当立刻写入设置',
+  );
+});
+
 // 设置页的偏好项默认折叠，和「关于与更新」里的高级项保持一致（页面别一进来就拉得很长）。
 test('the preference sections are collapsed by default', () => {
   for (const title of ['通知提醒', '常驻与启动', '工作副本目录']) {

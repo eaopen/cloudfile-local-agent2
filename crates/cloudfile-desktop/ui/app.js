@@ -923,8 +923,9 @@ function wire() {
 
   document.querySelector('#open-workspace').onclick = openWorkspace;
 
-  document.querySelector('#settings').onsubmit = async (event) => {
-    event.preventDefault();
+  // 「保存设置」按钮收在「工作副本目录」折叠块里（那里才是需要显式保存的输入框），
+  // 所以上面两个分区的开关改成**改了即时生效**，不必再折叠回来找按钮。
+  const saveSettings = async ({ withAutostart }) => {
     try {
       await invoke('settings_set', {
         notifyOnSaved: document.querySelector('#notify_on_saved').checked,
@@ -933,11 +934,13 @@ function wire() {
         floatHiddenWhenEmpty: document.querySelector('#float_hidden_when_empty').checked,
         workspaceRoot: document.querySelector('#workspace_root').value,
       });
-      const autostart = await invoke('autostart_set', {
-        enabled: document.querySelector('#autostart').checked,
-      });
-      document.querySelector('#autostart').checked = autostart.autostart_enabled;
-      showAutostartNote(autostart.autostart_mechanism);
+      if (withAutostart) {
+        const autostart = await invoke('autostart_set', {
+          enabled: document.querySelector('#autostart').checked,
+        });
+        document.querySelector('#autostart').checked = autostart.autostart_enabled;
+        showAutostartNote(autostart.autostart_mechanism);
+      }
       say('本机设置已保存。');
       await loadSettings();
       invoke('float_sync').catch(() => {});
@@ -945,6 +948,21 @@ function wire() {
       say(String(error));
     }
   };
+
+  document.querySelector('#settings').onsubmit = async (event) => {
+    event.preventDefault();
+    await saveSettings({ withAutostart: true });
+  };
+
+  for (const id of [
+    'notify_on_saved',
+    'notify_on_review',
+    'float_enabled',
+    'float_hidden_when_empty',
+  ]) {
+    document.querySelector(`#${id}`).onchange = () => saveSettings({ withAutostart: false });
+  }
+  document.querySelector('#autostart').onchange = () => saveSettings({ withAutostart: true });
 
   document.querySelector('#workspace-reset').onclick = async () => {
     document.querySelector('#workspace_root').value = '';
