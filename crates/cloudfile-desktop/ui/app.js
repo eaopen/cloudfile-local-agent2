@@ -153,36 +153,38 @@ function say(text) {
 const SETUP_STEPS = [
   {
     key: 'agent',
-    title: '安装 Agent',
-    hint: '任务中心已经在运行，二进制就位',
-    state: (s) => ({ ok: true, detail: `v${s.version} · ${s.install_root}` }),
+    title: '安装客户端',
+    hint: '任务中心已经在运行',
+    state: (s) => ({ ok: true, detail: `版本 ${s.version}` }),
   },
   {
     key: 'workspace',
-    title: '工作目录',
-    hint: '本地副本落在这里，可在设置里改',
+    title: '本地目录',
+    hint: '从网页打开的文件会下载到这里，之后可在设置里修改',
     state: (s) => ({
       ok: s.workspace_exists,
-      detail: s.workspace_exists ? s.workspace_root : `${s.workspace_root}（尚未创建）`,
+      detail: s.workspace_exists
+        ? s.workspace_root
+        : `${s.workspace_root}（第一次打开文件时自动创建）`,
     }),
   },
   {
     key: 'host',
-    title: '注册 Chrome Host',
-    hint: '扩展 ID 固定，注册由 Agent 自动写入',
+    title: '连接浏览器',
+    hint: '自动完成，不需要手动设置',
     state: (s) => ({
       ok: s.host_registered,
       detail: s.host_foreign
-        ? `${s.host} 由其他程序注册；一键修复不会接管，请在设置中确认替换`
+        ? '已被其他程序占用，需要在设置里确认替换'
         : s.host_registered
-          ? `${s.host} 已注册`
-          : `${s.host} 尚未注册`,
+          ? '已连接'
+          : '尚未连接',
     }),
   },
   {
     key: 'autostart',
     title: '开机自启',
-    hint: '登录后自动运行，关闭窗口不丢任务',
+    hint: '登录系统后自动运行，关掉窗口也不影响正在处理的任务',
     state: (s) => ({
       ok: s.autostart_enabled,
       detail: s.autostart_enabled ? '已设为开机自启' : '未设置',
@@ -727,9 +729,9 @@ function showExitBanner(assessment) {
 // 自启落在哪条途径上：企业机器上 Run 键常被策略锁死，实际用的是「启动」文件夹，
 // 不说清楚的话用户会以为开关是假的。
 const AUTOSTART_MECHANISMS = {
-  'run-key': '已设为开机自启（当前用户注册表 Run 键）。',
-  'startup-folder': '已设为开机自启，途径是「启动」文件夹（注册表被策略限制时的备用途径）。',
-  'launch-agent': '已设为开机自启（登录项 LaunchAgent）。',
+  'run-key': '已设为开机自启。',
+  'startup-folder': '已设为开机自启（系统策略限制时的备用方式）。',
+  'launch-agent': '已设为开机自启。',
 };
 
 function showAutostartNote(mechanism) {
@@ -881,11 +883,11 @@ async function loadSettings() {
   if (!registration) {
     hostState.textContent = '未找到本机 Host 目录，无法注册。';
   } else if (registration.foreign) {
-    hostState.textContent = `Host ${registration.host} 由其他程序注册，可备份后接管。`;
+    hostState.textContent = '浏览器连接已被其他程序占用，点「重新注册」时可以选择替换。';
   } else if (registration.registered) {
-    hostState.textContent = `Host ${registration.host} 已注册（扩展 ${registration.extension_id}）→ ${registration.manifest_path}`;
+    hostState.textContent = `浏览器连接已就绪（扩展 ${registration.extension_id}）；注册文件：${registration.manifest_path}`;
   } else {
-    hostState.textContent = `Host ${registration.host} 尚未注册；点「重新注册」由 Agent 完成，不需要 Python。`;
+    hostState.textContent = '浏览器连接尚未就绪；点「重新注册」即可自动完成。';
   }
   renderWelcome();
   // 应用信息只影响侧栏名字与这一块文字；拿不到就保持默认，不报错、不阻塞。

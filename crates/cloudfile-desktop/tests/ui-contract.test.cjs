@@ -134,7 +134,7 @@ test('settings load renders autostart state and host state without missing eleme
   await vm.runInContext('loadSettings()', ctx);
   assert.equal(elements.get('autostart_note').hidden, true);
   assert.equal(elements.get('workspace_root').value, '/test/workspace');
-  assert.match(elements.get('host-state').textContent, /尚未注册/);
+  assert.match(elements.get('host-state').textContent, /尚未就绪/);
   assert.match(elements.get('version').textContent, /2.2.0/);
 });
 

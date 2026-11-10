@@ -24,8 +24,8 @@ rem Deployment must set release origins explicitly.
 set "BASE_PRIMARY=%CLOUDFILE_INSTALL_SOURCE%"
 set "BASE_MIRROR=%CLOUDFILE_INSTALL_FALLBACK%"
 if not defined BASE_PRIMARY (
-  echo [ERROR] CLOUDFILE_INSTALL_SOURCE is not set.
-  echo Set it to the signed release channel URL before running this installer.
+  echo [错误] 没有找到安装源，无法继续。
+  echo        请使用管理员提供的完整安装包，不要单独复制本文件。
   exit /b 1
 )
 
@@ -50,7 +50,7 @@ set "TARGET=%WORKDIR%\%INSTALLER%"
 if exist "%TARGET%" (
   rem Cached executables outside the supplied bundle also require publisher verification.
   if not defined CLOUDFILE_INSTALL_BOOTSTRAP_SHA256 (
-    echo [ERROR] Cached installer requires CLOUDFILE_INSTALL_BOOTSTRAP_SHA256.
+    echo [错误] 本机缓存的安装组件缺少校验信息，无法确认它是否被篡改。
     set "CODE=1"
     goto end
   )
@@ -61,8 +61,8 @@ if exist "%TARGET%" (
 rem A network-downloaded executable is never a trusted bootstrap on size alone.
 rem Supply its publisher-pinned SHA-256, or ship cloudfile-install.exe alongside this CMD.
 if not defined CLOUDFILE_INSTALL_BOOTSTRAP_SHA256 (
-  echo [ERROR] Cannot download a bootstrap EXE without a pinned SHA-256.
-  echo Put cloudfile-install.exe next to this script, or set CLOUDFILE_INSTALL_BOOTSTRAP_SHA256.
+  echo [错误] 缺少安装组件的校验信息，为安全起见已停止。
+  echo        请把 %INSTALLER% 与本脚本放在同一目录后重试。
   set "CODE=1"
   goto end
 )
@@ -74,11 +74,11 @@ if defined BASE_MIRROR call :fetch "%BASE_MIRROR%/%INSTALLER%"
 if not errorlevel 1 goto run
 
 echo.
-echo [失败] 两个地址都没能下载 %INSTALLER%。
-echo        请检查本机能否访问下面的地址（DNS / 代理 / 防火墙）：
+echo [失败] 下载安装组件失败。
+echo        请确认本机能正常访问公司网络（网络、代理、防火墙）后重试。
+echo        多次失败的话，把下面两行发给管理员：
 echo          %BASE_PRIMARY%
 echo          %BASE_MIRROR%
-echo        也可以把 %INSTALLER% 与本脚本放在同一目录后重试。
 set "CODE=1"
 goto end
 
@@ -91,24 +91,24 @@ if defined CLOUDFILE_INSTALL_BOOTSTRAP_SHA256 (
     rem 缓存不可信但**可以换掉**：删掉后按钉住的哈希重新下载，仍然逐字节校验。
     rem 只有「和脚本放在一起的发布包」对不上才直接拒绝 —— 那是发布物本身有问题。
     if /i "%SOURCE_KIND%"=="cache" (
-      echo [WARN] 本机缓存的安装引导体与当前通道不一致，重新下载...
+      echo [提示] 本机缓存的安装组件与当前安装源不一致，正在重新下载...
       del /f /q "%TARGET%" >nul 2>&1
       call :fetch "%BASE_PRIMARY%/%INSTALLER%"
       if errorlevel 1 if defined BASE_MIRROR call :fetch "%BASE_MIRROR%/%INSTALLER%"
       if errorlevel 1 (
-        echo [ERROR] 引导体下载失败或校验不通过，已停止。
+        echo [错误] 安装组件下载失败或校验不通过，已停止。
         set "CODE=1"
         goto end
       )
     ) else (
-      echo [ERROR] Bootstrap SHA-256 verification failed. Refusing to execute it.
-      echo         请重新下载整包：脚本旁边的 %INSTALLER% 与发布哈希不一致。
+      echo [错误] 安装组件校验不通过，已停止。
+      echo         请重新下载完整安装包后重试；脚本旁边的 %INSTALLER% 与官方发布的不一致。
       set "CODE=1"
       goto end
     )
   )
 )
-echo 通道：%BASE_PRIMARY%
+echo 安装源：%BASE_PRIMARY%
 if defined BASE_MIRROR (
   "%TARGET%" --source "%BASE_PRIMARY%" --source-fallback "%BASE_MIRROR%" %*
 ) else (
@@ -134,10 +134,10 @@ if not "%CODE%"=="0" if defined BASE_MIRROR (
   set "CODE=%ERRORLEVEL%"
 )
 if "%CODE%"=="0" (
-  echo [OK] 下载并通过 sha256 校验：%TARGET%
+  echo [OK] 下载完成，校验通过：%TARGET%
 ) else (
   echo [FAIL] 下载或校验失败，退出码 %CODE%。
-  echo        已依次尝试 curl.exe / certutil.exe / 脚本宿主；三者都不可用或都失败。
+  echo        本机可用的下载方式都试过了，均未成功。
 )
 del /f /q "%TARGET%" >nul 2>&1
 rem 测试模式到此为止：不能落到「安装完成」的横幅，那会把自检结果说成装好了。
@@ -235,12 +235,12 @@ exit /b 0
 if not defined CODE set "CODE=1"
 echo.
 if "%CODE%"=="0" (
-  echo [OK] 安装完成：本地组件已装好。
-  echo      接着到任务中心左侧的「安装引导」，按第 5 步装浏览器扩展。
-  echo      如果上面提示缺少 WebView2、或任务中心没出现，按提示装好运行时后再运行一次本脚本。
+  echo [OK] 安装完成，相关组件已装好。
+  echo      任务中心会在几秒内自动出现；如果没有，重新运行一次本脚本即可。
+  echo      如果提示缺少 WebView2 运行时，按提示装好后再运行一次本脚本。
 ) else (
-  echo [ERROR] 安装没有完成，退出码 %CODE%。
-  echo         请把上面的提示拍照反馈给管理员；再运行一次本脚本通常就能修好。
+  echo [错误] 安装没有完成（错误码 %CODE%）。
+  echo         请把上面的提示拍照发给管理员；多数情况下重新运行一次本脚本就能装好。
 )
 if not "%CLOUDFILE_NO_PAUSE%"=="" exit /b %CODE%
 pause
