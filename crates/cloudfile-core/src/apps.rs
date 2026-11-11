@@ -249,6 +249,48 @@ pub fn for_file<'a>(apps: &'a [Application], name: &str) -> Option<&'a Applicati
     apps.iter().find(|app| app.extensions.contains(&extension))
 }
 
+/// 把 NX 路由的决策写进 `<agent 根>\nx-route.log`（只追加，出错也不影响打开）。
+fn log_nx_route(
+    root: &Path,
+    ugraf: &Path,
+    running: &[crate::nx_router::RunningNx],
+    choice: &Result<crate::nx_router::Choice>,
+) {
+    use std::io::Write;
+    let path = root.join("nx-route.log");
+    let now = crate::now();
+    let sessions: Vec<String> = running
+        .iter()
+        .map(|item| {
+            format!(
+                "{}({})",
+                item.pid,
+                item.executable
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "路径不可读".into())
+            )
+        })
+        .collect();
+    let verdict = match choice {
+        Ok(crate::nx_router::Choice::StartNew) => "StartNew".to_string(),
+        Ok(crate::nx_router::Choice::RouteTo(pid)) => format!("RouteTo({pid})"),
+        Err(error) => format!("拒绝：{error}"),
+    };
+    let line = format!(
+        "{now}\tdetected={}\trunning=[{}]\tchoice={verdict}\n",
+        ugraf.to_string_lossy(),
+        sessions.join("; ")
+    );
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = file.write_all(line.as_bytes());
+    }
+}
+
 /// 子进程的工作目录：`<agent 根>/spawn`。
 ///
 /// 不能用文档目录 —— 那会让"删掉一个文件"变成"删不掉一个空文件夹"。
@@ -316,8 +358,12 @@ pub fn open_path(
             // different NX version, process or Teamcenter session.
             #[cfg(windows)]
             if app.id == "nx" {
-                match crate::nx_router::choose(Path::new(&program), &crate::nx_router::running()?)?
-                {
+                // 路由是"能复用就复用、不能就别乱开"，线上出问题时必须有据可查：
+                // 把检测到的安装、正在运行的 NX、最终选择写进 <agent 根>\nx-route.log。
+                let running = crate::nx_router::running()?;
+                let choice = crate::nx_router::choose(Path::new(&program), &running);
+                crate::apps::log_nx_route(root, Path::new(&program), &running, &choice);
+                match choice? {
                     crate::nx_router::Choice::StartNew => {
                         return spawn(&program, &command, Some(&cwd));
                     }
