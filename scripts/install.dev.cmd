@@ -91,16 +91,19 @@ if defined CLOUDFILE_INSTALL_BOOTSTRAP_SHA256 (
     rem 缓存不可信但**可以换掉**：删掉后按钉住的哈希重新下载，仍然逐字节校验。
     rem 只有「和脚本放在一起的发布包」对不上才直接拒绝 —— 那是发布物本身有问题。
     if /i "%SOURCE_KIND%"=="cache" (
+      echo [WARN] Cached bootstrap digest mismatch; retrying trusted download.
       echo [提示] 本机缓存的安装组件与当前安装源不一致，正在重新下载...
       del /f /q "%TARGET%" >nul 2>&1
       call :fetch "%BASE_PRIMARY%/%INSTALLER%"
       if errorlevel 1 if defined BASE_MIRROR call :fetch "%BASE_MIRROR%/%INSTALLER%"
       if errorlevel 1 (
+        echo [ERROR] Bootstrap download or SHA-256 verification failed.
         echo [错误] 安装组件下载失败或校验不通过，已停止。
         set "CODE=1"
         goto end
       )
     ) else (
+      echo [ERROR] SHA-256 verification failed.
       echo [错误] 安装组件校验不通过，已停止。
       echo         请重新下载完整安装包后重试；脚本旁边的 %INSTALLER% 与官方发布的不一致。
       set "CODE=1"
