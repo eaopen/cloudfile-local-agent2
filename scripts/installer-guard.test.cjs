@@ -21,9 +21,12 @@ for (const script of ['install.cmd', 'install.dev.cmd']) {
     assert.match(contents, /call :hash_file "%TARGET%"/);
     assert.match(contents, /if \/i not "%CF_HASH%"=="%CLOUDFILE_INSTALL_BOOTSTRAP_SHA256%"/);
     assert.match(contents, /call :verify/);
-    assert.match(contents, /\[WARN\] Cached bootstrap digest mismatch/);
-    assert.match(contents, /\[ERROR\] Bootstrap download or SHA-256 verification failed/);
-    assert.match(contents, /\[ERROR\] SHA-256 verification failed/);
+    // 2026-11-11：这几条提示已改成面向客户的中文（脚本是 GBK，用例按 latin1 读，
+    // 断言中文不可靠），改为断言"英文旧文案不再出现"，同时钉住缓存失效后的重试逻辑。
+    assert.doesNotMatch(contents, /\[WARN\] Cached bootstrap digest mismatch/);
+    assert.doesNotMatch(contents, /Bootstrap download or SHA-256 verification failed/);
+    assert.doesNotMatch(contents, /\[ERROR\] SHA-256 verification failed/);
+    assert.match(contents, /del \/f \/q "%TARGET%"/);
     assert.match(contents, /exit \/b 3/);
     assert.doesNotMatch(contents, /ExecutionPolicy Bypass/i);
     assert.doesNotMatch(contents, /LSS 1000000/i);
