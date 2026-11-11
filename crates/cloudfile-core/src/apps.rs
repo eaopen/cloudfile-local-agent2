@@ -260,6 +260,15 @@ fn spawn_directory(root: &Path) -> PathBuf {
     dir
 }
 
+#[derive(Debug, Clone)]
+pub struct OpenedProcess {
+    pub pid: u32,
+    pub app: String,
+    /// ugs_router.exe exits quickly; the real NX session may keep this file in memory
+    /// without a file handle. Require a human deletion confirmation after routing.
+    pub routed_nx: bool,
+}
+
 /// Rule, then detected application, then the OS default. The first two carry an
 /// explicit program chosen by the user or by this table; the default handler is
 /// only used for known document types.
@@ -268,7 +277,7 @@ pub fn open_path(
     mode: &str,
     name: &str,
     path: &Path,
-) -> Result<Option<(u32, String)>> {
+) -> Result<Option<OpenedProcess>> {
     if !path.is_absolute() {
         bail!("working copy path is not absolute");
     }
@@ -301,6 +310,42 @@ pub fn open_path(
                 .iter()
                 .map(|argument| argument.replace(PLACEHOLDER, &text))
                 .collect();
+            // The installed Windows NX 7.5 path (ugraf -retrieve:) is proven
+            // on customer workstations. Only an already-running, uniquely matched
+            // NX may be given a file via the Siemens router; never guess a
+            // different NX version, process or Teamcenter session.
+            #[cfg(windows)]
+            if app.id == "nx" {
+                match crate::nx_router::choose(Path::new(&program), &crate::nx_router::running()?)?
+                {
+                    crate::nx_router::Choice::StartNew => {
+                        return spawn(&program, &command, Some(&cwd));
+                    }
+                    crate::nx_router::Choice::RouteTo(pid) => {
+                        let router = crate::nx_router::router(Path::new(&program)).ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "NX 已在运行，但安装目录未找到 ugs_router.exe。为了不重复打开 NX，请在当前 NX 窗口中手动打开本地工作副本。"
+                            )
+                        })?;
+                        // Separate arguments: no CMD/PowerShell, no global .prt association.
+                        // Router spawn success != confirmation NX displayed the document.
+                        spawn(
+                            &router.to_string_lossy(),
+                            &[
+                                "-ug".into(),
+                                "-use_file_dir".into(),
+                                path.to_string_lossy().into_owned(),
+                            ],
+                            Some(&cwd),
+                        )?;
+                        return Ok(Some(OpenedProcess {
+                            pid,
+                            app: "ugraf.exe".to_string(),
+                            routed_nx: true,
+                        }));
+                    }
+                }
+            }
             return spawn(&program, &command, Some(&cwd));
         }
     }
@@ -353,7 +398,7 @@ fn spawn(
     program: &str,
     arguments: &[String],
     directory: Option<&Path>,
-) -> Result<Option<(u32, String)>> {
+) -> Result<Option<OpenedProcess>> {
     if program.contains('\0') || arguments.iter().any(|argument| argument.contains('\0')) {
         bail!("invalid application command");
     }
@@ -376,7 +421,11 @@ fn spawn(
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| program.to_string());
-    Ok(Some((child.id(), exe)))
+    Ok(Some(OpenedProcess {
+        pid: child.id(),
+        app: exe,
+        routed_nx: false,
+    }))
 }
 
 /// Opens a directory in the platform file manager.

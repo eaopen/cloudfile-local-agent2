@@ -2197,7 +2197,7 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
                 let state = download_handle.state::<State>();
                 // 每 ~60 秒扫一次：删除时程序还开着导致没清掉的空目录，等它退出后补删。
                 ticks = ticks.wrapping_add(1);
-                if ticks % 150 == 0 {
+                if ticks.is_multiple_of(150) {
                     cloudfile_core::session::prune_empty_workspace(&state.root);
                 }
                 // 任务落盘/消失都通知界面刷新：否则文件都打开了，列表里还要等好几秒。

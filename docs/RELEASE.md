@@ -31,3 +31,11 @@
 - WebView2 **缺失**的机器单独验一遍（2026-11-02 现场）：安装照样成功、`--status` 报告 `runtime.task_center=false` 与 `runtime.installer.available=true`、双击任务中心弹出中文「立即安装」询问（不再是英文原生错误框）、点「是」后以**普通用户**完成安装并在同一次启动里打开任务中心；点「否」或让安装失败时，托盘常驻且菜单有「安装 WebView2 运行时（无需管理员）」。另验：`cloudfile-native-host --install-webview2` 在普通用户下静默成功；把 `installer.sha256` 改错后 Agent **拒绝执行**。**必须用 release 构建 + 真实 Windows 验**：那句英文框只在 `not(debug_assertions)` + Windows 出现，debug 自测发现不了。托盘被禁 + 缺运行时的零窗口零托盘组合：进程仍后台运行（日志有记录），退出只能靠任务管理器 —— 验收时明确记录这一行为。
 - 验证 macOS ARM64/Intel 用户级安装、菜单栏/Dock、Gatekeeper 提示、不同 Chrome Profile 隔离、启动/卸载后用户数据保护。
 - 若产品未准备正式发行，不接管 `com.cloudfile.current_agent` 与 `com.cloudfile.agent2`，开发阶段始终保持 `com.cloudfile.agent22.dev`。
+
+## NX 已有会话路由的 Windows 实机验收（2026-11）
+
+- **保留现场已验证的老版本路径**：没有正在运行的 NX 会话，仍按原有版本探测与 ugraf.exe 的 -retrieve: 参数启动；NX 7.5 的中文路径限制与初始化工作目录不变。用户定义的 open_rules 保持最高优先级。
+- 已有且仅有**一个** ugraf.exe 进程时，使用原生 ToolHelp + QueryFullProcessImageNameW 确认它与 Agent 当前检测的 NX 可执行路径相同，且对应目录的 ugs_router.exe 实际存在，才用 -ug -use_file_dir 传递文件。绝不修改系统 .prt 关联，不调用 CMD/PowerShell；路由启动成功不代表模型已经显示。
+- 多个 NX 窗口/版本、进程路径不可读取、安装版本不一致、运行但缺少 router：均保持原有 NX 会话并明确提示在目标 NX 窗口手工打开工作副本；**不得凭猜测再启动一个 ugraf.exe**。
+- 路由后 opened.json 保存的是**实际运行的 NX PID**（不是短命路由进程），并增加 routed_nx 兼容字段。删除前先测试真实文件占用；即使早前 NX PID 消失，只要曾路由过这份副本仍须用户明确确认，绝不能自动删。
+- 待 Windows 10/11 实机验证：NX 7.5 / 12 / 2306+、NX 未启动/单会话/多个会话/版本不匹配、Teamcenter 管理模式、老文件中文路径、同文件重复打开、保存回传、待确认提交、删除与工作副本回收；成功标准是**文件在目标已运行 NX 会话显示**，不是 router.exe 成功启动。
