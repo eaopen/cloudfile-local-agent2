@@ -2211,7 +2211,13 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
                     .duration_since(UNIX_EPOCH)
                     .map(|now| (u64::from(now.subsec_nanos()) + u64::from(std::process::id())) % 601)
                     .unwrap_or(0);
-                let mut next_check = SystemTime::now() + Duration::from_secs(5);
+                // 默认：启动 5 秒后查一次，之后每 4 小时（+抖动）。
+                // 排查/验收时可用环境变量缩短，免得等四个小时：
+                //   CLOUDFILE_UPDATE_CHECK_FIRST_SECONDS=3
+                //   CLOUDFILE_UPDATE_CHECK_SECONDS=20
+                let first = env_seconds("CLOUDFILE_UPDATE_CHECK_FIRST_SECONDS").unwrap_or(5);
+                let fixed_interval = env_seconds("CLOUDFILE_UPDATE_CHECK_SECONDS");
+                let mut next_check = SystemTime::now() + Duration::from_secs(first.max(1));
                 let mut failures = 0u32;
                 let mut last_announced = String::new();
                 loop {
@@ -2249,7 +2255,18 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
                             last_announced.clear();
                         }
                     }
-                    next_check = SystemTime::now() + update_check_delay(failures, jitter);
+                    let delay = match fixed_interval {
+                        Some(seconds) => Duration::from_secs(seconds.max(1)),
+                        None => update_check_delay(failures, jitter),
+                    };
+                    log_update_check(
+                        &update_root,
+                        error.is_some(),
+                        probe.get("latest_version").and_then(Value::as_str).unwrap_or(""),
+                        probe.get("update_available").and_then(Value::as_bool).unwrap_or(false),
+                        delay.as_secs(),
+                    );
+                    next_check = SystemTime::now() + delay;
                 }
             });
             let guard_handle = handle.clone();
@@ -2426,6 +2443,39 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
 }
 
 /// Checks are intentionally coarse: file work never waits for the periodic checker.
+/// 读一个"秒数"环境变量；没设置或写得不像数字就当没有。
+fn env_seconds(name: &str) -> Option<u64> {
+    std::env::var(name).ok()?.trim().parse::<u64>().ok()
+}
+
+/// 每次自动检查更新追加一行到 `<agent 根>\update-check.log`。
+///
+/// 「4 小时那次到底跑没跑」在界面上看不出来，落一行日志既方便验收，
+/// 也方便现场判断"提示没弹"是没检查、还是检查了但版本不比当前新。
+fn log_update_check(root: &Path, failed: bool, latest: &str, available: bool, next_seconds: u64) {
+    use std::io::Write;
+    let line = if failed {
+        format!(
+            "{}\t检查失败\t下次 {}s 后重试\n",
+            cloudfile_core::now(),
+            next_seconds
+        )
+    } else {
+        format!(
+            "{}\t最新={latest}\t可用={available}\t下次 {}s 后再查\n",
+            cloudfile_core::now(),
+            next_seconds
+        )
+    };
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(root.join("update-check.log"))
+    {
+        let _ = file.write_all(line.as_bytes());
+    }
+}
+
 fn update_check_delay(failures: u32, jitter_seconds: u64) -> std::time::Duration {
     if failures == 0 {
         std::time::Duration::from_secs(4 * 3600 + jitter_seconds.min(600))
