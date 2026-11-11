@@ -1053,12 +1053,52 @@ fn setup_state(state: tauri::State<'_, State>) -> Result<Value, String> {
 #[tauri::command]
 async fn setup_apply(state: tauri::State<'_, State>) -> Result<Value, String> {
     let root = state.root.clone();
-    tauri::async_runtime::spawn_blocking(move || -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<Value, String> { apply_setup(&root) })
+        .await
+        .map_err(|_| "安装步骤执行失败".to_string())?
+}
+
+/// 首次运行时把引导那五步自动做掉。
+///
+/// 安装脚本装完会直接把任务中心打开，用户到这里看到的应该是「已经装好了」，
+/// 而不是再点一次「一键完成」。只跑一次，结果写 <root>/setup-auto.json；
+/// 用户没点「完成」也不影响 —— 引导页照样显示真实结果。
+fn spawn_first_run_setup(app: tauri::AppHandle, root: PathBuf) {
+    std::thread::spawn(move || {
+        let marker = root.join("setup-auto.json");
+        if marker.exists() {
+            return;
+        }
+        let settings = cloudfile_core::settings::load(&root).unwrap_or_default();
+        if settings.setup_completed {
+            return;
+        }
+        let ok = match apply_setup(&root) {
+            Ok(value) => value["steps"]
+                .as_array()
+                .map(|steps| steps.iter().all(|step| step["ok"] == true))
+                .unwrap_or(false),
+            Err(_) => false,
+        };
+        let _ = cloudfile_core::storage::write(
+            &marker,
+            &json!({"at": cloudfile_core::now(), "ok": ok}),
+        );
+        let _ = app.emit("setup-changed", ());
+    });
+}
+
+/// 安装引导那五件事的实际执行体。
+///
+/// 首次运行时还要被启动线程调用一次（见 `spawn_first_run_setup`）：安装脚本装完就直接
+/// 打开任务中心，用户不该为了"注册浏览器连接 / 部署扩展"再点一次按钮。
+fn apply_setup(root: &Path) -> Result<Value, String> {
+    {
         let mut steps = Vec::new();
 
         // 1) Trust remains an explicit user/admin action, never silently
         // seed enterprise URLs into a public reusable client.
-        let trusted_count = session::config(&root)
+        let trusted_count = session::config(root)
             .map(|config| config.allowed_origins.len())
             .unwrap_or_default();
         steps.push(json!({"key":"trusted","ok":trusted_count > 0,
@@ -1069,9 +1109,9 @@ async fn setup_apply(state: tauri::State<'_, State>) -> Result<Value, String> {
         }}));
 
         // 2) 工作目录：默认地址在 D:\CloudFileAgent2\workspace（可在设置里改）。
-        let workspace = cloudfile_core::workspace::resolve(&root);
+        let workspace = cloudfile_core::workspace::resolve(root);
         steps.push(
-            match std::fs::create_dir_all(cloudfile_core::workspace::tasks_root(&root)) {
+            match std::fs::create_dir_all(cloudfile_core::workspace::tasks_root(root)) {
                 Ok(()) => json!({"key":"workspace","ok":true,
                     "detail":workspace.to_string_lossy()}),
                 Err(error) => json!({"key":"workspace","ok":false,
@@ -1097,19 +1137,19 @@ async fn setup_apply(state: tauri::State<'_, State>) -> Result<Value, String> {
         });
 
         // 4) 开机自启：企业机器上 Run 键可能被策略锁死，失败只报告，不阻断安装。
-        steps.push(match autostart::install(&root, &desktop_binary()) {
+        steps.push(match autostart::install(root, &desktop_binary()) {
             Ok(item) => json!({"key":"autostart","ok":true,"detail":item.id()}),
             Err(error) => json!({"key":"autostart","ok":false,"detail":format!("{error:#}")}),
         });
 
         // 5) 部署扩展：从通道下载并解包到 <agent 根>\extension。
         //    没有更新源时这一步会失败 —— 那也不阻塞其余四步，用户可手动解压。
-        steps.push(match native::update_extension(&root) {
+        steps.push(match native::update_extension(root) {
             Ok(detail) => {
                 // 把扩展实际解压到的目录记进 config：引导页、设置页、后续更新都读同一处，
                 // 免得"装好了但不知道该去哪儿加载"。
-                let target = extension_dir(&root);
-                if let Ok(mut config) = session::config(&root) {
+                let target = extension_dir(root);
+                if let Ok(mut config) = session::config(root) {
                     let text = target.to_string_lossy().into_owned();
                     if config.extension_dir.as_deref() != Some(text.as_str()) {
                         config.extension_dir = Some(text);
@@ -1123,9 +1163,7 @@ async fn setup_apply(state: tauri::State<'_, State>) -> Result<Value, String> {
         });
 
         Ok(json!({"steps": steps}))
-    })
-    .await
-    .map_err(|_| "安装步骤执行失败".to_string())?
+    }
 }
 
 /// 引导页的「完成」：只记一个界面状态，不改任何安装事实。
@@ -2185,6 +2223,7 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
             // 应用信息（品牌名）自动刷新：跟启动自检一样是「后台顺手做」，
             // 失败只落日志，不影响任务与文件操作。
             spawn_profile_refresh(handle.clone(), root.clone());
+            spawn_first_run_setup(handle.clone(), root.clone());
             // 「正在下载」要尽早看见：界面转的是 10 秒一次的全量刷新，等它太慢。
             // 这里 400ms 看一眼任务目录里的标记，出现就立刻弹提示。
             let download_handle = handle.clone();

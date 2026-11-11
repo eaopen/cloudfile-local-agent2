@@ -1145,6 +1145,8 @@ function wire() {
   };
 
   listen('tasks-changed', () => refresh());
+  // 首次启动会自动把引导五步做掉（注册浏览器连接、部署扩展…），做完通知界面重画一次。
+  listen('setup-changed', () => loadSetup().catch(() => {}));
   // 后台自动刷新（或别处同步）成功后主进程会推一份新的概览：直接用上，
   // 不用重启也不用再点一次同步。payload 缺失时保持现状。
   listen('app-profile', ({ payload }) => {
