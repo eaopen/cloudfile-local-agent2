@@ -462,36 +462,56 @@ fn spawn_profile_refresh(app: tauri::AppHandle, root: PathBuf) {
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(30));
         loop {
-            let use_test = settings::load(&root).unwrap_or_default().use_test_server;
-            let targets = profile::refresh_due(
-                &root,
-                profile::REFRESH_INTERVAL,
-                cloudfile_core::VERSION,
-                use_test,
-            );
-            let mut changed = false;
-            for address in targets {
-                match profile::sync(&root, &address) {
-                    Ok(result) => {
-                        // 按环境记住这个地址：切环境/下次刷新都不用再逐个候选去试。
-                        let environment = result["environment"].as_str().unwrap_or("prod");
-                        let _ = profile::remember_source(&root, &address, environment);
-                        log_profile_refresh(&root, &format!("ok {environment} {address}"));
-                        changed = true;
-                    }
-                    // 两套配置独立：一个环境拉失败不影响另一个，也不清缓存。
-                    Err(error) => log_profile_refresh(&root, &format!("failed {address}: {error}")),
-                }
-            }
-            if changed {
-                let _ = app.emit("app-profile", profile::overview(&root, use_test));
-            }
-            // 记下"这个版本已经拉过"，升级后版本变了就会立刻再拉一次。
-            let _ = settings::update(&root, |current| {
-                current.profile_pull_version = Some(cloudfile_core::VERSION.to_string());
-            });
+            refresh_profiles_now(&app, &root, profile::REFRESH_INTERVAL);
             std::thread::sleep(std::time::Duration::from_secs(60 * 60));
         }
+    });
+}
+
+/// 「检查更新」那次顺带刷新的最短间隔。
+///
+/// 检查更新在失败退避时可能 15 分钟一次，应用信息没必要跟得那么紧；
+/// 正常情况（启动 + 每 4 小时）则每次都会重新拉一遍 —— 这就是"检查更新时同步应用信息"。
+const PROFILE_REFRESH_WITH_UPDATE: u64 = 10 * 60;
+
+/// 按当前「测试/生产」环境，把该拉的应用信息拉一遍；有变化时通知界面。
+///
+/// `interval` 是"多久算过期"：每小时自查用 24 小时，检查更新那条路径用 10 分钟。
+/// 版本升级、绑定缺失、记录过期这几种情况不看间隔，总是立刻拉。
+fn refresh_profiles_now(app: &tauri::AppHandle, root: &Path, interval: u64) {
+    let use_test = settings::load(root).unwrap_or_default().use_test_server;
+    let mut targets = profile::refresh_due(root, interval, cloudfile_core::VERSION, use_test);
+    // 按当前环境只刷对应的那一份：测试态别去动生产的品牌缓存，反之亦然。
+    // 这个环境还没有记住地址时才退回"全部候选"，让发现流程照常工作。
+    let environment = if use_test { "test" } else { "prod" };
+    if let Some(address) = session::config(root)
+        .ok()
+        .and_then(|config| config.profile_sources.get(environment).cloned())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        targets.retain(|candidate| candidate == &address);
+    }
+    let mut changed = false;
+    for address in targets {
+        match profile::sync(root, &address) {
+            Ok(result) => {
+                // 按环境记住这个地址：切环境/下次刷新都不用再逐个候选去试。
+                let environment = result["environment"].as_str().unwrap_or("prod");
+                let _ = profile::remember_source(root, &address, environment);
+                log_profile_refresh(root, &format!("ok {environment} {address}"));
+                changed = true;
+            }
+            // 两套配置独立：一个环境拉失败不影响另一个，也不清缓存。
+            Err(error) => log_profile_refresh(root, &format!("failed {address}: {error}")),
+        }
+    }
+    if changed {
+        let _ = app.emit("app-profile", profile::overview(root, use_test));
+    }
+    // 记下"这个版本已经拉过"，升级后版本变了就会立刻再拉一次。
+    let _ = settings::update(root, |current| {
+        current.profile_pull_version = Some(cloudfile_core::VERSION.to_string());
     });
 }
 
@@ -2266,6 +2286,9 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
                         probe.get("update_available").and_then(Value::as_bool).unwrap_or(false),
                         delay.as_secs(),
                     );
+                    // 检查更新的同时刷新应用信息（测试/生产各拉各的）：
+                    // 启动那次和之后每 4 小时那次都会走到这里。
+                    refresh_profiles_now(&update_handle, &update_root, PROFILE_REFRESH_WITH_UPDATE);
                     next_check = SystemTime::now() + delay;
                 }
             });
