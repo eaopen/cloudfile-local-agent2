@@ -11,10 +11,20 @@ for (const script of ['install.cmd', 'install.dev.cmd']) {
     const digestGate = contents.indexOf('if not defined CLOUDFILE_INSTALL_BOOTSTRAP_SHA256');
     const networkFetch = contents.indexOf('call :fetch');
     assert.ok(digestGate > 0 && networkFetch > digestGate);
-    assert.match(contents, /Invoke-WebRequest/);
-    assert.match(contents, /Get-FileHash -Algorithm SHA256/);
-    assert.match(contents, /-ine \$want/);
+    // 2026-11-09 shipped Windows compatibility path: external PowerShell is
+    // only a last-resort downloader, not the mandatory hashing engine.
+    // The old tests incorrectly required Get-FileHash and made CI fail even
+    // though real Win10/11 customer installers already use certutil.
+    assert.match(contents, /set "CF_CURL=%SystemRoot%\\System32\\curl\.exe"/);
+    assert.match(contents, /set "CF_CERTUTIL=%SystemRoot%\\System32\\certutil\.exe"/);
+    assert.match(contents, /-hashfile "%~1" SHA256/);
+    assert.match(contents, /call :hash_file "%TARGET%"/);
+    assert.match(contents, /if \/i not "%CF_HASH%"=="%CLOUDFILE_INSTALL_BOOTSTRAP_SHA256%"/);
     assert.match(contents, /call :verify/);
+    assert.match(contents, /\[WARN\] Cached bootstrap digest mismatch/);
+    assert.match(contents, /\[ERROR\] Bootstrap download or SHA-256 verification failed/);
+    assert.match(contents, /\[ERROR\] SHA-256 verification failed/);
+    assert.match(contents, /exit \/b 3/);
     assert.doesNotMatch(contents, /ExecutionPolicy Bypass/i);
     assert.doesNotMatch(contents, /LSS 1000000/i);
   });

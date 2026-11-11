@@ -47,7 +47,8 @@ impl Check {
 
 /// 跑完所有检查。`native_host` 是调用方认为的 native host 路径（桌面进程与它同级）。
 pub fn run(root: &Path, native_host: &Path) -> Value {
-    let checks = vec![
+    #[allow(unused_mut)]
+    let mut checks = vec![
         private_store(root),
         mailbox(root),
         single_instance(root),
@@ -61,6 +62,11 @@ pub fn run(root: &Path, native_host: &Path) -> Value {
         login_item(),
         update_state(root),
     ];
+    #[cfg(windows)]
+    {
+        checks.push(windows_platform());
+        checks.push(windows_install_root(native_host));
+    }
     let ok = checks.iter().all(|check| check.ok);
     json!({
         "ok": ok,
@@ -267,6 +273,81 @@ fn update_state(root: &Path) -> Check {
     )
 }
 
+/// Windows 10/11 share the NT 10.0 family; product name often says
+/// "Windows 10" even on Windows 11, so classify by build number.
+#[cfg(any(windows, test))]
+fn windows_family(build: u32, server_installation: bool) -> &'static str {
+    if server_installation {
+        return "Windows Server（非当前桌面验收目标）";
+    }
+    match build {
+        22000.. => "Windows 11",
+        10240..=21999 => "Windows 10",
+        _ => "旧版或未知 Windows",
+    }
+}
+
+#[cfg(windows)]
+fn windows_platform() -> Check {
+    let registry = r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion";
+    let build = crate::winreg::read_string(registry, "CurrentBuildNumber")
+        .and_then(|value| value.parse::<u32>().ok());
+    let is_server = crate::winreg::read_string(registry, "InstallationType")
+        .as_deref()
+        .is_some_and(|kind| kind.to_ascii_lowercase().contains("server"));
+    match build {
+        Some(number) => Check::report(
+            "windows-platform",
+            format!(
+                "{} / build {} / {} / 进程运行权限由企业策略控制",
+                windows_family(number, is_server),
+                number,
+                std::env::consts::ARCH
+            ),
+        ),
+        None => Check::report(
+            "windows-platform",
+            format!(
+                "系统构建号不可读取 / {}；需在现场核对 Windows 10/11",
+                std::env::consts::ARCH
+            ),
+        ),
+    }
+}
+
+/// Updates require a writable bin/ directory even when the executable itself
+/// runs from a read-only user ZIP location. No UAC; never write under Program Files.
+#[cfg(windows)]
+fn windows_install_root(native_host: &Path) -> Check {
+    use std::fs::OpenOptions;
+    let root = update::install_root(native_host);
+    let dir = root.join("bin");
+    // Do not create a whole installation tree from a read-only self-test.
+    if !dir.is_dir() {
+        return Check::report(
+            "windows-install-writable",
+            format!(
+                "{} 尚无 bin 目录；正式升级时需要当前用户可写",
+                dir.display()
+            ),
+        );
+    }
+    let unique = format!(".cf-selftest-{}-{}.tmp", std::process::id(), crate::now());
+    let probe = dir.join(unique);
+    match OpenOptions::new().write(true).create_new(true).open(&probe) {
+        Ok(file) => {
+            drop(file);
+            let _ = std::fs::remove_file(&probe);
+            Check::pass("windows-install-writable",
+                format!("{} 允许当前用户写入，无需管理员权限", dir.display()))
+        }
+        Err(error) => Check::fail("windows-install-writable", format!(
+            "{} 当前用户无法写入（{}）。请将绿色包迁移至用户可写目录后再升级，不要删除工作副本或提权覆盖系统目录。",
+            dir.display(), error
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,6 +377,18 @@ mod tests {
     }
 
     #[test]
+    fn windows_build_is_classified_by_build_not_product_name() {
+        assert_eq!(windows_family(19045, false), "Windows 10");
+        assert_eq!(windows_family(22000, false), "Windows 11");
+        assert_eq!(windows_family(26100, false), "Windows 11");
+        assert_eq!(
+            windows_family(26100, true),
+            "Windows Server（非当前桌面验收目标）"
+        );
+        assert_eq!(windows_family(7601, false), "旧版或未知 Windows");
+    }
+
+    #[test]
     fn every_check_reports_and_the_report_shape_is_stable() {
         let (_dir, root) = storage::test_root();
         let host = root.join("cloudfile-native-host");
@@ -304,23 +397,24 @@ mod tests {
 
         // 名字固定：现场排查时脚本按名字取值，改名等于改接口。
         let names: Vec<String> = checks(&report).into_iter().map(|c| c.0).collect();
-        assert_eq!(
-            names,
-            vec![
-                "private-store",
-                "mailbox",
-                "single-instance",
-                "peer-binary",
-                "component",
-                "registration",
-                "task-store",
-                "exit-assessment",
-                "webview2",
-                "extension",
-                "login-item",
-                "update-source",
-            ]
-        );
+        #[allow(unused_mut)]
+        let mut expected = vec![
+            "private-store",
+            "mailbox",
+            "single-instance",
+            "peer-binary",
+            "component",
+            "registration",
+            "task-store",
+            "exit-assessment",
+            "webview2",
+            "extension",
+            "login-item",
+            "update-source",
+        ];
+        #[cfg(windows)]
+        expected.extend(["windows-platform", "windows-install-writable"]);
+        assert_eq!(names, expected);
         assert!(report["ok"].is_boolean());
         assert_eq!(report["root"], json!(root.to_string_lossy()));
         // 探针文件不许留下。

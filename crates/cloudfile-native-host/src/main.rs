@@ -738,7 +738,8 @@ fn ensure_install_root(install: &Path) -> anyhow::Result<()> {
     std::fs::write(&bin_probe, b"ok").with_context(|| {
         format!(
             "安装目录的 bin 子目录不可写：{}\n\
-             请以管理员身份重新运行 install.cmd，或先删除该目录再重装。",
+             请把绿色包解压到当前用户有写入权限的目录（如 %LOCALAPPDATA%\\CloudFileAgent），
+             然后重新运行安装/引导；无需管理员权限，也不要删除原工作副本。",
             bin.display()
         )
     })?;
@@ -946,18 +947,9 @@ fn launch_desktop(desktop: Option<&Path>) -> anyhow::Result<bool> {
         eprintln!("警告：找不到 {DESKTOP_NAME}，任务中心没能自动启动；装好后手动双击即可。");
         return Ok(false);
     };
-    // 修改逻辑（2026-10-26）：装/升级完成后旧的任务中心还在跑，单实例锁会把新实例顶掉，
-    // 用户看到的仍是旧版本（现场就是这样）。先停掉旧的，再拉新的。
-    #[cfg(windows)]
-    {
-        let _ = std::process::Command::new("taskkill")
-            .args(["/F", "/IM", DESKTOP_NAME])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        // 给它一点时间释放 desktop.lock。
-        std::thread::sleep(std::time::Duration::from_millis(400));
-    }
+    // 绝不能按进程名 taskkill /F：会误杀别的安装目录/用户的 Agent，也会
+    // 中断正在续租或保存的工作文件。新进程已有 --await-instance 的单实例交接；
+    // 老进程仍在处理任务时允许本次启动先交给它，明确提示退出后再生效。
     let mut command = std::process::Command::new(desktop);
     // 修改逻辑（2026-10-29）：**不带 `--autostart`**。
     // `--autostart` 是给登录项用的（有托盘时把窗口藏起来），装完也带上的话，用户第一次
@@ -972,13 +964,15 @@ fn launch_desktop(desktop: Option<&Path>) -> anyhow::Result<bool> {
     match command.spawn() {
         Ok(_) => {
             // 装完这一屏就是「下一步做什么」，值得在控制台说一句。
-            eprintln!("任务中心已启动：首次使用请按窗口里的「安装引导」装浏览器扩展。");
+            eprintln!(
+                "已请求启动任务中心；若旧版本仍在运行，请先安全退出旧版，再打开新版任务中心。"
+            );
             Ok(true)
         }
         Err(error) => {
             // 启动失败不算安装失败：二进制已经就位，用户可以自己双击。
             eprintln!(
-                "警告：任务中心没能自动启动（{error}）；请手动双击 {}",
+                "警告：未能请求启动任务中心（{error}）；请手动双击 {}",
                 desktop.display()
             );
             Ok(false)

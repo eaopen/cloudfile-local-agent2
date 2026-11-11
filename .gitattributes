@@ -4,4 +4,4 @@
 
 # 安装入口脚本必须是 GBK + CRLF + 无 BOM（cmd 的解析与中文提示都依赖这一点），
 # 禁止 git 做换行转换。
-*.cmd -text
+*.cmd -text whitespace=cr-at-eol

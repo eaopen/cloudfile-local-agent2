@@ -12,7 +12,9 @@
 //! 现在直接走 advapi32（`winreg` crate），不起进程、不依赖任何外部程序。
 
 use anyhow::{bail, Result};
-use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE};
+use winreg::enums::{
+    HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE,
+};
 use winreg::RegKey;
 
 /// 注册表根。调用方继续只维护一个「带 hive 的完整键路径」（例如
@@ -22,6 +24,7 @@ use winreg::RegKey;
 pub enum Hive {
     CurrentUser,
     LocalMachine,
+    ClassesRoot,
 }
 
 impl Hive {
@@ -29,6 +32,7 @@ impl Hive {
         match self {
             Hive::CurrentUser => RegKey::predef(HKEY_CURRENT_USER),
             Hive::LocalMachine => RegKey::predef(HKEY_LOCAL_MACHINE),
+            Hive::ClassesRoot => RegKey::predef(HKEY_CLASSES_ROOT),
         }
     }
 }
@@ -38,6 +42,7 @@ pub fn split_hive(key: &str) -> Result<(Hive, String)> {
     for (prefix, hive) in [
         ("HKCU\\", Hive::CurrentUser),
         ("HKLM\\", Hive::LocalMachine),
+        ("HKCR\\", Hive::ClassesRoot),
     ] {
         if let Some(rest) = key.strip_prefix(prefix) {
             if rest.is_empty() {
@@ -120,6 +125,7 @@ mod tests {
             split_hive(r"HKCU\Software\X").unwrap().1,
             r"Software\X".to_string()
         );
+        assert_eq!(split_hive(r"HKCR\seafile").unwrap().0, Hive::ClassesRoot);
         assert!(split_hive(r"HKEY_LOCAL_MACHINE\Software\X").is_err());
         assert!(split_hive("HKCU\\").is_err());
     }

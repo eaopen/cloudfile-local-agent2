@@ -31,45 +31,15 @@ pub fn open_command(binary: &Path) -> Result<String> {
     Ok(format!(r#""{raw}" --open-uri "%1""#))
 }
 
-#[cfg(windows)]
-fn reg(args: &[&str]) -> Result<()> {
-    let output = std::process::Command::new("reg.exe").args(args).output()?;
-    if !output.status.success() {
-        bail!(
-            "current-user registry command failed: {}",
-            args.first().unwrap_or(&"reg")
-        );
-    }
-    Ok(())
-}
-
+// Native registry access: no CMD/PowerShell/reg.exe, no PATH lookup or console window.
 #[cfg(windows)]
 fn exists(key: &str) -> bool {
-    std::process::Command::new("reg.exe")
-        .args(["query", key])
-        .output()
-        .is_ok_and(|o| o.status.success())
+    crate::winreg::key_exists(key)
 }
 
 #[cfg(windows)]
 fn value(key: &str, name: &str) -> Option<String> {
-    let out = std::process::Command::new("reg.exe")
-        .args(["query", key, "/v", name])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    // ProgID and our ownership marker are ASCII, independent of the
-    // Windows console locale. Do not parse arbitrary registry data as a URI.
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .find_map(|line| {
-            line.split_once("REG_SZ").and_then(|(_, tail)| {
-                let v = tail.trim();
-                (!v.is_empty()).then(|| v.to_string())
-            })
-        })
+    crate::winreg::read_string(key, name)
 }
 
 #[cfg(windows)]
@@ -79,18 +49,12 @@ fn owned(key: &str) -> bool {
 
 #[cfg(windows)]
 fn add(key: &str, name: Option<&str>, value: &str) -> Result<()> {
-    match name {
-        Some(name) => reg(&["add", key, "/v", name, "/t", "REG_SZ", "/d", value, "/f"]),
-        None => reg(&["add", key, "/ve", "/t", "REG_SZ", "/d", value, "/f"]),
-    }
+    crate::winreg::write_string(key, name.unwrap_or(""), value)
 }
 
 #[cfg(windows)]
 fn remove(key: &str) -> Result<()> {
-    if exists(key) {
-        reg(&["delete", key, "/f"])?;
-    }
-    Ok(())
+    crate::winreg::delete_key(key)
 }
 
 #[cfg(windows)]
@@ -172,13 +136,7 @@ pub fn uninstall() -> Result<()> {
     if value(r"HKCU\Software\RegisteredApplications", APP_NAME).as_deref()
         == Some(r"Software\CloudFileAgent2\Capabilities")
     {
-        reg(&[
-            "delete",
-            r"HKCU\Software\RegisteredApplications",
-            "/v",
-            APP_NAME,
-            "/f",
-        ])?;
+        crate::winreg::delete_value(r"HKCU\Software\RegisteredApplications", APP_NAME)?;
     }
     for (_, progid) in PROGIDS {
         remove(&format!(r"HKCU\Software\Classes\{progid}"))?;
