@@ -250,6 +250,10 @@ pub fn for_file<'a>(apps: &'a [Application], name: &str) -> Option<&'a Applicati
 }
 
 /// 把 NX 路由的决策写进 `<agent 根>\nx-route.log`（只追加，出错也不影响打开）。
+///
+/// 只有 Windows 的 NX 会话复用会走到这里，其它平台加不加这个属性都是死代码
+/// —— 而 workspace 用 `-D warnings` 编译，死代码会直接让 CI 失败。
+#[cfg(windows)]
 fn log_nx_route(
     root: &Path,
     ugraf: &Path,

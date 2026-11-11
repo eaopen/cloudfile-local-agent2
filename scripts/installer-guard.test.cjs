@@ -26,6 +26,11 @@ for (const script of ['install.cmd', 'install.dev.cmd']) {
     assert.doesNotMatch(contents, /\[WARN\] Cached bootstrap digest mismatch/);
     assert.doesNotMatch(contents, /Bootstrap download or SHA-256 verification failed/);
     assert.doesNotMatch(contents, /\[ERROR\] SHA-256 verification failed/);
+    // 2026-11-11：CI 的 Windows 引导体门禁按 ASCII 严重度标签判定成功/失败/是否重下
+    // （脚本是 GBK，Get-Content 会把中文读成乱码）。标签一旦被当成"英文旧文案"删掉，
+    // 那条门禁就只剩退出码可断，缓存重下的契约会被静默丢掉 —— 钉住它们。
+    assert.match(contents, /echo \[WARN\] /);
+    assert.match(contents, /echo \[ERROR\] /);
     assert.match(contents, /del \/f \/q "%TARGET%"/);
     assert.match(contents, /exit \/b 3/);
     assert.doesNotMatch(contents, /ExecutionPolicy Bypass/i);

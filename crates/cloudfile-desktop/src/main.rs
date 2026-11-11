@@ -2647,7 +2647,11 @@ mod update_notice_tests {
     use std::path::PathBuf;
 
     fn temp_root(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("cf-notice-{tag}-{}", std::process::id()));
+        // macOS 上 `/var` 是 `/private/var` 的符号链接，而 `storage::write` 会拒绝
+        // 符号链接祖先（私有目录的安全边界）。用例先规范化，别自己踩这条边界。
+        let base =
+            std::fs::canonicalize(std::env::temp_dir()).unwrap_or_else(|_| std::env::temp_dir());
+        let dir = base.join(format!("cf-notice-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }

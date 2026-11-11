@@ -24,7 +24,7 @@ rem Deployment must set release origins explicitly.
 set "BASE_PRIMARY=%CLOUDFILE_INSTALL_SOURCE%"
 set "BASE_MIRROR=%CLOUDFILE_INSTALL_FALLBACK%"
 if not defined BASE_PRIMARY (
-  echo [错误] 没有找到安装源，无法继续。
+  echo [ERROR] 没有找到安装源，无法继续。
   echo        请使用管理员提供的完整安装包，不要单独复制本文件。
   exit /b 1
 )
@@ -50,7 +50,7 @@ set "TARGET=%WORKDIR%\%INSTALLER%"
 if exist "%TARGET%" (
   rem Cached executables outside the supplied bundle also require publisher verification.
   if not defined CLOUDFILE_INSTALL_BOOTSTRAP_SHA256 (
-    echo [错误] 本机缓存的安装组件缺少校验信息，无法确认它是否被篡改。
+    echo [ERROR] 本机缓存的安装组件缺少校验信息，无法确认它是否被篡改。
     set "CODE=1"
     goto end
   )
@@ -61,7 +61,7 @@ if exist "%TARGET%" (
 rem A network-downloaded executable is never a trusted bootstrap on size alone.
 rem Supply its publisher-pinned SHA-256, or ship cloudfile-install.exe alongside this CMD.
 if not defined CLOUDFILE_INSTALL_BOOTSTRAP_SHA256 (
-  echo [错误] 缺少安装组件的校验信息，为安全起见已停止。
+  echo [ERROR] 缺少安装组件的校验信息，为安全起见已停止。
   echo        请把 %INSTALLER% 与本脚本放在同一目录后重试。
   set "CODE=1"
   goto end
@@ -91,17 +91,17 @@ if defined CLOUDFILE_INSTALL_BOOTSTRAP_SHA256 (
     rem 缓存不可信但**可以换掉**：删掉后按钉住的哈希重新下载，仍然逐字节校验。
     rem 只有「和脚本放在一起的发布包」对不上才直接拒绝 —— 那是发布物本身有问题。
     if /i "%SOURCE_KIND%"=="cache" (
-      echo [提示] 本机缓存的安装组件与当前安装源不一致，正在重新下载...
+      echo [WARN] 本机缓存的安装组件与当前安装源不一致，正在重新下载...
       del /f /q "%TARGET%" >nul 2>&1
       call :fetch "%BASE_PRIMARY%/%INSTALLER%"
       if errorlevel 1 if defined BASE_MIRROR call :fetch "%BASE_MIRROR%/%INSTALLER%"
       if errorlevel 1 (
-        echo [错误] 安装组件下载失败或校验不通过，已停止。
+        echo [ERROR] 安装组件下载失败或校验不通过，已停止。
         set "CODE=1"
         goto end
       )
     ) else (
-      echo [错误] 安装组件校验不通过，已停止。
+      echo [ERROR] 安装组件校验不通过，已停止。
       echo         请重新下载完整安装包后重试；脚本旁边的 %INSTALLER% 与官方发布的不一致。
       set "CODE=1"
       goto end
@@ -239,7 +239,7 @@ if "%CODE%"=="0" (
   echo      任务中心会在几秒内自动出现；如果没有，重新运行一次本脚本即可。
   echo      如果提示缺少 WebView2 运行时，按提示装好后再运行一次本脚本。
 ) else (
-  echo [错误] 安装没有完成（错误码 %CODE%）。
+  echo [ERROR] 安装没有完成（错误码 %CODE%）。
   echo         请把上面的提示拍照发给管理员；多数情况下重新运行一次本脚本就能装好。
 )
 if not "%CLOUDFILE_NO_PAUSE%"=="" exit /b %CODE%
