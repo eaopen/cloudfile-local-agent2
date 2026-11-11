@@ -21,6 +21,9 @@ for (const script of ['install.cmd', 'install.dev.cmd']) {
     assert.match(contents, /call :hash_file "%TARGET%"/);
     assert.match(contents, /if \/i not "%CF_HASH%"=="%CLOUDFILE_INSTALL_BOOTSTRAP_SHA256%"/);
     assert.match(contents, /call :verify/);
+    assert.match(contents, /\[WARN\] Cached bootstrap digest mismatch/);
+    assert.match(contents, /\[ERROR\] Bootstrap download or SHA-256 verification failed/);
+    assert.match(contents, /\[ERROR\] SHA-256 verification failed/);
     assert.match(contents, /exit \/b 3/);
     assert.doesNotMatch(contents, /ExecutionPolicy Bypass/i);
     assert.doesNotMatch(contents, /LSS 1000000/i);
