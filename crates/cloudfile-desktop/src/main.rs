@@ -1073,16 +1073,22 @@ fn spawn_first_run_setup(app: tauri::AppHandle, root: PathBuf) {
         if settings.setup_completed {
             return;
         }
-        let ok = match apply_setup(&root) {
-            Ok(value) => value["steps"]
-                .as_array()
-                .map(|steps| steps.iter().all(|step| step["ok"] == true))
-                .unwrap_or(false),
-            Err(_) => false,
+        // 记下哪几步没成：现场排查时不用再让用户点一遍按钮去复现。
+        let (ok, failed) = match apply_setup(&root) {
+            Ok(value) => {
+                let steps = value["steps"].as_array().cloned().unwrap_or_default();
+                let failed: Vec<String> = steps
+                    .iter()
+                    .filter(|step| step["ok"] != true)
+                    .map(|step| step["key"].as_str().unwrap_or("?").to_string())
+                    .collect();
+                (failed.is_empty(), failed)
+            }
+            Err(error) => (false, vec![format!("执行失败：{error}")]),
         };
         let _ = cloudfile_core::storage::write(
             &marker,
-            &json!({"at": cloudfile_core::now(), "ok": ok}),
+            &json!({"at": cloudfile_core::now(), "ok": ok, "failed": failed}),
         );
         let _ = app.emit("setup-changed", ());
     });
