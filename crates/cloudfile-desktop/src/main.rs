@@ -480,31 +480,37 @@ const PROFILE_REFRESH_WITH_UPDATE: u64 = 10 * 60;
 /// 版本升级、绑定缺失、记录过期这几种情况不看间隔，总是立刻拉。
 fn refresh_profiles_now(app: &tauri::AppHandle, root: &Path, interval: u64) {
     let use_test = settings::load(root).unwrap_or_default().use_test_server;
-    let mut targets = profile::refresh_due(root, interval, cloudfile_core::VERSION, use_test);
-    // 按当前环境只刷对应的那一份：测试态别去动生产的品牌缓存，反之亦然。
-    // 这个环境还没有记住地址时才退回"全部候选"，让发现流程照常工作。
+    let targets = profile::refresh_due(root, interval, cloudfile_core::VERSION, use_test);
+    if targets.is_empty() {
+        return;
+    }
+    // 按当前环境优先：测试态先刷 test，生产态先刷 prod。这个环境还没记住地址时直接走全部候选。
     let environment = if use_test { "test" } else { "prod" };
-    if let Some(address) = session::config(root)
+    let preferred = session::config(root)
         .ok()
         .and_then(|config| config.profile_sources.get(environment).cloned())
         .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-    {
-        targets.retain(|candidate| candidate == &address);
-    }
-    let mut changed = false;
-    for address in targets {
-        match profile::sync(root, &address) {
-            Ok(result) => {
-                // 按环境记住这个地址：切环境/下次刷新都不用再逐个候选去试。
-                let environment = result["environment"].as_str().unwrap_or("prod");
-                let _ = profile::remember_source(root, &address, environment);
-                log_profile_refresh(root, &format!("ok {environment} {address}"));
-                changed = true;
-            }
-            // 两套配置独立：一个环境拉失败不影响另一个，也不清缓存。
-            Err(error) => log_profile_refresh(root, &format!("failed {address}: {error}")),
+        .filter(|value| !value.is_empty());
+    let (first, rest): (Vec<String>, Vec<String>) = match preferred {
+        Some(address) => {
+            let first: Vec<String> = targets
+                .iter()
+                .filter(|candidate| **candidate == address)
+                .cloned()
+                .collect();
+            let rest: Vec<String> = targets
+                .iter()
+                .filter(|candidate| **candidate != address)
+                .cloned()
+                .collect();
+            (first, rest)
         }
+        None => (targets.clone(), Vec::new()),
+    };
+    // 记住的地址失效时不能就此罢手 —— 那会让品牌名永远停在上一次。
+    let mut changed = sync_candidates(root, &first);
+    if !changed {
+        changed = sync_candidates(root, &rest);
     }
     if changed {
         let _ = app.emit("app-profile", profile::overview(root, use_test));
@@ -515,22 +521,35 @@ fn refresh_profiles_now(app: &tauri::AppHandle, root: &Path, interval: u64) {
     });
 }
 
-/// 追加一行刷新记录，超过 256 KiB 先截掉前一半，避免日志无限长。
-fn log_profile_refresh(root: &Path, line: &str) {
-    let path = root.join("profile-refresh.log");
-    if let Ok(meta) = std::fs::metadata(&path) {
-        if meta.len() > 256 * 1024 {
-            if let Ok(text) = std::fs::read_to_string(&path) {
-                let keep = text.len() / 2;
-                let tail = text
-                    .char_indices()
-                    .map(|(index, _)| index)
-                    .find(|index| *index >= keep)
-                    .unwrap_or(keep);
-                let _ = std::fs::write(&path, &text[tail..]);
+/// 依次尝试这些地址，成功一个就算这次刷新成功；每个结果都落日志。
+fn sync_candidates(root: &Path, targets: &[String]) -> bool {
+    let mut changed = false;
+    for address in targets {
+        match profile::sync(root, address) {
+            Ok(result) => {
+                // 按环境记住这个地址：切环境/下次刷新都不用再逐个候选去试。
+                let environment = result["environment"].as_str().unwrap_or("prod");
+                let _ = profile::remember_source(root, address, environment);
+                log_profile_refresh(root, &format!("ok {environment} {address}"));
+                changed = true;
             }
+            // 两套配置独立：一个环境拉失败不影响另一个，也不清缓存。
+            Err(error) => log_profile_refresh(root, &format!("failed {address}: {error}")),
         }
     }
+    changed
+}
+
+/// 追加一行刷新记录，超过 256 KiB 先截掉前一半，避免日志无限长。
+fn log_profile_refresh(root: &Path, line: &str) {
+    append_log_line(&root.join("profile-refresh.log"), line);
+}
+
+/// 带截断的追加：日志超过 256 KiB 就丢掉前一半再写。
+///
+/// 常驻进程每小时/每 4 小时都会写一行，不截断会一直长下去。
+fn append_log_line(path: &Path, line: &str) {
+    truncate_log(path);
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -538,11 +557,28 @@ fn log_profile_refresh(root: &Path, line: &str) {
     let _ = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&path)
+        .open(path)
         .and_then(|mut file| {
             use std::io::Write;
             writeln!(file, "{stamp} {line}")
         });
+}
+
+/// 超过 256 KiB 时截掉前一半（按字符边界切，别把中文切坏）。
+fn truncate_log(path: &Path) {
+    if let Ok(meta) = std::fs::metadata(path) {
+        if meta.len() > 256 * 1024 {
+            if let Ok(text) = std::fs::read_to_string(path) {
+                let keep = text.len() / 2;
+                let tail = text
+                    .char_indices()
+                    .map(|(index, _)| index)
+                    .find(|index| *index >= keep)
+                    .unwrap_or(keep);
+                let _ = std::fs::write(path, &text[tail..]);
+            }
+        }
+    }
 }
 
 /// 设置页的「应用信息」（ApplicationProfile V1）：本地已绑定的品牌 + 默认发现地址。
@@ -582,6 +618,7 @@ async fn set_profile_environment(
                 Ok(result) => {
                     let environment = result["environment"].as_str().unwrap_or("prod");
                     let _ = profile::remember_source(&root, &target, environment);
+                    log_profile_refresh(&root, &format!("switch ok {environment} {target}"));
                 }
                 // 拉取失败不是切换失败：按需求"拉不到就用本地配置"。
                 Err(error) => {
@@ -626,10 +663,14 @@ async fn sync_app_profile(
             .ok_or_else(|| {
                 "还没有受信任的 CloudFile 服务，无法确定应用信息地址；请先完成安装引导".to_string()
             })?;
-        let result = profile::sync(&root, &target).map_err(|error| error.to_string())?;
+        let result = profile::sync(&root, &target).map_err(|error| {
+            log_profile_refresh(&root, &format!("manual failed {target}: {error}"));
+            error.to_string()
+        })?;
         // 只记已经成功用过的地址：写失败不算同步失败，本次结果仍然有效。
         let environment = result["environment"].as_str().unwrap_or("prod");
         let _ = profile::remember_source(&root, &target, environment);
+        log_profile_refresh(&root, &format!("manual ok {environment} {target}"));
         Ok(json!({
             "ok": true,
             "source": target,
@@ -2476,6 +2517,8 @@ fn env_seconds(name: &str) -> Option<u64> {
 /// 「4 小时那次到底跑没跑」在界面上看不出来，落一行日志既方便验收，
 /// 也方便现场判断"提示没弹"是没检查、还是检查了但版本不比当前新。
 fn log_update_check(root: &Path, failed: bool, latest: &str, available: bool, next_seconds: u64) {
+    let path = root.join("update-check.log");
+    truncate_log(&path);
     use std::io::Write;
     let line = if failed {
         format!(
@@ -2493,7 +2536,7 @@ fn log_update_check(root: &Path, failed: bool, latest: &str, available: bool, ne
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(root.join("update-check.log"))
+        .open(&path)
     {
         let _ = file.write_all(line.as_bytes());
     }
@@ -2525,6 +2568,42 @@ mod update_check_schedule_tests {
         assert_eq!(update_check_delay(2, 0), Duration::from_secs(30 * 60));
         assert_eq!(update_check_delay(3, 0), Duration::from_secs(60 * 60));
         assert_eq!(update_check_delay(99, 0), Duration::from_secs(4 * 3600));
+    }
+}
+
+#[cfg(test)]
+mod log_truncate_tests {
+    use super::truncate_log;
+
+    /// 常驻进程会一直追加日志；超过 256 KiB 必须自己截断，否则只会越长越大。
+    #[test]
+    fn oversized_log_keeps_the_tail_and_shrinks() {
+        let dir = std::env::temp_dir().join(format!("cf-log-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("update-check.log");
+        // 每条 100 字节左右，凑到 300 KiB。
+        let mut text = String::new();
+        while text.len() < 300 * 1024 {
+            text.push_str("1794379425\t最新=2.3.34\t可用=false\t下次 14531s 后再查\u{fffd}尾\n");
+        }
+        std::fs::write(&path, &text).unwrap();
+
+        truncate_log(&path);
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            after.len() < text.len(),
+            "应当变短：{} -> {}",
+            text.len(),
+            after.len()
+        );
+        assert!(
+            after.len() < 200 * 1024,
+            "截断后应小于一半多一点：{}",
+            after.len()
+        );
+        assert!(text.ends_with(&after), "保留的必须是尾部（按字符边界切）");
+        assert!(after.ends_with('\n'), "不能在半行处切断");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
