@@ -740,7 +740,12 @@ pub fn remove_task_confirming(root: &Path, id: &str, force: bool) -> Result<serd
         if let Ok(marker) = crate::storage::read::<serde_json::Value>(&dir.join("opened.json")) {
             let pid = marker["pid"].as_u64().unwrap_or(0) as u32;
             let app = marker["app"].as_str().unwrap_or("");
-            if pid != 0 && process_alive(pid, app) {
+            // A router process can exit as soon as NX accepts the request.
+            // Even if the earlier NX PID disappeared, we cannot prove where
+            // the model is now: do not silently delete the working copy.
+            if (pid != 0 && process_alive(pid, app))
+                || marker["routed_nx"].as_bool().unwrap_or(false)
+            {
                 // 句柄已经没了（上面那步通过了），但开它的程序还在跑：可能只是关了文件，
                 // 也可能只是把文档关到后台。这种只能问一次，不能自己拍板。
                 return Ok(serde_json::json!({
@@ -749,7 +754,11 @@ pub fn remove_task_confirming(root: &Path, id: &str, force: bool) -> Result<serd
                     "task_id": id,
                     "file_name": task.file_name,
                     "app": app,
-                    "message": opened_confirm_message(&task.file_name, app),
+                    "message": if marker["routed_nx"].as_bool().unwrap_or(false) {
+                        format!("「{}」曾通过 NX 路由打开。请先确认所有 NX 会话里都已关闭该文件，再决定是否删除这份本地工作副本。", task.file_name)
+                    } else {
+                        opened_confirm_message(&task.file_name, app)
+                    },
                 }));
             }
         }
@@ -910,8 +919,11 @@ pub fn launch(root: &Path, id: &str) -> Result<()> {
     let opened = crate::apps::open_path(root, &task.mode, &task.file_name, &path)?;
     // 记下"这份文件交给了哪个进程"。NX 这类程序读完就放句柄，操作系统看不出占用，
     // 只能靠这个记录在删除时提醒用户先关掉程序。
-    if let Some((pid, app)) = opened {
-        let marker = serde_json::json!({"pid": pid, "app": app, "at": crate::now()});
+    if let Some(opened) = opened {
+        let marker = serde_json::json!({
+            "pid": opened.pid, "app": opened.app, "routed_nx": opened.routed_nx,
+            "at": crate::now()
+        });
         if let Ok(dir) = task_dir(root, id) {
             let _ = crate::storage::write(&dir.join("opened.json"), &marker);
         }
@@ -1115,6 +1127,52 @@ mod tests {
         assert_eq!(done["ok"], true, "{done}");
         assert!(!working.join("part.prt").exists());
         assert!(!private.join("task.json").exists());
+    }
+
+    /// Router PID is short lived: never silently delete a file merely because
+    /// it exited or the initially observed NX process is no longer visible.
+    #[test]
+    fn routed_nx_copy_requires_confirmation_even_after_router_exits() {
+        let (_dir, root) = storage::test_root();
+        crate::settings::update(&root, |s| {
+            s.workspace_root = Some(root.join("workspace").to_string_lossy().into_owned())
+        })
+        .unwrap();
+        let id = "c".repeat(64);
+        let private = task_dir(&root, &id).unwrap();
+        storage::private_dir(&private).unwrap();
+        let working = prepare_working_dir(&root, &id).unwrap();
+        fs::write(working.join("part.prt"), b"model").unwrap();
+        storage::write(
+            &private.join("task.json"),
+            &Task {
+                task_id: id.clone(),
+                device_id: None,
+                file_name: "part.prt".into(),
+                mode: "local-view".into(),
+                server: "https://files.example.test".into(),
+                repo_id: "11111111-1111-4111-8111-111111111111".into(),
+                remote_path: "/part.prt".into(),
+                library_name: None,
+                session_id: "s".into(),
+                baseline_file_id: "b".repeat(40),
+                baseline_digest: "c".repeat(64),
+                size: 5,
+            },
+        )
+        .unwrap();
+        storage::write(
+            &private.join("opened.json"),
+            &serde_json::json!({
+                "pid": 0, "app": "ugraf.exe", "routed_nx": true, "at": crate::now()
+            }),
+        )
+        .unwrap();
+        let blocked = remove_task(&root, &id).unwrap();
+        assert_eq!(blocked["requires_confirm"], true, "{blocked}");
+        assert!(working.join("part.prt").is_file());
+        let done = remove_task_confirming(&root, &id, true).unwrap();
+        assert_eq!(done["ok"], true, "{done}");
     }
 
     /// 文件被占用时摘要读不到，这是**暂时**状态，不是"任务坏了"。
