@@ -2306,10 +2306,16 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
                             .and_then(Value::as_bool).unwrap_or(false);
                         if available && !latest.is_empty() && last_announced != latest {
                             last_announced = latest.to_owned();
-                            present_toast(
-                                &update_handle, "info",
-                                &format!("发现新版本 v{latest}：可在设置里点「检查更新」升级"),
-                            );
+                            // 每次启动都弹一次太吵：同一个版本 24 小时只提醒一次。
+                            // 界面上的「检查更新」不受影响，用户想升随时能升。
+                            if !announcement_throttled(&update_root, latest) {
+                                present_toast(
+                                    &update_handle,
+                                    "info",
+                                    &format!("发现新版本 v{latest}：可在设置里点「检查更新」升级"),
+                                );
+                                remember_announcement(&update_root, latest);
+                            }
                             let _ = update_handle.emit("update-available", latest.to_owned());
                         }
                         if !available {
@@ -2322,14 +2328,23 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
                     };
                     log_update_check(
                         &update_root,
-                        error.is_some(),
+                        error,
                         probe.get("latest_version").and_then(Value::as_str).unwrap_or(""),
                         probe.get("update_available").and_then(Value::as_bool).unwrap_or(false),
+                        probe.get("update_source_used").and_then(Value::as_str).unwrap_or(""),
                         delay.as_secs(),
                     );
                     // 检查更新的同时刷新应用信息（测试/生产各拉各的）：
                     // 启动那次和之后每 4 小时那次都会走到这里。
-                    refresh_profiles_now(&update_handle, &update_root, PROFILE_REFRESH_WITH_UPDATE);
+                    // 放独立线程：profile 端点单次超时 8s，回退时还要多试几个地址，
+                    // 不能让更新线程连着等。
+                    {
+                        let profile_handle = update_handle.clone();
+                        let profile_root = update_root.clone();
+                        std::thread::spawn(move || {
+                            refresh_profiles_now(&profile_handle, &profile_root, PROFILE_REFRESH_WITH_UPDATE);
+                        });
+                    }
                     next_check = SystemTime::now() + delay;
                 }
             });
@@ -2516,19 +2531,67 @@ fn env_seconds(name: &str) -> Option<u64> {
 ///
 /// 「4 小时那次到底跑没跑」在界面上看不出来，落一行日志既方便验收，
 /// 也方便现场判断"提示没弹"是没检查、还是检查了但版本不比当前新。
-fn log_update_check(root: &Path, failed: bool, latest: &str, available: bool, next_seconds: u64) {
+/// 升级提示的节流窗口：同一版本 24 小时内只弹一次。
+const ANNOUNCE_WINDOW: u64 = 24 * 3600;
+
+/// 独立文件记下"上次提醒过哪个版本"，不动 settings 的 schema
+/// （`Settings` 也是 deny_unknown_fields，加键会挡住回退）。
+fn announcement_file(root: &Path) -> std::path::PathBuf {
+    root.join("update-announce.json")
+}
+
+fn announcement_throttled(root: &Path, version: &str) -> bool {
+    let Ok(text) = std::fs::read(announcement_file(root)) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_slice::<Value>(&text) else {
+        return false;
+    };
+    let same = value.get("version").and_then(Value::as_str) == Some(version);
+    let at = value.get("at").and_then(Value::as_u64).unwrap_or(0);
+    same && cloudfile_core::now().saturating_sub(at) < ANNOUNCE_WINDOW
+}
+
+fn remember_announcement(root: &Path, version: &str) {
+    let _ = cloudfile_core::storage::write(
+        &announcement_file(root),
+        &json!({"version": version, "at": cloudfile_core::now()}),
+    );
+}
+
+/// 日志一行一条：把错误里的换行压平，并截到 200 字符，避免一条错误撑爆一行。
+fn one_line(message: &str) -> String {
+    let flat = message.replace(['\r', '\n'], " ");
+    // 连续空白压成一个空格：错误里常带换行缩进，摊平后会留下一串空格。
+    let squeezed = flat.split_whitespace().collect::<Vec<_>>().join(" ");
+    match squeezed.char_indices().nth(200) {
+        Some((index, _)) => format!("{}…", &squeezed[..index]),
+        None => squeezed,
+    }
+}
+
+fn log_update_check(
+    root: &Path,
+    error: Option<&str>,
+    latest: &str,
+    available: bool,
+    source: &str,
+    next_seconds: u64,
+) {
     let path = root.join("update-check.log");
     truncate_log(&path);
     use std::io::Write;
-    let line = if failed {
+    let line = if let Some(message) = error {
+        // 现场最需要的就是"为什么失败"：没配源、缺公钥、两个源都不通，各写各的。
         format!(
-            "{}\t检查失败\t下次 {}s 后重试\n",
+            "{}\t检查失败：{}\t下次 {}s 后重试\n",
             cloudfile_core::now(),
+            one_line(message),
             next_seconds
         )
     } else {
         format!(
-            "{}\t最新={latest}\t可用={available}\t下次 {}s 后再查\n",
+            "{}\t最新={latest}\t可用={available}\t源={source}\t下次 {}s 后再查\n",
             cloudfile_core::now(),
             next_seconds
         )
@@ -2548,7 +2611,8 @@ fn update_check_delay(failures: u32, jitter_seconds: u64) -> std::time::Duration
     } else {
         // 15, 30, 60, 120, 240 minutes; never loop rapidly on broken networks.
         let scale = 1u64 << failures.saturating_sub(1).min(4);
-        std::time::Duration::from_secs((15 * 60 * scale).min(4 * 3600))
+        // 退避也带一点抖动：一批机器同时断网时，别在同一秒一起去撞服务器。
+        std::time::Duration::from_secs((15 * 60 * scale).min(4 * 3600) + jitter_seconds % 60)
     }
 }
 
@@ -2568,6 +2632,60 @@ mod update_check_schedule_tests {
         assert_eq!(update_check_delay(2, 0), Duration::from_secs(30 * 60));
         assert_eq!(update_check_delay(3, 0), Duration::from_secs(60 * 60));
         assert_eq!(update_check_delay(99, 0), Duration::from_secs(4 * 3600));
+        // 失败退避也要带抖动：同样的失败次数，抖动值不同则触发时刻不同。
+        assert_eq!(update_check_delay(1, 59), Duration::from_secs(15 * 60 + 59));
+        assert_eq!(
+            update_check_delay(99, 42),
+            Duration::from_secs(4 * 3600 + 42)
+        );
+    }
+}
+
+#[cfg(test)]
+mod update_notice_tests {
+    use super::{announcement_throttled, one_line, remember_announcement};
+    use std::path::PathBuf;
+
+    fn temp_root(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("cf-notice-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// 同一条错误里有换行也要压成一行，超长截断 —— 日志一条一行才好扫。
+    #[test]
+    fn errors_are_flattened_into_one_line() {
+        assert_eq!(one_line("a\nb\r\nc"), "a b c");
+        assert_eq!(one_line("  主源 x\n  备用 y "), "主源 x 备用 y");
+        let long = "错".repeat(300);
+        let flat = one_line(&long);
+        assert!(flat.ends_with('…'), "超长要截断并加省略号");
+        assert!(flat.chars().count() <= 201, "截断后不超过 200 字加省略号");
+    }
+
+    /// 同一版本 24 小时内只提醒一次；换版本或过了窗口要重新提醒。
+    #[test]
+    fn announcement_is_throttled_per_version_and_window() {
+        let root = temp_root("throttle");
+        assert!(!announcement_throttled(&root, "2.0.30"), "没记过就该提醒");
+        remember_announcement(&root, "2.0.30");
+        assert!(announcement_throttled(&root, "2.0.30"), "刚提醒过就别再弹");
+        assert!(
+            !announcement_throttled(&root, "2.0.31"),
+            "换了版本要重新提醒"
+        );
+
+        // 把时间推到 24 小时以前：窗口过了，应重新提醒。
+        let path = super::announcement_file(&root);
+        let old = cloudfile_core::now() - super::ANNOUNCE_WINDOW - 5;
+        cloudfile_core::storage::write(&path, &serde_json::json!({"version": "2.0.30", "at": old}))
+            .unwrap();
+        assert!(!announcement_throttled(&root, "2.0.30"), "过期后应重新提醒");
+
+        // 文件坏掉：当作没提醒过，不影响功能。
+        std::fs::write(&path, b"not json").unwrap();
+        assert!(!announcement_throttled(&root, "2.0.30"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 

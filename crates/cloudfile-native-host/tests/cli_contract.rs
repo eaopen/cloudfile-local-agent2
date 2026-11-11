@@ -812,9 +812,13 @@ fn a_plain_http_channel_is_accepted_but_still_needs_a_pinned_key() {
     let check = sandbox.run_json(&["--check-update"]);
     assert_eq!(check["update_source_set"], true);
     assert_eq!(check["update_source_insecure_allowed"], true);
-    // 没有签名公钥时 Agent 自身的检查**根本不会发起**（所以连 update_error 都没有），
-    // 扩展那一节试过但源不可达 —— 两者都不影响「源配好了」这件事。
-    assert!(check.get("update_error").is_none(), "{check}");
+    // 没有签名公钥时不会去拉 Agent 清单，但**要说清原因** ——
+    // 以前静默返回，界面会显示"已是最新版本"，把配置问题藏起来了。
+    let error = check["update_error"].as_str().unwrap_or("");
+    assert!(
+        error.contains("公钥"),
+        "缺少公钥要写进 update_error：{check}"
+    );
     assert!(check.get("extension_latest_version").is_none(), "{check}");
     assert_eq!(check["update_available"], false);
 

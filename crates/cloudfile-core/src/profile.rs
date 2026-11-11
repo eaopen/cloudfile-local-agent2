@@ -555,10 +555,17 @@ pub fn refresh_due(root: &Path, interval: u64, version: &str, use_test: bool) ->
     let settings = crate::settings::load(root).unwrap_or_default();
     let now = crate::now();
     let snapshots = bound_snapshots(root);
-    let last_fetch = snapshots.iter().map(|(at, _)| *at).max().unwrap_or(0);
+    // 新鲜度**按环境各算各的**：测试刚拉过，不代表生产那份也是新的。
+    // 以前用所有环境里最大的 fetched_at，结果「切到生产」之后会被测试那份骗过去。
+    let environment = if use_test { "test" } else { "prod" };
+    let mine: Vec<&(u64, u64, String)> = snapshots
+        .iter()
+        .filter(|(_, _, env)| env == environment)
+        .collect();
+    let last_fetch = mine.iter().map(|(at, _, _)| *at).max().unwrap_or(0);
     let urgent_version = settings.profile_pull_version.as_deref() != Some(version);
     let active_missing = active(root, use_test).is_none();
-    let active_expired = snapshots.iter().any(|(_, expires)| now >= *expires);
+    let active_expired = mine.iter().any(|(_, expires, _)| now >= *expires);
     let aged = now.saturating_sub(last_fetch) >= interval;
     if urgent_version || active_missing || active_expired || aged {
         targets
@@ -568,7 +575,7 @@ pub fn refresh_due(root: &Path, interval: u64, version: &str, use_test: bool) ->
 }
 
 /// 本地已绑定记录的（同步时刻、有效期）。坏文件直接跳过 —— 刷新判据不值得为它失败。
-fn bound_snapshots(root: &Path) -> Vec<(u64, u64)> {
+fn bound_snapshots(root: &Path) -> Vec<(u64, u64, String)> {
     let mut result = Vec::new();
     let Ok(entries) = std::fs::read_dir(root.join("application-profiles")) else {
         return result;
@@ -582,7 +589,11 @@ fn bound_snapshots(root: &Path) -> Vec<(u64, u64)> {
         }
         if let Ok(record) = storage::read::<BoundProfile>(&path) {
             if record.profile.origin == record.source_origin {
-                result.push((record.fetched_at, record.profile.expires_at));
+                result.push((
+                    record.fetched_at,
+                    record.profile.expires_at,
+                    record.profile.environment.to_lowercase(),
+                ));
             }
         }
     }
@@ -1026,6 +1037,37 @@ mod tests {
             "update": {"track": "dev", "source_id": "trusted-dev"},
         })
         .to_string()
+    }
+
+    /// 两个环境各算各的新鲜度：测试刚拉过，不能掩盖生产那份已经过期。
+    #[test]
+    fn freshness_is_tracked_per_environment() {
+        let (_temporary, root) = storage::test_root();
+        session::trust(&root, "https://files.example.test/seafile".to_string()).unwrap();
+        crate::settings::update(&root, |current| {
+            current.profile_pull_version = Some("1.0.0".into());
+        })
+        .unwrap();
+        let now = crate::now();
+        // 测试刚拉过；生产已经超过间隔。
+        store_bound(&root, "etech-test", "test", now - 60, now + 86400);
+        store_bound(
+            &root,
+            "etech-prod",
+            "prod",
+            now - REFRESH_INTERVAL - 60,
+            now + 86400,
+        );
+        // 生产态：生产那份过期了，要刷。
+        assert!(
+            !refresh_due(&root, REFRESH_INTERVAL, "1.0.0", false).is_empty(),
+            "生产过期时应当刷新，不能被测试那份的新鲜度掩盖"
+        );
+        // 测试态：刚拉过，不必刷。
+        assert!(
+            refresh_due(&root, REFRESH_INTERVAL, "1.0.0", true).is_empty(),
+            "测试刚拉过就不该再刷"
+        );
     }
 
     /// 自动刷新判据：不该刷的时候一次都别刷（这是「后台偷偷联网」最容易失控的地方）。

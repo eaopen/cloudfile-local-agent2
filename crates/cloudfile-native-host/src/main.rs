@@ -491,9 +491,10 @@ fn fetch_verified_release(
         ),
     };
     let policy = config.update_policy();
-    let bytes = match manifest {
-        Some(path) => std::fs::read(path)?,
-        None => update::fetch_manifest_for(policy, &source)?,
+    // 主源拿不到清单时换备用源；验签基准跟着换成真正提供清单的那个源。
+    let (bytes, source) = match manifest {
+        Some(path) => (std::fs::read(path)?, source),
+        None => update::fetch_manifest_with_fallback(policy, root, &source)?,
     };
     let release = update::parse_release(&bytes)?;
     update::verify(
@@ -796,6 +797,16 @@ fn resolve_source(
         flag(args, "--extension-dir"),
         policy,
     )?;
+    // 把两个候选地址都留档：装的时候只有一个能用，另一个等它恢复后还要能顶上来。
+    // 独立文件而不是写进 config —— config 是 deny_unknown_fields 的，加键会挡住回退。
+    let primary = flag(args, "--source");
+    let fallback = flag(args, "--source-fallback");
+    if primary.is_some() || fallback.is_some() {
+        let _ = cloudfile_core::storage::write(
+            &root.join(update::CHANNELS_FILE),
+            &serde_json::json!({ "primary": primary, "fallback": fallback }),
+        );
+    }
     Ok((source, policy, probes))
 }
 

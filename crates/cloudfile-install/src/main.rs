@@ -173,7 +173,20 @@ fn run(args: &[String]) -> Result<i32> {
     eprintln!("已下载 {}（{} 字节）", release.version, bytes.len());
 
     // 5) 交给它。注册、暂存、健康检查、激活、自启、启动都在那边做。
-    let code = hand_off(&binary, &install, &source, policy, &public_key, &forwarded)?;
+    // 另一个候选一并传下去：native host 要把两个地址都留档，运行期才能互相顶替。
+    let alternate = options
+        .candidates()
+        .into_iter()
+        .find(|candidate| candidate != &source);
+    let code = hand_off(
+        &binary,
+        &install,
+        &source,
+        alternate.as_deref(),
+        policy,
+        &public_key,
+        &forwarded,
+    )?;
     if code == 0 {
         // 装成功就把引导副本删掉：真正的安装已经在版本目录里，注册指向的是那一份。
         let _ = std::fs::remove_file(&binary);
@@ -309,6 +322,7 @@ fn hand_off(
     binary: &Path,
     install: &Path,
     source: &str,
+    alternate: Option<&str>,
     policy: update::SourcePolicy,
     public_key: &str,
     forwarded: &[String],
@@ -329,6 +343,11 @@ fn hand_off(
     // 把**生效的**公钥传下去（内置的或命令行给的都算）：native host 要用它写进配置，
     // 否则正式通道会因为「有源没公钥」被它自己拒绝。
     command.args(["--public-key", public_key]);
+    // 显式给出"另一个候选"：转发过来的原始参数里也有一个 --source-fallback，
+    // 但那份是发布方写的，未必等于这次真正没选中的那个地址。
+    if let Some(other) = alternate {
+        command.args(["--source-fallback", other]);
+    }
     command.args(forwarded);
     eprintln!("运行：{} --install --source {source}", binary.display());
     let status = command.status().context("无法启动 native host")?;

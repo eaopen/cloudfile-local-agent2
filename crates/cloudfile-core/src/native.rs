@@ -446,6 +446,8 @@ pub fn check_update(root: &Path) -> Value {
         "update_source_insecure_allowed": policy.allow_insecure,
     });
     let Some(source) = config.update_source.clone() else {
+        // 以前这里静默返回，界面就显示"已是最新版本" —— 明明是没配源。
+        value["update_error"] = json!("尚未配置签名更新源，无法检查更新");
         return value;
     };
     value["update_source_set"] = json!(true);
@@ -458,11 +460,15 @@ pub fn check_update(root: &Path) -> Value {
     describe_extension_update(policy, &source, &mut value);
 
     let Some(public_key) = config.update_public_key.clone() else {
+        // 老安装缺这个键时同样会被当成"已是最新"，这里说清楚。
+        value["update_error"] = json!("尚未配置更新公钥，无法校验更新清单；请重新运行安装脚本");
         return value;
     };
-    match update::fetch_manifest_for(policy, &source) {
-        Ok(bytes) => match update::parse_release(&bytes) {
+    match update::fetch_manifest_with_fallback(policy, root, &source) {
+        Ok((bytes, used)) => match update::parse_release(&bytes) {
             Ok(release) => {
+                // 换源时验签基准跟着换：备用源拿到的清单必须与备用源同源。
+                value["update_source_used"] = json!(used);
                 let platform = update::platform_id(std::env::consts::OS, std::env::consts::ARCH);
                 // 修改逻辑（2026-10-23）：验签用「未安装」当基准，再把版本高低自己比一次。
                 // 修改原因：verify 把「清单版本不比本机新」当成错误抛，导致通道与本机同版本时
@@ -471,7 +477,7 @@ pub fn check_update(root: &Path) -> Value {
                 match update::verify(
                     policy,
                     &release,
-                    &source,
+                    &used,
                     update::NO_INSTALLED_VERSION,
                     crate::now(),
                     &platform,

@@ -473,6 +473,60 @@ pub fn fetch_manifest_for(policy: SourcePolicy, source: &str) -> Result<Vec<u8>>
     Ok(bytes)
 }
 
+/// 安装器写下的通道信息：`<agent 根>/update-channels.json`。
+///
+/// 单独一个文件，**不往 Config 里加字段** —— `Config` 是 `deny_unknown_fields` 的，
+/// 加键会让旧版本读到新配置时直接解析失败。旧版本根本不会打开这个文件，
+/// 所以加它既不改变现有行为，也不会挡住回退。
+pub const CHANNELS_FILE: &str = "update-channels.json";
+
+#[derive(serde::Deserialize)]
+struct Channels {
+    #[serde(default)]
+    primary: Option<String>,
+    #[serde(default)]
+    fallback: Option<String>,
+}
+
+/// 与 `current` 不同的那个更新源（通常是直连静态服务的 IP）。
+///
+/// 安装时两个地址里只有一个能用，装完写回的是**能用的那个**；所以这里要两个都留着 ——
+/// 主源配的是域名就回退 IP，配的是 IP（装的时候域名不通）就反过来试域名。
+pub fn alternate_source(policy: SourcePolicy, root: &Path, current: &str) -> Option<String> {
+    let text = std::fs::read(root.join(CHANNELS_FILE)).ok()?;
+    let channels: Channels = serde_json::from_slice(&text).ok()?;
+    [channels.fallback, channels.primary]
+        .into_iter()
+        .flatten()
+        .map(|value| value.trim().to_string())
+        .find(|value| !value.is_empty() && value != current && policy.valid_source(value))
+}
+
+/// 先主源、失败再试备用源。返回 (清单字节, 实际拿到清单的那个源)。
+///
+/// 备用源拿到的清单会走同一套验签与同源校验（源变了，验签基准也跟着变），
+/// 所以"换源"不会放宽任何信任条件，只是换了一个地址去取。
+pub fn fetch_manifest_with_fallback(
+    policy: SourcePolicy,
+    root: &Path,
+    primary: &str,
+) -> Result<(Vec<u8>, String)> {
+    match fetch_manifest_for(policy, primary) {
+        Ok(bytes) => Ok((bytes, primary.to_string())),
+        Err(primary_error) => {
+            let Some(fallback) = alternate_source(policy, root, primary) else {
+                return Err(primary_error);
+            };
+            match fetch_manifest_for(policy, &fallback) {
+                Ok(bytes) => Ok((bytes, fallback)),
+                Err(fallback_error) => bail!(
+                    "两个更新源都不可用：\n  主源 {primary}：{primary_error}\n  备用 {fallback}：{fallback_error}"
+                ),
+            }
+        }
+    }
+}
+
 /// Downloads one artifact and checks its digest before it is written anywhere.
 pub fn download(artifact: &Artifact) -> Result<Vec<u8>> {
     let client = reqwest::blocking::Client::builder()
@@ -1076,6 +1130,58 @@ mod tests {
     /// 所以这里不写「意思差不多」的断言，而是把整段载荷逐字节钉死 —— Rust 侧一改字段顺序、
     /// 分隔符或域串，这条测试立刻红，提醒同步改签名器。漏掉同步的后果不是「报错」，
     /// 而是通道上签出的清单让所有已装 Agent 报「签名与钉住的公钥不符」。
+    /// 备用源：装的时候只有一个地址能用，另一个要留着让运行期能互相顶替。
+    #[test]
+    fn alternate_source_finds_the_other_recorded_address() {
+        let (dir, root) = crate::storage::test_root();
+        let path = root.join(CHANNELS_FILE);
+        let domain = "http://etech.example.com/cloudfile-updates";
+        let mirror = "http://10.9.8.162:6111/cloudfile-updates";
+
+        // 没写过这个文件：当作没有备用源，行为与以前完全一致。
+        assert_eq!(alternate_source(SourcePolicy::STRICT, &root, domain), None);
+
+        crate::storage::write(
+            &path,
+            &serde_json::json!({"primary": domain, "fallback": mirror}),
+        )
+        .unwrap();
+        assert_eq!(
+            alternate_source(SourcePolicy::STRICT, &root, domain).as_deref(),
+            Some(mirror)
+        );
+        // 反过来：现在配的是 IP 源（装的时候域名不通），那就回退到域名。
+        assert_eq!(
+            alternate_source(SourcePolicy::STRICT, &root, mirror).as_deref(),
+            Some(domain)
+        );
+        // 两个都不等于当前地址时，取第一个（备用源优先）。
+        assert_eq!(
+            alternate_source(
+                SourcePolicy::STRICT,
+                &root,
+                "http://elsewhere.example.com/x"
+            )
+            .as_deref(),
+            Some(mirror)
+        );
+
+        // 写坏了 / 不是规范 http(s) origin：当作没有，不抛错。
+        crate::storage::write(&path, &serde_json::json!({"primary": domain})).unwrap();
+        assert_eq!(alternate_source(SourcePolicy::STRICT, &root, domain), None);
+        crate::storage::write(
+            &path,
+            &serde_json::json!({"primary": "ftp://example.com/x", "fallback": "  "}),
+        )
+        .unwrap();
+        assert_eq!(
+            alternate_source(SourcePolicy::STRICT, &root, domain),
+            None,
+            "非法源不该被当成备用地址"
+        );
+        drop(dir);
+    }
+
     #[test]
     fn the_signing_payload_is_a_fixed_byte_string() {
         let release = Release {
