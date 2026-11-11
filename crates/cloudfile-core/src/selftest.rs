@@ -300,7 +300,7 @@ fn windows_platform() -> Check {
             "windows-platform",
             format!(
                 "{} / build {} / {} / 进程运行权限由企业策略控制",
-                windows_family(number),
+                windows_family(number, is_server),
                 number,
                 std::env::consts::ARCH
             ),
