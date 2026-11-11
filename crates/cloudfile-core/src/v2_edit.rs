@@ -247,6 +247,23 @@ fn request_json(root: &Path, task: &Task, st: &State, op: &str, body: &Value) ->
         .send()?;
     read_response(res)
 }
+/// Separate invalid server headers without recording any ticket or raw path.
+fn validate_open_metadata(file_id: &str, repo_id: &str, path: &str, mode: &str) -> Result<()> {
+    if !valid_id(file_id) {
+        bail!("服务端文件元数据无效：X-CF-File-ID 缺失或格式错误");
+    }
+    if uuid::Uuid::parse_str(repo_id).is_err() {
+        bail!("服务端文件元数据无效：X-CF-Repo-ID 缺失或格式错误");
+    }
+    if !session::safe_remote_path(path) {
+        bail!("服务端文件元数据无效：X-CF-Path-B64 文件路径不合法");
+    }
+    if !supported_open_mode(mode) {
+        bail!("服务端文件元数据无效：X-CF-Mode 不受支持");
+    }
+    Ok(())
+}
+
 fn ticket_format(s: &str) -> bool {
     s.len() < 8192
         && s.split('.').count() == 3
@@ -413,7 +430,11 @@ pub fn open(root: &Path, uri: &str) -> Result<Task> {
         .get("X-CF-Path-B64")
         .and_then(|x| x.to_str().ok())
         .unwrap_or("");
-    let remote = String::from_utf8(B64.decode(encoded_path)?)?;
+    let remote = B64
+        .decode(encoded_path)
+        .map_err(|_| anyhow::anyhow!("服务端文件元数据无效：X-CF-Path-B64 路径编码错误"))?;
+    let remote = String::from_utf8(remote)
+        .map_err(|_| anyhow::anyhow!("服务端文件元数据无效：路径不是 UTF-8"))?;
     let mode = res
         .headers()
         .get("X-CF-Mode")
@@ -422,16 +443,15 @@ pub fn open(root: &Path, uri: &str) -> Result<Task> {
         .to_string();
     let size = res
         .content_length()
-        .ok_or_else(|| anyhow::anyhow!("文件长度不明"))?;
-    if !valid_id(&file_id)
-        || uuid::Uuid::parse_str(&repo_id).is_err()
-        || !session::safe_remote_path(&remote)
-        || !supported_open_mode(&mode)
-    {
-        bail!("服务端文件元数据无效")
-    }
+        .ok_or_else(|| anyhow::anyhow!("服务端未提供文件长度（Content-Length），无法安全下载"))?;
+    validate_open_metadata(&file_id, &repo_id, &remote, &mode)?;
     if size > crate::device::MAX_FILE {
-        bail!("文件超过客户端本地编辑上限（1 GiB）")
+        let operation = if mode == "local-view" {
+            "查看"
+        } else {
+            "编辑"
+        };
+        bail!("文件超过客户端本地{operation}上限（1 GiB），尚未创建工作副本")
     }
     // 同一文件重复「本地查看 / 本地编辑」时先尝试合并到已有任务，绝不再建第二条。
     if let Some(existing) = session::find_task(root, &repo_id, &remote, &mode)? {
@@ -1406,6 +1426,24 @@ mod tests {
         assert_eq!(task.size, 6);
         assert!(conflict(&root, &id).is_none());
         assert_eq!(session::tasks(&root).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn invalid_download_metadata_reports_the_specific_header() {
+        let valid_id = "a".repeat(40);
+        let repo = uuid::Uuid::new_v4().to_string();
+        let good = || (valid_id.as_str(), repo.as_str(), "/file.prt", "local-view");
+        let (id, repo, path, mode) = good();
+        assert!(super::validate_open_metadata(id, repo, path, mode).is_ok());
+        for (id, repo, path, mode, field) in [
+            ("bad", repo, path, mode, "X-CF-File-ID"),
+            (id, "bad", path, mode, "X-CF-Repo-ID"),
+            (id, repo, "../bad", mode, "X-CF-Path-B64"),
+            (id, repo, path, "unknown", "X-CF-Mode"),
+        ] {
+            let error = super::validate_open_metadata(id, repo, path, mode).unwrap_err();
+            assert!(error.to_string().contains(field), "{error}");
+        }
     }
 
     #[test]

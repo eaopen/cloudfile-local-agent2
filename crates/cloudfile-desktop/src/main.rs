@@ -2156,29 +2156,56 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
                     std::thread::sleep(std::time::Duration::from_secs(2));
                 }
             });
-            // 启动后自检一次更新：有新版就轻提示一下（不弹窗、不打断），
-            // 具体升级仍由用户在「设置 → 检查更新」里决定。
+            // 启动后检查；常驻期间每 4 小时加 0~10 分钟抖动检查一次。
+            // 休眠唤醒后按墙上时间补查，失败退避重试，且同一版本只通知一次。
+            // 检查不执行升级，不能绕过 Guard 强杀已有编辑任务。
             let update_handle = handle.clone();
             let update_root = root.clone();
             std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_secs(5));
-                let probe = cloudfile_core::native::check_update(&update_root);
-                let available = probe
-                    .get("update_available")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false);
-                let latest = probe
-                    .get("latest_version")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                if available && !latest.is_empty() {
-                    present_toast(
-                        &update_handle,
-                        "info",
-                        &format!("发现新版本 v{latest}：可在设置里点「检查更新」升级"),
-                    );
-                    let _ = update_handle.emit("update-available", latest);
+                use std::time::{Duration, SystemTime, UNIX_EPOCH};
+                let jitter = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|now| (u64::from(now.subsec_nanos()) + u64::from(std::process::id())) % 601)
+                    .unwrap_or(0);
+                let mut next_check = SystemTime::now() + Duration::from_secs(5);
+                let mut failures = 0u32;
+                let mut last_announced = String::new();
+                loop {
+                    if update_handle.state::<State>().quitting.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let remaining = next_check
+                        .duration_since(SystemTime::now())
+                        .unwrap_or(Duration::ZERO);
+                    if !remaining.is_zero() {
+                        std::thread::sleep(remaining.min(Duration::from_secs(60)));
+                        continue;
+                    }
+                    let probe = cloudfile_core::native::check_update(&update_root);
+                    let error = probe.get("update_error").and_then(Value::as_str);
+                    if let Some(message) = error {
+                        failures = failures.saturating_add(1);
+                        // Only a diagnostic: a failed optional update check must not block files.
+                        eprintln!("CloudFile update check failed: {message}");
+                    } else {
+                        failures = 0;
+                        let latest = probe.get("latest_version")
+                            .and_then(Value::as_str).unwrap_or("");
+                        let available = probe.get("update_available")
+                            .and_then(Value::as_bool).unwrap_or(false);
+                        if available && !latest.is_empty() && last_announced != latest {
+                            last_announced = latest.to_owned();
+                            present_toast(
+                                &update_handle, "info",
+                                &format!("发现新版本 v{latest}：可在设置里点「检查更新」升级"),
+                            );
+                            let _ = update_handle.emit("update-available", latest.to_owned());
+                        }
+                        if !available {
+                            last_announced.clear();
+                        }
+                    }
+                    next_check = SystemTime::now() + update_check_delay(failures, jitter);
                 }
             });
             let guard_handle = handle.clone();
@@ -2197,7 +2224,7 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
                 let state = download_handle.state::<State>();
                 // 每 ~60 秒扫一次：删除时程序还开着导致没清掉的空目录，等它退出后补删。
                 ticks = ticks.wrapping_add(1);
-                if ticks % 150 == 0 {
+                if ticks.is_multiple_of(150) {
                     cloudfile_core::session::prune_empty_workspace(&state.root);
                 }
                 // 任务落盘/消失都通知界面刷新：否则文件都打开了，列表里还要等好几秒。
@@ -2351,6 +2378,36 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
         })
         .run(tauri::generate_context!())?;
     Ok(())
+}
+
+/// Checks are intentionally coarse: file work never waits for the periodic checker.
+fn update_check_delay(failures: u32, jitter_seconds: u64) -> std::time::Duration {
+    if failures == 0 {
+        std::time::Duration::from_secs(4 * 3600 + jitter_seconds.min(600))
+    } else {
+        // 15, 30, 60, 120, 240 minutes; never loop rapidly on broken networks.
+        let scale = 1u64 << failures.saturating_sub(1).min(4);
+        std::time::Duration::from_secs((15 * 60 * scale).min(4 * 3600))
+    }
+}
+
+#[cfg(test)]
+mod update_check_schedule_tests {
+    use super::update_check_delay;
+    use std::time::Duration;
+
+    #[test]
+    fn periodic_check_has_bounded_jitter_and_failure_backoff() {
+        assert_eq!(update_check_delay(0, 0), Duration::from_secs(4 * 3600));
+        assert_eq!(
+            update_check_delay(0, 999),
+            Duration::from_secs(4 * 3600 + 600)
+        );
+        assert_eq!(update_check_delay(1, 0), Duration::from_secs(15 * 60));
+        assert_eq!(update_check_delay(2, 0), Duration::from_secs(30 * 60));
+        assert_eq!(update_check_delay(3, 0), Duration::from_secs(60 * 60));
+        assert_eq!(update_check_delay(99, 0), Duration::from_secs(4 * 3600));
+    }
 }
 
 #[cfg(test)]

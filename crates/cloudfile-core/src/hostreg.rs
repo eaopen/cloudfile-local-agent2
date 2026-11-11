@@ -149,7 +149,11 @@ pub fn default_manifest_dir(
 
 pub fn manifest_dir() -> Result<PathBuf> {
     let home = dirs::home_dir().context("home directory unavailable")?;
-    let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    // Enterprise environments sometimes scrub environment variables; Known Folder
+    // resolution does not depend on CMD, PowerShell or PATH.
+    let local = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .or_else(dirs::data_local_dir);
     let current = default_manifest_dir(std::env::consts::OS, &home, local.as_deref())?;
     // 老机器（升级上来的）注册目录还叫 `CloudFileAgent22`：它还在就继续用它 ——
     // 否则新目录是空的，`state()` 会报「未注册」，连回退与升级接管都找不到原注册。
