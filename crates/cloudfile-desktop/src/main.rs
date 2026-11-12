@@ -550,10 +550,8 @@ fn log_profile_refresh(root: &Path, line: &str) {
 /// 常驻进程每小时/每 4 小时都会写一行，不截断会一直长下去。
 fn append_log_line(path: &Path, line: &str) {
     truncate_log(path);
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    // 本地时间戳（`2026-11-12 10:56:59`）：现场看日志不用再拿 Unix 秒换算。
+    let stamp = cloudfile_core::local_stamp();
     let _ = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -2020,6 +2018,7 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
             rollback_host,
             setup_state,
             setup_apply,
+            pending_update,
             setup_finish,
             open_extension_dir,
             update_extension,
@@ -2276,8 +2275,13 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
                 // 排查/验收时可用环境变量缩短，免得等四个小时：
                 //   CLOUDFILE_UPDATE_CHECK_FIRST_SECONDS=3
                 //   CLOUDFILE_UPDATE_CHECK_SECONDS=20
-                let first = env_seconds("CLOUDFILE_UPDATE_CHECK_FIRST_SECONDS").unwrap_or(5);
-                let fixed_interval = env_seconds("CLOUDFILE_UPDATE_CHECK_SECONDS");
+                // 优先级：环境变量 > <agent 根>/update-check.json > 默认（5 秒 / 4 小时）。
+                // 托盘自启的进程拿不到环境变量，所以留了一个文件开关给现场验收用。
+                let first = env_seconds("CLOUDFILE_UPDATE_CHECK_FIRST_SECONDS")
+                    .or_else(|| file_seconds(&update_root, "first_seconds"))
+                    .unwrap_or(5);
+                let fixed_interval = env_seconds("CLOUDFILE_UPDATE_CHECK_SECONDS")
+                    .or_else(|| file_seconds(&update_root, "interval_seconds"));
                 let mut next_check = SystemTime::now() + Duration::from_secs(first.max(1));
                 let mut failures = 0u32;
                 let mut last_announced = String::new();
@@ -2304,22 +2308,37 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
                             .and_then(Value::as_str).unwrap_or("");
                         let available = probe.get("update_available")
                             .and_then(Value::as_bool).unwrap_or(false);
-                        if available && !latest.is_empty() && last_announced != latest {
-                            last_announced = latest.to_owned();
-                            // 每次启动都弹一次太吵：同一个版本 24 小时只提醒一次。
-                            // 界面上的「检查更新」不受影响，用户想升随时能升。
-                            if !announcement_throttled(&update_root, latest) {
-                                present_toast(
-                                    &update_handle,
-                                    "info",
-                                    &format!("发现新版本 v{latest}：可在设置里点「检查更新」升级"),
-                                );
+                        if available && !latest.is_empty() {
+                            // 弹窗要跟手动「检查更新」一致，所以把版本和说明一起给界面。
+                            // 但"要不要打断用户"由节流决定：同一版本 24 小时内只弹一次，
+                            // 标识（界面上检查更新按钮的红点）每次都刷新，一直都在。
+                            let announce =
+                                last_announced != latest && !announcement_throttled(&update_root, latest);
+                            if announce {
+                                last_announced = latest.to_owned();
                                 remember_announcement(&update_root, latest);
+                                // 窗口没开（托盘常驻）时弹窗看不见，退回一条系统提示。
+                                if !window_visible(&update_handle) {
+                                    present_toast(
+                                        &update_handle,
+                                        "info",
+                                        &format!("发现新版本 v{latest}：点「检查更新」可升级"),
+                                    );
+                                }
                             }
-                            let _ = update_handle.emit("update-available", latest.to_owned());
+                            let _ = update_handle.emit(
+                                "update-available",
+                                json!({
+                                    "version": latest,
+                                    "notes": probe.get("latest_notes").and_then(Value::as_str).unwrap_or(""),
+                                    "announce": announce,
+                                }),
+                            );
                         }
                         if !available {
                             last_announced.clear();
+                            // 已经是通道上的最新版（或被更新版本取代）：界面把红点收掉。
+                            let _ = update_handle.emit("update-cleared", ());
                         }
                     }
                     let delay = match fixed_interval {
@@ -2522,6 +2541,16 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
 }
 
 /// Checks are intentionally coarse: file work never waits for the periodic checker.
+/// 读 `<agent 根>/update-check.json` 里的秒数：`{"first_seconds":3,"interval_seconds":20}`。
+///
+/// 只是给验收用的临时间隔（托盘自启的进程没有环境变量，改命令行很麻烦）。
+/// 文件不存在、写坏了、值不合理都当没有 —— 生产环境本来也不会有这个文件。
+fn file_seconds(root: &Path, key: &str) -> Option<u64> {
+    let text = std::fs::read(root.join("update-check.json")).ok()?;
+    let value: Value = serde_json::from_slice(&text).ok()?;
+    value.get(key).and_then(Value::as_u64)
+}
+
 /// 读一个"秒数"环境变量；没设置或写得不像数字就当没有。
 fn env_seconds(name: &str) -> Option<u64> {
     std::env::var(name).ok()?.trim().parse::<u64>().ok()
@@ -2531,6 +2560,31 @@ fn env_seconds(name: &str) -> Option<u64> {
 ///
 /// 「4 小时那次到底跑没跑」在界面上看不出来，落一行日志既方便验收，
 /// 也方便现场判断"提示没弹"是没检查、还是检查了但版本不比当前新。
+/// 主窗口是否真的显示着。托盘常驻时弹窗没人看得见，那种情况退回系统提示。
+fn window_visible(app: &tauri::AppHandle) -> bool {
+    app.get_webview_window("main")
+        .and_then(|window| window.is_visible().ok())
+        .unwrap_or(false)
+}
+
+/// 界面启动时问一次：有没有"已经提醒过、但还没升级"的版本？有就在按钮上点红点。
+///
+/// 读 `update-announce.json` 而不是发网络请求：开机时不该为了一个标识多连一次服务器。
+/// 只要那个版本仍然比当前运行版本新，红点就一直留着；升级上去（或被更新的版本覆盖）自然消失。
+#[tauri::command]
+fn pending_update(state: tauri::State<'_, State>) -> Option<String> {
+    pending_update_version(&state.root)
+}
+
+/// 已经提醒过、但还没升上去的版本；没有就返回 None。
+fn pending_update_version(root: &Path) -> Option<String> {
+    let text = std::fs::read(announcement_file(root)).ok()?;
+    let value: Value = serde_json::from_slice(&text).ok()?;
+    let version = value.get("version").and_then(Value::as_str)?;
+    (cloudfile_core::update::compare(version, cloudfile_core::VERSION).is_gt())
+        .then(|| version.to_string())
+}
+
 /// 升级提示的节流窗口：同一版本 24 小时内只弹一次。
 const ANNOUNCE_WINDOW: u64 = 24 * 3600;
 
@@ -2578,31 +2632,18 @@ fn log_update_check(
     source: &str,
     next_seconds: u64,
 ) {
-    let path = root.join("update-check.log");
-    truncate_log(&path);
-    use std::io::Write;
     let line = if let Some(message) = error {
         // 现场最需要的就是"为什么失败"：没配源、缺公钥、两个源都不通，各写各的。
         format!(
-            "{}\t检查失败：{}\t下次 {}s 后重试\n",
-            cloudfile_core::now(),
+            "检查失败：{}\t下次 {}s 后重试",
             one_line(message),
             next_seconds
         )
     } else {
-        format!(
-            "{}\t最新={latest}\t可用={available}\t源={source}\t下次 {}s 后再查\n",
-            cloudfile_core::now(),
-            next_seconds
-        )
+        format!("最新={latest}\t可用={available}\t源={source}\t下次 {next_seconds}s 后再查")
     };
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    {
-        let _ = file.write_all(line.as_bytes());
-    }
+    // 时间戳由 append_log_line 统一加（同一套格式，也顺带带上了截断）。
+    append_log_line(&root.join("update-check.log"), &line);
 }
 
 fn update_check_delay(failures: u32, jitter_seconds: u64) -> std::time::Duration {
@@ -2689,6 +2730,90 @@ mod update_notice_tests {
         // 文件坏掉：当作没提醒过，不影响功能。
         std::fs::write(&path, b"not json").unwrap();
         assert!(!announcement_throttled(&root, "2.0.30"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod update_interval_file_tests {
+    use super::file_seconds;
+    use std::path::PathBuf;
+
+    fn temp_root(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("cf-interval-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// 验收用的临时间隔：文件写了就用，没写/写坏/缺键都退回默认。
+    #[test]
+    fn reads_seconds_from_the_override_file() {
+        let root = temp_root("interval");
+        assert_eq!(
+            file_seconds(&root, "interval_seconds"),
+            None,
+            "没有文件时用默认"
+        );
+
+        cloudfile_core::storage::write(
+            &root.join("update-check.json"),
+            &serde_json::json!({"first_seconds": 3, "interval_seconds": 20}),
+        )
+        .unwrap();
+        assert_eq!(file_seconds(&root, "first_seconds"), Some(3));
+        assert_eq!(file_seconds(&root, "interval_seconds"), Some(20));
+        assert_eq!(file_seconds(&root, "missing_key"), None);
+
+        // 写坏了 / 类型不对：当没设置，不能让更新线程起不来。
+        std::fs::write(root.join("update-check.json"), b"not json").unwrap();
+        assert_eq!(file_seconds(&root, "interval_seconds"), None);
+        cloudfile_core::storage::write(
+            &root.join("update-check.json"),
+            &serde_json::json!({"interval_seconds": "20"}),
+        )
+        .unwrap();
+        assert_eq!(file_seconds(&root, "interval_seconds"), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod pending_update_tests {
+    use super::{announcement_file, pending_update_version};
+    use std::path::PathBuf;
+
+    fn temp_root(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("cf-pending-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// 红点的判据：提醒过的版本比当前新才亮；升级到该版本后必须自己消失。
+    #[test]
+    fn badge_survives_until_the_version_is_installed() {
+        let root = temp_root("badge");
+        // 没提醒过 → 不亮。
+        assert_eq!(pending_update_version(&root), None);
+
+        let newer = "999.0.0";
+        cloudfile_core::storage::write(
+            &announcement_file(&root),
+            &serde_json::json!({"version": newer, "at": cloudfile_core::now()}),
+        )
+        .unwrap();
+        assert_eq!(pending_update_version(&root).as_deref(), Some(newer));
+
+        // 当前版本（或更旧的提醒记录）→ 不亮：已经升上去了，或者那次提示已过时。
+        cloudfile_core::storage::write(
+            &announcement_file(&root),
+            &serde_json::json!({"version": cloudfile_core::VERSION, "at": cloudfile_core::now()}),
+        )
+        .unwrap();
+        assert_eq!(pending_update_version(&root), None);
+
+        // 文件坏了也不该让界面出问题。
+        std::fs::write(announcement_file(&root), b"not json").unwrap();
+        assert_eq!(pending_update_version(&root), None);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

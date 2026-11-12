@@ -53,7 +53,7 @@
         <details class="settings-group"><summary>工作副本目录</summary><label class="field"><span class="hint">修改仅影响新任务；留空恢复默认目录。</span><input id="workspace_root" type="text" aria-label="工作副本目录" placeholder="默认：用户主目录 / CloudFile-Dev / Workspace"></label><div class="form-footer"><button>保存设置</button><button type="button" id="workspace-reset" class="secondary">恢复默认目录</button><span class="hint">已有文件和编辑任务会保留在原位置。</span></div></details>
       </form>
     </section>
-    <section class="panel"><div class="section-heading"><div><h2>关于与更新</h2><p id="version" class="hint"></p></div><div class="row"><button id="app-profile-sync" class="secondary" type="button">同步应用信息</button><button id="check-update" class="secondary">检查更新</button></div></div>
+    <section class="panel"><div class="section-heading"><div><h2>关于与更新</h2><p id="version" class="hint"></p></div><div class="row"><button id="app-profile-sync" class="secondary" type="button">同步应用信息</button><button id="check-update" class="secondary">检查更新<span id="update-badge" class="update-dot" hidden>新版本</span></button></div></div>
       <details class="advanced"><summary>浏览器连接与诊断</summary><div class="advanced-content">
         <p id="install-path" class="technical"></p><p id="host-state" class="technical"></p>
         <p class="hint">仅在开发安装或排查浏览器连接时使用。更换注册前会保留回退副本。</p>

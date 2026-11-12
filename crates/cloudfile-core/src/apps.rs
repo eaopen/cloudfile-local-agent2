@@ -262,7 +262,6 @@ fn log_nx_route(
 ) {
     use std::io::Write;
     let path = root.join("nx-route.log");
-    let now = crate::now();
     let sessions: Vec<String> = running
         .iter()
         .map(|item| {
@@ -281,8 +280,10 @@ fn log_nx_route(
         Ok(crate::nx_router::Choice::RouteTo(pid)) => format!("RouteTo({pid})"),
         Err(error) => format!("拒绝：{error}"),
     };
+    // 与其它日志统一：本地时间字符串，现场不用换算。
+    let stamp = crate::local_stamp();
     let line = format!(
-        "{now}\tdetected={}\trunning=[{}]\tchoice={verdict}\n",
+        "{stamp}\tdetected={}\trunning=[{}]\tchoice={verdict}\n",
         ugraf.to_string_lossy(),
         sessions.join("; ")
     );

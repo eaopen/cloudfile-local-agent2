@@ -344,3 +344,26 @@ test('ordinary Host re-registration never needs a takeover confirmation', async 
   assert.equal(registrations.length, 1);
   assert.equal(registrations[0].args.takeover, false);
 });
+
+test('new version lights the badge and reuses the same dialog as the manual check', () => {
+  const { ctx, elements } = fakeApp([]);
+  // 没有新版本：红点收起。
+  ctx.setUpdateBadge(null);
+  assert.equal(elements.get('update-badge').hidden, true);
+
+  // 有新版：红点亮，悬停提示带版本号。
+  ctx.setUpdateBadge('2.0.30');
+  assert.equal(elements.get('update-badge').hidden, false);
+  assert.match(elements.get('update-badge').title, /2\.0\.30/);
+
+  // 弹窗与手动「检查更新」发现新版时完全一致（标题、说明、两个按钮都来自同一处）。
+  ctx.promptUpdate('2.0.30', '修复了几个问题');
+  assert.match(elements.get('dialog-title').textContent, /发现新版本 2\.0\.30/);
+  assert.match(elements.get('dialog-body').textContent, /修复了几个问题/);
+  const actions = elements.get('dialog-actions').children.map(item => item.textContent);
+  assert.deepEqual(actions, ['下载并升级', '稍后']);
+
+  // 升级后（或被更新版本取代）收掉。
+  ctx.setUpdateBadge(null);
+  assert.equal(elements.get('update-badge').hidden, true);
+});

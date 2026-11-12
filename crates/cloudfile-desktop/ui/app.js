@@ -404,6 +404,24 @@ function closeDialog() {
   document.querySelector('#dialog').hidden = true;
 }
 
+/// 「检查更新」按钮上的新版本标识：有版本号就亮，没有就收起来。
+function setUpdateBadge(version) {
+  const badge = document.querySelector('#update-badge');
+  if (!badge) return;
+  badge.hidden = !version;
+  badge.title = version ? `有新版本 v${version}` : '';
+}
+
+/// 发现新版本时的弹窗。手动检查和自动检查走同一个，文案与按钮完全一致。
+function promptUpdate(version, notes) {
+  setUpdateBadge(version);
+  dialog(
+    `发现新版本 ${version}`,
+    `${notes || '暂无版本说明。'}\n\n升级会在后台下载并安装，完成后需要重启任务中心才会生效。`,
+    [['下载并升级', () => applyUpdate()], ['稍后', closeDialog, true]],
+  );
+}
+
 function openButton(task) {
   return button(
     '打开文件',
@@ -1047,11 +1065,7 @@ function wire() {
         }
         return;
       }
-      dialog(
-        `发现新版本 ${result.latest_version}`,
-        `${result.latest_notes || '暂无版本说明。'}\n\n升级会在后台下载并安装，完成后需要重启任务中心才会生效。`,
-        [['下载并升级', () => applyUpdate()], ['稍后', closeDialog, true]],
-      );
+      promptUpdate(result.latest_version, result.latest_notes);
     } catch (error) {
       dialog('检查更新失败', String(error), [['知道了']]);
     }
@@ -1147,6 +1161,22 @@ function wire() {
   listen('tasks-changed', () => refresh());
   // 首次启动会自动把引导五步做掉（注册浏览器连接、部署扩展…），做完通知界面重画一次。
   listen('setup-changed', () => loadSetup().catch(() => {}));
+  // 自动检查发现新版本：标识一定亮；弹窗只在后端认为"该提醒了"时弹（同一版本 24 小时一次）。
+  listen('update-available', (event) => {
+    const payload = event && event.payload ? event.payload : {};
+    const version = typeof payload === 'string' ? payload : payload.version;
+    if (!version) return;
+    setUpdateBadge(version);
+    if (payload.announce && document.querySelector('#dialog').hidden) {
+      promptUpdate(version, payload.notes);
+    }
+  });
+  // 通道上的最新版已经不比自己新（升级完或被更新版本取代）：标识收掉。
+  listen('update-cleared', () => setUpdateBadge(null));
+  // 启动时补一次：后端可能在我们加载完之前就查过了。
+  invoke('pending_update')
+    .then((version) => setUpdateBadge(version))
+    .catch(() => {});
   // 后台自动刷新（或别处同步）成功后主进程会推一份新的概览：直接用上，
   // 不用重启也不用再点一次同步。payload 缺失时保持现状。
   listen('app-profile', ({ payload }) => {

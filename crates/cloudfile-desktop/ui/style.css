@@ -6,6 +6,12 @@ body{background:var(--bg);color:var(--text);font:13px/1.6 -apple-system,"Segoe U
 aside{width:184px;flex:0 0 184px;background:var(--panel);border-right:1px solid var(--line);padding:24px 14px 16px;display:flex;flex-direction:column;gap:10px}
 .brand{font-weight:700;font-size:18px;padding:0 8px;white-space:nowrap;letter-spacing:-.4px}.brand-mark{display:inline-block;width:26px;height:26px;vertical-align:-6px;background:var(--accent);-webkit-mask:url("cloudfile-mark.png") center/contain no-repeat;mask:url("cloudfile-mark.png") center/contain no-repeat}
 .badge{font-size:10px;letter-spacing:.04em;color:var(--muted);padding-left:9px}
+/* 「检查更新」按钮上的新版本标识：红底白字的小胶囊，比圆点更醒目；
+   有新版就一直亮着，升级到该版本或被更新版本取代才消失。 */
+.update-dot{display:inline-flex;align-items:center;justify-content:center;margin-left:8px;padding:1px 7px;border-radius:999px;background:#dc2626;color:#fff;font-size:10px;font-weight:600;line-height:1.6;letter-spacing:.02em;white-space:nowrap;box-shadow:0 0 0 3px rgba(220,38,38,.16);animation:update-pulse 1.8s ease-in-out infinite}
+.update-dot[hidden]{display:none}
+@keyframes update-pulse{0%,100%{box-shadow:0 0 0 3px rgba(220,38,38,.16)}50%{box-shadow:0 0 0 6px rgba(220,38,38,.04)}}
+@media (prefers-reduced-motion: reduce){.update-dot{animation:none}}
 nav{display:flex;flex-direction:column;gap:5px;margin-top:26px}
 button{font:inherit;border:1px solid var(--accent);background:var(--accent);color:#fff;border-radius:7px;padding:7px 13px;min-height:34px;cursor:pointer;transition:background .12s,border-color .12s}
 button:hover{background:#1966d7}button.secondary{background:var(--panel);color:var(--text);border-color:var(--line)}button.secondary:hover{background:#f0f4f9;border-color:#cbd5e3}button:disabled{opacity:.45;cursor:not-allowed}button:focus-visible,input:focus-visible,summary:focus-visible{outline:2px solid #7baaff;outline-offset:3px}
