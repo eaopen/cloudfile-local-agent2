@@ -404,6 +404,19 @@ function closeDialog() {
   document.querySelector('#dialog').hidden = true;
 }
 
+/// 用应用自己的弹窗问一句"要不要继续"，返回 Promise<boolean>。
+///
+/// 不用 `window.confirm`：WebView2 里原生确认框会被宿主拦掉，点了没反应
+/// （2026-11-12 现场：升级按钮点了像没生效，其实是"仍有任务未处理"那步的确认框没出来）。
+function askDialog(title, body, okLabel) {
+  return new Promise((resolve) => {
+    dialog(title, body, [
+      [okLabel, () => { closeDialog(); resolve(true); }],
+      ['取消', () => { closeDialog(); resolve(false); }, true],
+    ]);
+  });
+}
+
 /// 「检查更新」按钮上的新版本标识：有版本号就亮，没有就收起来。
 function setUpdateBadge(version) {
   const badge = document.querySelector('#update-badge');
@@ -478,9 +491,12 @@ function renderExclusive(buttons, task, working) {
     }),
   );
   buttons.append(
-    button('释放独占（不提交）', () => {
+    button('释放独占（不提交）', async () => {
       const warning = taskUX.releaseWarning(task);
-      if (warning && window.confirm(warning)) action(task, 'release_checkout');
+      // 原生的 confirm 在 WebView2 里会被拦掉（点了像没反应），统一走应用内弹窗。
+      if (warning && (await askDialog('确认释放独占', warning, '仍然释放'))) {
+        action(task, 'release_checkout');
+      }
     }, {
       secondary: true,
       disabled: working || pending || !task.has_lease,
@@ -578,7 +594,7 @@ function renderTask(task) {
           if (task.needs_review) {
             lines.push('任务状态本来就读不出来，删除后不再保留任何本地记录。');
           }
-          if (!window.confirm(lines.join('\n'))) return;
+          if (!(await askDialog(lines.shift(), lines.join('\n'), '删除'))) return;
           let outcome = await action(task, 'delete_task');
           // 句柄已经没了，但我们启动的那个程序还开着：这种只能问一次。
           if (!outcome.error && outcome.result && outcome.result.requires_confirm) {
@@ -914,6 +930,98 @@ async function loadSettings() {
   return current;
 }
 
+// 后台升级：native-host --update 在独立进程里下载并安装，结果写 update-result.json。
+// 这里必须自己轮询，否则用户看到的最后一个状态永远是「正在升级…」。
+async function applyUpdate() {
+  dialog('正在升级…', '正在下载并安装新版本，请不要关闭任务中心。', []);
+  let result;
+  try {
+    result = await invoke('run_update', { force: false });
+    if (result.state === 'blocked') {
+      // Exactly the exit dialog's trade-off: an upgrade stops the process
+      // that renews Checkouts, so it is never silent when something is at risk.
+      const risks = (result.assessment && result.assessment.risks) || [];
+      const detail = risks
+        .slice(0, 4)
+        .map((risk) => `${risk.file_name}：${REASON_TEXT[risk.reasons[0]] || risk.reasons[0]}`)
+        .join('\n');
+      const proceed = await askDialog(
+        '仍有任务未处理',
+        `升级会中断后台续租：\n${detail}\n\n本地工作副本与待确认的 Intent 都会保留。是否继续升级？`,
+        '仍然升级',
+      );
+      if (!proceed) {
+        dialog('已取消升级', '当前版本保持不变。', [['知道了']]);
+        return;
+      }
+      dialog('正在升级…', '正在下载并安装新版本，请不要关闭任务中心。', []);
+      result = await invoke('run_update', { force: true });
+    }
+  } catch (error) {
+    dialog('升级失败', String(error), [['知道了']]);
+    return;
+  }
+  if (result.state !== 'running') {
+    dialog('升级未开始', stateText(result), [['知道了']]);
+    return;
+  }
+  const deadline = Date.now() + 4 * 60 * 1000;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    let state;
+    try {
+      state = await invoke('update_state');
+    } catch {
+      continue;
+    }
+    const outcome = state.result && state.result.state;
+    if (outcome === 'completed') {
+      const target = state.active_version ? ` ${state.active_version}` : '';
+      dialog(
+        '升级完成',
+        `已安装${target}。需要重启任务中心才会用上新版本。`,
+        [
+          ['立即重启', () => invoke('restart_app').catch((error) => dialog('重启失败', String(error), [['知道了']]))],
+          ['稍后重启', closeDialog, true],
+        ],
+      );
+      return;
+    }
+    if (outcome === 'failed') {
+      // 后台进程把失败原因写在 update-result.json 里；完整过程在同目录的 update.log。
+      // 只给一句「没装成功」的话，现场只能靠猜。
+      const reason = (state.result && state.result.error) || '';
+      const log = state.log ? `\n\n详细日志：${state.log}` : '';
+      dialog(
+        '升级失败',
+        reason
+          ? `${reason}${log}`
+          : `新版本没有安装成功。可以稍后再试；如果反复失败，请检查更新通道是否可访问。${log}`,
+        [['知道了']],
+      );
+      return;
+    }
+  }
+  dialog('升级仍在进行', '后台还在下载或安装。稍后到「设置 → 检查更新」可以再看一次结果。', [['知道了']]);
+}
+
+/// 界面脚本抛错时别再"静默没反应"：任何未处理的异常都弹一次说明。
+///
+/// 2026-11-13 现场：按钮的 onclick 里抛了 ReferenceError，控制台里有、
+/// 界面上什么都没有 —— 用户只会说"点了没反应"，排查得从头猜。
+function installErrorDialog() {
+  if (!window.addEventListener) return;
+  window.addEventListener('unhandledrejection', (event) => {
+    const reason = event && event.reason;
+    const message = reason && reason.message ? reason.message : String(reason || '');
+    dialog('操作没有完成', message || '界面脚本出错，请重试；如果反复出现请把这一步告诉管理员。', [['知道了']]);
+  });
+  window.addEventListener('error', (event) => {
+    const message = event && event.message ? event.message : '';
+    dialog('界面出错', message || '界面脚本出错，请重试。', [['知道了']]);
+  });
+}
+
 function wire() {
   for (const item of document.querySelectorAll('[data-view]')) {
     item.onclick = () => setView(item.dataset.view);
@@ -1000,11 +1108,13 @@ function wire() {
       // Query the live registration, not the stale settings render. A generic
       // "register" click is not consent to replace a legacy .NET controller.
       const state = await invoke('setup_state');
-      if (state.host_foreign && !window.confirm(
+      if (state.host_foreign && !(await askDialog(
+        '接管 Host 注册',
         `检测到 ${state.host} 已由其他程序注册。\n` +
         '接管会改由 Rust Agent 响应浏览器请求，可能中断原 Windows .NET 客户端。\n' +
         '原注册将先备份，之后可在此点击“回退 Host 注册”。\n\n确认接管？',
-      )) {
+        '确认接管',
+      ))) {
         say('已取消 Host 接管；原客户端保持不变。');
         return;
       }
@@ -1071,78 +1181,7 @@ function wire() {
     }
   };
 
-  // 后台升级：native-host --update 在独立进程里下载并安装，结果写 update-result.json。
-  // 这里必须自己轮询，否则用户看到的最后一个状态永远是「正在升级…」。
-  async function applyUpdate() {
-    dialog('正在升级…', '正在下载并安装新版本，请不要关闭任务中心。', []);
-    let result;
-    try {
-      result = await invoke('run_update', { force: false });
-      if (result.state === 'blocked') {
-        // Exactly the exit dialog's trade-off: an upgrade stops the process
-        // that renews Checkouts, so it is never silent when something is at risk.
-        const risks = (result.assessment && result.assessment.risks) || [];
-        const detail = risks
-          .slice(0, 4)
-          .map((risk) => `${risk.file_name}：${REASON_TEXT[risk.reasons[0]] || risk.reasons[0]}`)
-          .join('\n');
-        const proceed = window.confirm(
-          `仍有任务未处理，升级会中断后台续租：\n${detail}\n\n本地工作副本与待确认的 Intent 都会保留。是否继续升级？`,
-        );
-        if (!proceed) {
-          dialog('已取消升级', '当前版本保持不变。', [['知道了']]);
-          return;
-        }
-        dialog('正在升级…', '正在下载并安装新版本，请不要关闭任务中心。', []);
-        result = await invoke('run_update', { force: true });
-      }
-    } catch (error) {
-      dialog('升级失败', String(error), [['知道了']]);
-      return;
-    }
-    if (result.state !== 'running') {
-      dialog('升级未开始', stateText(result), [['知道了']]);
-      return;
-    }
-    const deadline = Date.now() + 4 * 60 * 1000;
-    while (Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-      let state;
-      try {
-        state = await invoke('update_state');
-      } catch {
-        continue;
-      }
-      const outcome = state.result && state.result.state;
-      if (outcome === 'completed') {
-        const target = state.active_version ? ` ${state.active_version}` : '';
-        dialog(
-          '升级完成',
-          `已安装${target}。需要重启任务中心才会用上新版本。`,
-          [
-            ['立即重启', () => invoke('restart_app').catch((error) => dialog('重启失败', String(error), [['知道了']]))],
-            ['稍后重启', closeDialog, true],
-          ],
-        );
-        return;
-      }
-      if (outcome === 'failed') {
-        // 后台进程把失败原因写在 update-result.json 里；完整过程在同目录的 update.log。
-        // 只给一句「没装成功」的话，现场只能靠猜。
-        const reason = (state.result && state.result.error) || '';
-        const log = state.log ? `\n\n详细日志：${state.log}` : '';
-        dialog(
-          '升级失败',
-          reason
-            ? `${reason}${log}`
-            : `新版本没有安装成功。可以稍后再试；如果反复失败，请检查更新通道是否可访问。${log}`,
-          [['知道了']],
-        );
-        return;
-      }
-    }
-    dialog('升级仍在进行', '后台还在下载或安装。稍后到「设置 → 检查更新」可以再看一次结果。', [['知道了']]);
-  }
+
 
 
   document.querySelector('#exit-cancel').onclick = () => {
@@ -1177,6 +1216,28 @@ function wire() {
   invoke('pending_update')
     .then((version) => setUpdateBadge(version))
     .catch(() => {});
+  // 已经装上新版本、但当前进程还是旧的：说清楚，并给一条"立即重启"的路。
+  const offerRestart = (version) => {
+    if (!version || !document.querySelector('#dialog').hidden) return;
+    dialog(
+      `新版本 ${version} 已安装`,
+      `当前运行的还是旧版本。重启任务中心后才会用上 ${version}。`,
+      [
+        ['立即重启', () => invoke('restart_app').catch((error) => dialog('重启失败', String(error), [['知道了']]))],
+        ['稍后重启', closeDialog, true],
+      ],
+    );
+  };
+  listen('update-installed', (event) => {
+    const payload = event && event.payload ? event.payload : {};
+    offerRestart(typeof payload === 'string' ? payload : payload.version);
+  });
+  invoke('pending_restart')
+    .then((version) => {
+      // 启动时别抢在首屏之前弹，等界面稳定。
+      if (version) setTimeout(() => offerRestart(version), 1200);
+    })
+    .catch(() => {});
   // 后台自动刷新（或别处同步）成功后主进程会推一份新的概览：直接用上，
   // 不用重启也不用再点一次同步。payload 缺失时保持现状。
   listen('app-profile', ({ payload }) => {
@@ -1200,6 +1261,7 @@ function wire() {
 }
 
 async function start() {
+  installErrorDialog();
   wire();
   try {
     const state = await invoke('setup_state');

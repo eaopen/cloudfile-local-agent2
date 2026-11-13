@@ -314,32 +314,43 @@ test('setup status renders first-run steps without registering an external servi
 
 
 test('Host repair never takes over a foreign controller without explicit consent', async () => {
-  const { ctx, elements, calls, confirmations } = fakeApp([], { hostForeign: true });
+  const { ctx, elements, calls } = fakeApp([], { hostForeign: true });
   vm.runInContext('wire()', ctx);
-  await elements.get('host-register').onclick();
-  assert.equal(confirmations.length, 1);
-  assert.match(confirmations[0], /旧|\.NET/);
+  const pending = elements.get('host-register').onclick();
+  // 确认框现在是应用内弹窗（原生 confirm 会被 WebView2 拦掉），要点"取消"这一侧。
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.match(elements.get('dialog-title').textContent, /接管|注册/);
+  assert.match(elements.get('dialog-body').textContent, /旧|\.NET/);
+  const actions = elements.get('dialog-actions').children;
+  assert.equal(actions.length, 2);
+  assert.equal(actions[1].textContent, '取消');
+  actions[1].onclick();
+  await pending;
   assert.equal(calls.some(call => call.name === 'register_host'), false);
   assert.match(elements.get('message').textContent, /已取消/);
 });
 
 test('Host takeover passes true only after the user confirms an existing foreign controller', async () => {
-  const { ctx, elements, calls, confirmations } = fakeApp(
-    [], { hostForeign: true, confirmTakeover: true }
-  );
+  const { ctx, elements, calls } = fakeApp([], { hostForeign: true });
   vm.runInContext('wire()', ctx);
-  await elements.get('host-register').onclick();
-  assert.equal(confirmations.length, 1);
+  const pending = elements.get('host-register').onclick();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  elements.get('dialog-actions').children[0].onclick(); // 确认接管
+  await pending;
   const registrations = calls.filter(call => call.name === 'register_host');
   assert.equal(registrations.length, 1);
   assert.equal(registrations[0].args.takeover, true);
 });
 
 test('ordinary Host re-registration never needs a takeover confirmation', async () => {
-  const { ctx, elements, calls, confirmations } = fakeApp([]);
+  const { ctx, elements, calls } = fakeApp([]);
   vm.runInContext('wire()', ctx);
   await elements.get('host-register').onclick();
-  assert.equal(confirmations.length, 0);
+  assert.doesNotMatch(
+    String(elements.get('dialog-title').textContent || ''),
+    /接管/,
+    '同源重注册不该弹接管确认',
+  );
   const registrations = calls.filter(call => call.name === 'register_host');
   assert.equal(registrations.length, 1);
   assert.equal(registrations[0].args.takeover, false);
@@ -366,4 +377,35 @@ test('new version lights the badge and reuses the same dialog as the manual chec
   // 升级后（或被更新版本取代）收掉。
   ctx.setUpdateBadge(null);
   assert.equal(elements.get('update-badge').hidden, true);
+});
+
+test('blocked upgrade asks with the app dialog instead of window.confirm', () => {
+  // WebView2 会把原生 confirm 拦掉，升级按钮点了像没反应（2026-11-12 现场）。
+  assert.match(script, /function askDialog\(/, '应当有应用内确认框');
+  assert.doesNotMatch(script, /const proceed = window\.confirm\(/, '升级确认不能再走 window.confirm');
+  assert.match(script, /仍然升级/, '确认按钮文案要在');
+});
+
+test('native JS dialogs are banned: WebView2 swallows confirm/alert/prompt', () => {
+  // 2026-11-12 现场：点「下载并升级」像没反应，其实是"仍有任务未处理"那步的
+  // window.confirm 在 WebView2 里被拦掉了 —— 既没有框，Promise 也不返回。
+  // 一律用 askDialog（应用内弹窗），这条门禁防止再写回去。
+  assert.doesNotMatch(script, /window\.confirm\s*\(/, '禁止 window.confirm');
+  assert.doesNotMatch(script, /window\.alert\s*\(/, '禁止 window.alert');
+  assert.doesNotMatch(script, /window\.prompt\s*\(/, '禁止 window.prompt');
+  assert.match(script, /function askDialog\(/, '应用内确认框必须在');
+});
+
+test('“下载并升级”真的会去调 run_update（不能是作用域错误导致静默失败）', async () => {
+  // 2026-11-13 现场：点「下载并升级」没反应。原因是 applyUpdate 定义在 wire() 里，
+  // 而顶层的 promptUpdate 引用不到它 —— 点下去抛 ReferenceError，界面上什么都没发生。
+  const { ctx, elements, calls } = fakeApp([]);
+  ctx.promptUpdate('9.9.9', '说明');
+  const actions = elements.get('dialog-actions').children;
+  assert.equal(actions[0].textContent, '下载并升级');
+  await actions[0].onclick();
+  assert.ok(
+    calls.some(call => call.name === 'run_update'),
+    '点击必须真的发起升级（run_update）',
+  );
 });

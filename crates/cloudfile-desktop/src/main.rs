@@ -1896,13 +1896,21 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
                                 }
                             }
                         }
+                        let _ = cloudfile_core::ipc::call(
+                            &root,
+                            cloudfile_core::wire::Request::OpenTaskCenter {},
+                        );
                         return Ok(());
                     }
                 }
             }
         }
         // A second launch only needs to raise the window the first one owns.
+        // 以前这里直接 return，用户看到的只是"双击了没反应"（2026-11-12 现场：
+        // 装完新版再跑一次安装脚本，旧界面还停在旧版本、也没有任何提示）。
         Err(_) => {
+            let _ =
+                cloudfile_core::ipc::call(&root, cloudfile_core::wire::Request::OpenTaskCenter {});
             if missing_now && !autostart {
                 match installer.as_deref() {
                     Some(installer) => {
@@ -2019,6 +2027,7 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
             setup_state,
             setup_apply,
             pending_update,
+            pending_restart,
             setup_finish,
             open_extension_dir,
             update_extension,
@@ -2514,6 +2523,11 @@ fn run(autostart: bool, await_instance: bool) -> anyhow::Result<()> {
                     // 绝不重复开第二个（单实例锁会让第二个静默退出，用户以为没反应）。
                     wire::Request::OpenTaskCenter {} => {
                         show(&handle);
+                        // 装完新版又双击图标/重跑安装脚本时，旧进程要把这件事说清楚，
+                        // 否则用户只看到"界面还是旧版本"。
+                        if let Some(version) = pending_restart_version(&root) {
+                            let _ = handle.emit("update-installed", json!({"version": version}));
+                        }
                         json!({"ok":true})
                     }
                     wire::Request::Focus { task_id } => {
@@ -2574,6 +2588,21 @@ fn window_visible(app: &tauri::AppHandle) -> bool {
 #[tauri::command]
 fn pending_update(state: tauri::State<'_, State>) -> Option<String> {
     pending_update_version(&state.root)
+}
+
+/// 安装目录里已经有比当前运行版本更新的版本（=装完没重启）。
+#[tauri::command]
+fn pending_restart(state: tauri::State<'_, State>) -> Option<String> {
+    pending_restart_version(&state.root)
+}
+
+/// 已安装的最高版本比当前进程新时返回它，否则 None。
+fn pending_restart_version(root: &Path) -> Option<String> {
+    let installed = cloudfile_core::update::installed_versions(root).ok()?;
+    let newest = installed.last()?;
+    cloudfile_core::update::compare(newest, cloudfile_core::VERSION)
+        .is_gt()
+        .then(|| newest.clone())
 }
 
 /// 已经提醒过、但还没升上去的版本；没有就返回 None。
@@ -2692,7 +2721,14 @@ mod update_notice_tests {
         // 符号链接祖先（私有目录的安全边界）。用例先规范化，别自己踩这条边界。
         let base =
             std::fs::canonicalize(std::env::temp_dir()).unwrap_or_else(|_| std::env::temp_dir());
-        let dir = base.join(format!("cf-notice-{tag}-{}", std::process::id()));
+        // 目录名带上时间：同一进程重复跑、或上次异常退出留下旧文件时，
+        // "刚提醒过 / 已过期"这类断言会读到脏数据（2026-11-12 全量跑偶发过一次）。
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = base.join(format!("cf-notice-{tag}-{}-{unique}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -2730,6 +2766,39 @@ mod update_notice_tests {
         // 文件坏掉：当作没提醒过，不影响功能。
         std::fs::write(&path, b"not json").unwrap();
         assert!(!announcement_throttled(&root, "2.0.30"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod pending_restart_tests {
+    use super::pending_restart_version;
+    use std::path::PathBuf;
+
+    fn temp_root(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("cf-restart-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        dir
+    }
+
+    /// 装完新版但没重启：能认出"装着的比跑着的新"；只是旧目录残留时不许误报。
+    #[test]
+    fn detects_an_installed_version_that_still_needs_a_restart() {
+        let root = temp_root("detect");
+        assert_eq!(pending_restart_version(&root), None, "空的 bin 目录不该报");
+
+        // 比当前低（历史版本残留）→ 不提示。
+        std::fs::create_dir_all(root.join("bin").join("0.0.1")).unwrap();
+        assert_eq!(pending_restart_version(&root), None);
+
+        // 比当前高 → 就是装完没重启。
+        std::fs::create_dir_all(root.join("bin").join("999.0.0")).unwrap();
+        assert_eq!(pending_restart_version(&root).as_deref(), Some("999.0.0"));
+
+        // 多个版本时取最高的那个。
+        std::fs::create_dir_all(root.join("bin").join("999.1.0")).unwrap();
+        assert_eq!(pending_restart_version(&root).as_deref(), Some("999.1.0"));
         let _ = std::fs::remove_dir_all(&root);
     }
 }
